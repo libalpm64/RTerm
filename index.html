@@ -1,0 +1,3023 @@
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rterm</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0d0d0d;
+    --bg2:       #141414;
+    --bg3:       #1a1a1a;
+    --bg4:       #222222;
+    --border:    #2a2a2a;
+    --border2:   #333;
+    --text:      #e0e0e0;
+    --text2:     #888;
+    --text3:     #555;
+    --accent:    #4fc3f7;
+    --green:     #00ff88;
+    --red:       #ff2437;
+    --yellow:    #dcdcaa;
+    --orange:    #ce9178;
+    --purple:    #c586c0;
+    --blue:      #569cd6;
+  }
+
+  html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); font-size: 12px; overflow: hidden; }
+
+  #titlebar {
+    height: 32px;
+    background: #000;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .traffic { display: flex; gap: 6px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot.red    { background: #ff5f57; }
+  .dot.yellow { background: #febc2e; }
+  .dot.green  { background: #28c840; }
+  #titlebar .title { flex: 1; text-align: center; color: var(--text2); font-size: 12px; }
+
+  #menubar {
+    height: 26px;
+    background: var(--bg2);
+    display: flex;
+    align-items: center;
+    padding: 0 4px;
+    border-bottom: 1px solid var(--border);
+    gap: 2px;
+  }
+  .menu-btn {
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text2);
+    font-size: 12px;
+    position: relative;
+    transition: background .1s, color .1s;
+    user-select: none;
+  }
+  .menu-btn:hover, .menu-btn.active { background: var(--bg4); color: var(--text); }
+
+  .dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    min-width: 180px;
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    padding: 4px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.5);
+    z-index: 1000;
+    display: none;
+  }
+  .dropdown.show { display: block; }
+  .dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text);
+    font-size: 12px;
+    transition: background .1s;
+  }
+  .dropdown-item:hover { background: var(--bg4); }
+  .dropdown-item .shortcut { color: var(--text3); margin-left: auto; font-size: 11px; }
+  .dropdown-divider { height: 1px; background: var(--border); margin: 4px 0; }
+
+  #app { display: flex; height: calc(100vh - 58px); }
+
+  #sidebar {
+    width: 240px;
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex-shrink: 0;
+    transition: width .2s, margin .2s;
+  }
+  #sidebar.collapsed {
+    width: 0;
+    margin-left: -1px;
+  }
+
+  .sidebar-tabs {
+    display: flex;
+    background: var(--bg3);
+    border-bottom: 1px solid var(--border);
+  }
+  .sidebar-tab {
+    flex: 1;
+    padding: 6px 8px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: var(--text3);
+    cursor: pointer;
+    text-align: center;
+    border-bottom: 2px solid transparent;
+    transition: color .1s;
+  }
+  .sidebar-tab:hover { color: var(--text2); }
+  .sidebar-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .sidebar-content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+  .sidebar-panel { flex: 1; display: none; flex-direction: column; overflow: hidden; }
+  .sidebar-panel.active { display: flex; }
+
+  .panel-header {
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 8px;
+    color: var(--text3);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+  }
+  .panel-header .panel-icons { display: flex; gap: 4px; }
+  .panel-icon { cursor: pointer; opacity: .5; font-size: 11px; transition: opacity .1s; }
+  .panel-icon:hover { opacity: 1; }
+  .panel-icon svg { width: 12px; height: 12px; }
+
+  #filer-path {
+    height: 24px;
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+    gap: 4px;
+    color: var(--text2);
+    font-size: 11px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg3);
+  }
+  #filer-path span { cursor: pointer; }
+  #filer-path span:hover { color: var(--accent); }
+  #filer-path .sep { color: var(--text3); }
+
+  #filer-list, #sftp-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+  #filer-list::-webkit-scrollbar, #sftp-list::-webkit-scrollbar { width: 6px; }
+  #filer-list::-webkit-scrollbar-thumb, #sftp-list::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
+
+  .filer-item {
+    display: flex;
+    align-items: center;
+    padding: 3px 10px;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text2);
+    transition: background .1s;
+  }
+  .filer-item:hover { background: var(--bg4); color: var(--text); }
+  .filer-item.selected { background: var(--bg4); color: var(--accent); }
+  .filer-item .icon { width: 14px; height: 14px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  .filer-item .icon svg { width: 14px; height: 14px; }
+  .filer-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .filer-item .size { color: var(--text3); font-size: 10px; margin-left: 8px; }
+
+  .sftp-conn {
+    padding: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .sftp-conn-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text2);
+  }
+  .sftp-conn-status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--red); }
+  .sftp-conn-status.connected .dot { background: var(--green); }
+  .sftp-conn-status .label { flex: 1; }
+
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; background: var(--bg); }
+
+  #tabbar {
+    height: 34px;
+    background: var(--bg2);
+    display: flex;
+    align-items: flex-end;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    padding: 0 4px;
+    flex-shrink: 0;
+  }
+  #tabbar::-webkit-scrollbar { display: none; }
+  .tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 12px;
+    height: 28px;
+    border-radius: 6px 6px 0 0;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text2);
+    background: transparent;
+    border: 1px solid transparent;
+    border-bottom: none;
+    margin-right: 2px;
+    white-space: nowrap;
+    transition: background .1s, color .1s;
+  }
+  .tab:hover { background: var(--bg3); color: var(--text); }
+  .tab.active { background: var(--bg); color: var(--text); border-color: var(--border); }
+  .tab .tab-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+  .tab .tab-dot.yellow { background: var(--yellow); }
+  .tab .tab-indicator { display: flex; align-items: center; }
+  .tab .tab-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .tab .tab-icon { flex-shrink: 0; }
+  .tab .tab-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tab .tab-close { display: flex; align-items: center; justify-content: center; color: var(--text3); cursor: pointer; padding: 2px; border-radius: 50%; opacity: 0; transition: opacity .15s, background .15s; }
+  .tab:hover .tab-close { opacity: 1; }
+  .tab .tab-close:hover { background: rgba(255,255,255,0.1); color: var(--text); }
+  .tab-add { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; color: var(--text3); cursor: pointer; font-size: 18px; transition: color .1s; }
+  .tab-add:hover { color: var(--text); }
+
+  .session-toolbar {
+    height: 26px;
+    background: var(--bg3);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text2);
+    flex-shrink: 0;
+  }
+  .session-toolbar .sep { color: var(--text3); }
+  .session-toolbar .crumb { cursor: pointer; }
+  .session-toolbar .crumb:hover { color: var(--accent); }
+  .toolbar-spacer { flex: 1; }
+  .toolbar-btn { width: 24px; height: 22px; border-radius: 4px; display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--text3); font-size: 12px; transition: background .1s, color .1s; }
+  .toolbar-btn:hover { background: var(--bg4); color: var(--text); }
+  .toolbar-btn svg { width: 14px; height: 14px; }
+
+  #terminal-container { flex: 1; background: #0a0a0a; overflow: hidden; position: relative; min-height: 200px; display: flex !important; }
+  #terminal-container.hidden { display: none !important; }
+  #terminal-container.horizontal { flex-direction: row; }
+  #terminal-container.vertical { flex-direction: column; }
+  #terminals { flex: 1; display: flex; min-height: 200px; min-width: 0; width: 100%; height: 100%; }
+  
+  .xterm { flex: 1 !important; width: 100% !important; height: 100% !important; min-width: 0 !important; min-height: 0 !important; padding: 0 !important; }
+  .xterm-viewport { overflow: hidden !important; flex: 1 !important; }
+  .xterm-viewport::-webkit-scrollbar { display: none !important; }
+  .xterm-screen { width: 100% !important; height: 100% !important; }
+
+  .split-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+  .split-container { display: flex; flex: 1; overflow: hidden; min-width: 0; min-height: 0; }
+  .split-container.horizontal { flex-direction: row; }
+  .split-container.vertical { flex-direction: column; }
+  .split-divider { background: var(--border); flex-shrink: 0; }
+  .split-divider.horizontal { width: 4px; cursor: col-resize; }
+  .split-divider.vertical { height: 4px; cursor: row-resize; }
+  .split-divider:hover { background: var(--accent); }
+  .split-divider.dragging { background: var(--accent); }
+  
+  .split-container > div[id^="term-"] { flex: 1; min-width: 0; min-height: 0; position: relative; overflow: hidden; display: flex; flex-direction: column; }
+
+  .tab.dragging { opacity: 0.5; position: fixed; z-index: 9999; pointer-events: none; }
+  .tab.drag-over { outline: 2px dashed var(--accent); outline-offset: -2px; }
+  .drop-indicator { position: absolute; background: var(--accent); pointer-events: none; z-index: 9998; }
+  .drop-indicator.horizontal { width: 4px; height: 100%; }
+  .drop-indicator.vertical { width: 100%; height: 4px; }
+
+  .panel-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .panel-card h3 { font-size: 13px; font-weight: 600; margin-bottom: 16px; color: var(--accent); }
+
+  #keys-panel { flex: 1; background: var(--bg); overflow-y: auto; }
+  #keys-panel.hidden { display: none !important; }
+
+  #empty-state {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 16px;
+    background: var(--bg);
+  }
+  #empty-state.hidden { display: none; }
+  #empty-state .logo { width: 64px; height: 64px; background: var(--bg3); border-radius: 16px; display: flex; align-items: center; justify-content: center; font-size: 28px; }
+  #empty-state h2 { font-size: 18px; font-weight: 600; color: var(--text); }
+  #empty-state p { color: var(--text2); font-size: 13px; }
+  #empty-state .actions { display: flex; gap: 8px; margin-top: 8px; }
+  #empty-state .btn { padding: 8px 16px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; border: none; transition: background .15s; }
+  #empty-state .btn-primary { background: var(--accent); color: #000; }
+  #empty-state .btn-primary:hover { filter: brightness(1.1); }
+  #empty-state .btn-secondary { background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
+  #empty-state .btn-secondary:hover { background: var(--bg4); }
+
+  .btn { padding: 8px 16px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; border: none; transition: background .15s; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+  .btn-primary { background: var(--accent); color: #000; }
+  .btn-primary:hover { filter: brightness(1.1); }
+  .btn-secondary { background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover { background: var(--bg4); }
+  .btn-danger { background: var(--red); color: #fff; }
+  .btn-danger:hover { filter: brightness(1.1); }
+
+  #right-sidebar {
+    width: 220px;
+    background: var(--bg2);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex-shrink: 0;
+    transition: width .2s, margin .2s;
+  }
+  #right-sidebar.collapsed { width: 0; margin-right: -1px; }
+
+  .rsection { border-bottom: 1px solid var(--border); }
+  .rsection-header {
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 8px;
+    color: var(--text3);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+  }
+  .rsection-header .rsection-actions { display: flex; gap: 4px; }
+  .rsection-action { cursor: pointer; opacity: .5; transition: opacity .1s; }
+  .rsection-action:hover { opacity: 1; }
+  .rsection-action svg { width: 12px; height: 12px; }
+
+  .session-list { padding: 4px 0; max-height: 300px; overflow-y: auto; }
+  .session-list::-webkit-scrollbar { width: 6px; }
+  .session-list::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
+
+  .session-item {
+    padding: 6px 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    transition: background .1s;
+  }
+  .session-item:hover { background: var(--bg4); }
+  .session-item .sicon { width: 16px; height: 16px; flex-shrink: 0; }
+  .session-item .sicon svg { width: 16px; height: 16px; }
+  .session-item .sinfo { flex: 1; min-width: 0; }
+  .session-item .sname { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-item .shost { font-size: 10px; color: var(--text3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-item .sactions { display: none; gap: 2px; }
+  .session-item:hover .sactions { display: flex; }
+  .session-item .saction { cursor: pointer; opacity: .5; padding: 2px; border-radius: 3px; }
+  .session-item .saction:hover { opacity: 1; background: var(--bg3); }
+  .session-item .saction svg { width: 12px; height: 12px; }
+
+  .sempty { padding: 12px 8px; text-align: center; color: var(--text3); font-size: 11px; }
+
+  .history-list { padding: 4px 0; max-height: 200px; overflow-y: auto; }
+  .history-item {
+    padding: 4px 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text2);
+    transition: background .1s;
+  }
+  .history-item:hover { background: var(--bg4); color: var(--text); }
+  .history-item .dot { width: 4px; height: 4px; border-radius: 50%; background: var(--text3); }
+
+  #statusbar {
+    height: 22px;
+    background: var(--bg3);
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    gap: 12px;
+    font-size: 11px;
+    color: var(--text2);
+    flex-shrink: 0;
+    border-top: 1px solid var(--border);
+  }
+  .status-sep { color: var(--text3); }
+  #statusbar .spacer { flex: 1; }
+  #statusbar .accent { color: var(--accent); cursor: pointer; }
+
+  #modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.7);
+    backdrop-filter: blur(4px);
+    z-index: 2000;
+    display: none;
+    align-items: center;
+    justify-content: center;
+  }
+  #modal-overlay.show { display: flex; }
+  .modal {
+    background: var(--bg2);
+    border: 1px solid var(--border2);
+    border-radius: 8px;
+    width: 520px;
+    max-height: 80vh;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0,0,0,.6);
+  }
+  .modal-header {
+    display: flex;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .modal-header h3 { font-size: 14px; font-weight: 600; flex: 1; }
+  .modal-header .close-btn { cursor: pointer; color: var(--text3); font-size: 16px; padding: 4px; border-radius: 4px; }
+  .modal-header .close-btn:hover { color: var(--text); background: var(--bg4); }
+
+  .modal-tabs {
+    display: flex;
+    background: var(--bg3);
+    border-bottom: 1px solid var(--border);
+    padding: 0 8px;
+  }
+  .modal-tab {
+    padding: 8px 14px;
+    font-size: 12px;
+    color: var(--text2);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color .1s;
+  }
+  .modal-tab:hover { color: var(--text); }
+  .modal-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .modal-body {
+    padding: 20px;
+    overflow-y: auto;
+    max-height: calc(80vh - 120px);
+  }
+
+  .form-group { margin-bottom: 16px; }
+  .form-group label {
+    display: block;
+    font-size: 11px;
+    color: var(--text2);
+    margin-bottom: 6px;
+    font-weight: 500;
+  }
+  .form-group input, .form-group select {
+    width: 100%;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 12px;
+    padding: 8px 10px;
+    outline: none;
+    font-family: 'Inter', sans-serif;
+    transition: border-color .15s;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+  .form-group select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 30px;
+    cursor: pointer;
+  }
+  .form-group input:focus, .form-group select:focus { border-color: var(--accent); }
+  .form-group input[type="password"] { font-family: monospace; }
+  .form-row { display: flex; gap: 12px; }
+  .form-row .form-group { flex: 1; }
+  .form-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .form-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+
+  .modal-footer {
+    display: flex;
+    gap: 8px;
+    padding: 16px 20px;
+    border-top: 1px solid var(--border);
+  }
+  .modal-footer .btn-cancel { background: var(--bg3); color: var(--text2); }
+  .modal-footer .btn-cancel:hover { background: var(--bg4); }
+  .modal-footer .btn-primary { background: var(--accent); color: #000; flex: 1; }
+  .modal-footer .btn-secondary { background: var(--bg4); color: var(--text); }
+  .modal-footer .btn-secondary:hover { background: var(--border); }
+  .modal-footer .btn-danger { background: var(--red); color: white; }
+
+  #ssh-fields, #telnet-fields, #serial-fields { display: none; }
+
+  .settings-section { margin-bottom: 20px; }
+  .settings-section h4 { font-size: 11px; color: var(--text3); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 12px; }
+  .setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .setting-row:last-child { border-bottom: none; }
+  .setting-label { font-size: 12px; color: var(--text); flex: 1; }
+  .setting-label small { display: block; color: var(--text3); font-size: 10px; margin-top: 2px; }
+  
+  .setting-row select, .setting-row input[type="number"], .setting-row input[type="text"], .setting-row input[type="password"] {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 12px;
+    padding: 6px 10px;
+    outline: none;
+    width: 140px;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+  .setting-row select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    padding-right: 26px;
+    cursor: pointer;
+  }
+  .setting-row input:focus, .setting-row select:focus { border-color: var(--accent); }
+
+  .toggle { width: 36px; height: 20px; background: var(--bg4); border-radius: 10px; cursor: pointer; position: relative; transition: background .2s; flex-shrink: 0; }
+  .toggle.on { background: var(--accent); }
+  .toggle::after { content: ''; position: absolute; width: 16px; height: 16px; background: white; border-radius: 50%; top: 2px; left: 2px; transition: transform .2s; }
+  .toggle.on::after { transform: translateX(16px); }
+
+  .key-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background .1s;
+  }
+  .key-item:hover { background: var(--bg4); }
+  .key-item.selected { background: var(--bg4); }
+  .key-item .key-icon { color: var(--blue); }
+  .key-item .key-info { flex: 1; }
+  .key-item .key-name { font-size: 12px; color: var(--text); }
+  .key-item .key-path { font-size: 10px; color: var(--text3); font-family: 'JetBrains Mono', monospace; }
+  
+  .keys-list .key-item { padding: 6px 8px; }
+  .keys-list .key-item .key-icon svg { width: 14px; height: 14px; }
+  .keys-list .key-item span:not(.key-icon) { font-size: 12px; }
+
+  #context-menu {
+    position: fixed;
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    padding: 4px;
+    z-index: 3000;
+    min-width: 160px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.5);
+    display: none;
+  }
+  #context-menu.show { display: block; }
+
+  .about-content { text-align: center; padding: 20px; }
+  .about-content .logo { font-size: 48px; margin-bottom: 16px; }
+  .about-content h2 { font-size: 18px; margin-bottom: 8px; }
+  .about-content p { color: var(--text2); font-size: 12px; margin-bottom: 4px; }
+  .about-content .version { color: var(--accent); font-size: 11px; margin-top: 12px; }
+
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+</style>
+</head>
+<body>
+
+<div id="titlebar">
+  <div class="traffic">
+    <div class="dot red"></div>
+    <div class="dot yellow"></div>
+    <div class="dot green"></div>
+  </div>
+  <div class="title">Rterm</div>
+</div>
+
+<div id="menubar">
+  <div class="menu-btn" id="menu-file-btn">File
+    <div class="dropdown" id="menu-file">
+      <div class="dropdown-item" id="action-new">New Session <span class="shortcut">Ctrl+N</span></div>
+      <div class="dropdown-item" id="action-connect">Connect...</div>
+      <div class="dropdown-divider"></div>
+      <div class="dropdown-item" id="action-settings">Settings</div>
+      <div class="dropdown-divider"></div>
+      <div class="dropdown-item" id="action-exit">Exit</div>
+    </div>
+  </div>
+  <div class="menu-btn" id="menu-edit-btn">Edit
+    <div class="dropdown" id="menu-edit">
+      <div class="dropdown-item" id="action-copy">Copy</div>
+      <div class="dropdown-item" id="action-paste">Paste</div>
+      <div class="dropdown-item" id="action-selectall">Select All</div>
+      <div class="dropdown-divider"></div>
+      <div class="dropdown-item" id="action-clear">Clear Terminal</div>
+    </div>
+  </div>
+  <div class="menu-btn" id="menu-view-btn">View
+    <div class="dropdown" id="menu-view">
+      <div class="dropdown-item" id="action-toggle-filer">Toggle Explorer</div>
+      <div class="dropdown-item" id="action-toggle-sessions">Toggle Sessions</div>
+      <div class="dropdown-divider"></div>
+      <div class="dropdown-item" id="action-zoomin">Zoom In <span class="shortcut">Ctrl++</span></div>
+      <div class="dropdown-item" id="action-zoomout">Zoom Out <span class="shortcut">Ctrl+-</span></div>
+      <div class="dropdown-item" id="action-zoomreset">Reset Zoom <span class="shortcut">Ctrl+0</span></div>
+    </div>
+  </div>
+  <div class="menu-btn" id="menu-session-btn">Session
+    <div class="dropdown" id="menu-session">
+      <div class="dropdown-item" id="action-split-h">Split Horizontal</div>
+      <div class="dropdown-item" id="action-split-v">Split Vertical</div>
+      <div class="dropdown-divider"></div>
+      <div class="dropdown-item" id="action-close-tab">Close Tab <span class="shortcut">Ctrl+W</span></div>
+      <div class="dropdown-item" id="action-close-all">Close All Tabs</div>
+    </div>
+  </div>
+  <div class="menu-btn" id="menu-keys-btn">SSH Keys
+    <div class="dropdown" id="menu-keys">
+      <div class="dropdown-item" id="action-keys-open">Open SSH Key Manager</div>
+      <div class="dropdown-divider"></div>
+      <div class="dropdown-item" id="action-keys-agent">SSH Agent <span class="agent-status" style="margin-left:8px;color:var(--green)">Running</span></div>
+    </div>
+  </div>
+  <div class="menu-btn" id="menu-help-btn">Help
+    <div class="dropdown" id="menu-help">
+      <div class="dropdown-item" id="action-about">About Rterm</div>
+      <div class="dropdown-item" id="action-docs">Documentation</div>
+      <div class="dropdown-item" id="action-issue">Report Issue</div>
+    </div>
+  </div>
+</div>
+
+<div id="app">
+
+  <div id="sidebar">
+    <div class="sidebar-tabs">
+      <div class="sidebar-tab active" data-panel="local">Local</div>
+      <div class="sidebar-tab" data-panel="sftp">SFTP</div>
+    </div>
+
+    <div class="sidebar-content">
+      <div class="sidebar-panel active" id="panel-local">
+        <div class="panel-header">
+          Explorer
+          <div class="panel-icons">
+            <span class="panel-icon" id="filer-refresh">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"></path></svg>
+            </span>
+            <span class="panel-icon" id="filer-toggle">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
+            </span>
+          </div>
+        </div>
+        <div id="filer-path">
+          <span>~</span><span class="sep">/</span><span style="color:var(--accent)">home</span>
+        </div>
+        <div id="filer-list">
+          <div class="filer-item selected" data-type="dir">
+            <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path></svg></span>
+            <span class="name">Projects</span>
+          </div>
+          <div class="filer-item" data-type="dir">
+            <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path></svg></span>
+            <span class="name">Downloads</span>
+          </div>
+          <div class="filer-item" data-type="file">
+            <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--text2)" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg></span>
+            <span class="name">.bashrc</span>
+            <span class="size">2.1K</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-panel" id="panel-sftp">
+        <div class="sftp-conn">
+          <div class="sftp-conn-status" id="sftp-status">
+            <span class="dot"></span>
+            <span class="label">Not connected</span>
+          </div>
+        </div>
+        <div class="panel-header">
+          Remote Files
+          <div class="panel-icons">
+            <span class="panel-icon" id="sftp-refresh">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"></path></svg>
+            </span>
+          </div>
+        </div>
+        <div id="sftp-path" style="height:24px;display:flex;align-items:center;padding:0 8px;gap:4px;color:var(--text2);font-size:11px;border-bottom:1px solid var(--border);background:var(--bg3)">
+          <span style="color:var(--text3)">/</span><span style="color:var(--accent)">home</span><span style="color:var(--text3)">/</span><span>user</span>
+        </div>
+        <div id="sftp-list">
+          <div class="filer-item selected" data-type="dir">
+            <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path></svg></span>
+            <span class="name">www</span>
+          </div>
+          <div class="filer-item" data-type="dir">
+            <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path></svg></span>
+            <span class="name">logs</span>
+          </div>
+          <div class="filer-item" data-type="file">
+            <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--text2)" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg></span>
+            <span class="name">server.conf</span>
+            <span class="size">4.2K</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="tabbar">
+      <div class="tab-add" id="tab-add-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+      </div>
+    </div>
+
+    <div class="session-toolbar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+      <span class="crumb">shell</span>
+      <span class="sep">/</span>
+      <span class="crumb">sessions</span>
+      <span class="sep">/</span>
+      <span class="crumb" id="current-session" style="color:var(--text)">Terminal 2</span>
+      <div class="toolbar-spacer"></div>
+      <div class="toolbar-btn" id="zoom-in-btn" title="Zoom In">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="11" y1="8" x2="11" y2="14"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
+      </div>
+      <div class="toolbar-btn" id="new-session-btn" title="New Session">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+      </div>
+      <div class="toolbar-btn" id="menu-btn" title="Quick Actions">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+      </div>
+    </div>
+
+    <div id="terminal-container" class="">
+      <div id="terminals"></div>
+    </div>
+
+    <div id="empty-state">
+      <div class="logo">⌨</div>
+      <h2>Welcome to Rterm</h2>
+      <p>Create a new session to get started</p>
+      <div class="actions">
+        <button class="btn btn-primary" id="empty-new-btn">New Session</button>
+        <button class="btn btn-secondary" id="empty-connect-btn">Connect</button>
+      </div>
+    </div>
+
+    <!-- SSH Keys Panel -->
+    <div id="keys-panel" class="hidden" style="flex: 1 1 0%; display: none; flex-direction: column; background: var(--bg);">
+      <div style="display:flex;align-items:center;gap:4px;padding:8px 12px;background:var(--bg3);border-bottom:1px solid var(--border);">
+        <span class="toolbar-btn" id="keys-new-btn" title="New Key">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        </span>
+        <span class="toolbar-btn" id="keys-import-btn" title="Import Key">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+        </span>
+        <span class="toolbar-btn" id="keys-export-btn" title="Export Key">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        </span>
+        <span class="sep" style="color:var(--text3);margin:0 8px;">|</span>
+        <span class="toolbar-btn" id="keys-copy-btn" title="Copy Public Key">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"></path></svg>
+        </span>
+        <span class="toolbar-btn" id="keys-delete-btn" title="Delete Key">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path></svg>
+        </span>
+        <span class="toolbar-spacer"></span>
+        <span class="toolbar-btn" id="keys-refresh-btn" title="Refresh">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M23 4v6h-6M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"></path></svg>
+        </span>
+      </div>
+
+      <div style="display:flex;flex:1;overflow:hidden;">
+        <div style="width:200px;background:var(--bg2);border-right:1px solid var(--border);overflow-y:auto;padding:8px;">
+          <div style="font-size:10px;text-transform:uppercase;color:var(--text3);padding:4px 8px;margin-bottom:4px;">SSH Keys</div>
+          <div id="keys-list" class="keys-list">
+            <div class="key-item selected" data-key="id_ed25519">
+              <span class="key-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="1.5" width="14" height="14"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+              </span>
+              <span style="font-size:12px;color:var(--text);">id_ed25519</span>
+            </div>
+            <div class="key-item" data-key="id_rsa">
+              <span class="key-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="1.5" width="14" height="14"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+              </span>
+              <span style="font-size:12px;color:var(--text);">id_rsa</span>
+            </div>
+            <div class="key-item" data-key="github_key">
+              <span class="key-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="1.5" width="14" height="14"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+              </span>
+              <span style="font-size:12px;color:var(--text);">github_key</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="flex:1;padding:20px;overflow-y:auto;">
+          <div id="key-details">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
+              <div style="width:48px;height:48px;background:var(--bg3);border-radius:8px;display:flex;align-items:center;justify-content:center;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="1.5" width="24" height="24"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+              </div>
+              <div>
+                <h2 style="font-size:16px;font-weight:600;color:var(--text);" id="selected-key-name">id_ed25519</h2>
+                <p style="font-size:12px;color:var(--text3);" id="selected-key-path">~/.ssh/id_ed25519</p>
+              </div>
+            </div>
+
+            <div class="panel-card" style="margin-bottom:16px;">
+              <h3 style="font-size:11px;text-transform:uppercase;color:var(--text3);margin-bottom:12px;">Public Key</h3>
+              <div style="background:var(--bg);padding:10px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text2);word-break:break-all;user-select:text;">
+                ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBt2LW7qT8bZ7vMKvF6zJq2fY6x8hK9jL2mN4oP5qQ8 user@hostname
+              </div>
+              <button class="btn btn-secondary" id="copy-pubkey-btn" style="margin-top:8px;display:inline-flex;align-items:center;gap:6px;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"></path></svg>
+                Copy to Clipboard
+              </button>
+            </div>
+
+            <div class="panel-card" style="margin-bottom:16px;">
+              <h3 style="font-size:11px;text-transform:uppercase;color:var(--text3);margin-bottom:12px;">Key Details</h3>
+              <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;font-size:12px;">
+                <div style="color:var(--text3);">Type:</div>
+                <div style="color:var(--text);">ED25519</div>
+                <div style="color:var(--text3);">Size:</div>
+                <div style="color:var(--text);">256 bits</div>
+                <div style="color:var(--text3);">Fingerprint:</div>
+                <div style="color:var(--text2);font-family:monospace;font-size:10px;">SHA256:abc123...</div>
+                <div style="color:var(--text3);">Created:</div>
+                <div style="color:var(--text);">2024-01-15</div>
+                <div style="color:var(--text3);">Comment:</div>
+                <div style="color:var(--text);">user@hostname</div>
+              </div>
+            </div>
+
+            <div class="panel-card">
+              <h3 style="font-size:11px;text-transform:uppercase;color:var(--text3);margin-bottom:12px;">Generate New Key</h3>
+              <div class="form-row-2">
+                <div class="form-group">
+                  <label>Key Type</label>
+                  <select id="gen-key-type">
+                    <option value="ed25519">Ed25519 (Recommended)</option>
+                    <option value="rsa">RSA</option>
+                    <option value="ecdsa">ECDSA</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Key Name</label>
+                  <input type="text" id="gen-key-name" placeholder="my_key">
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Passphrase (optional)</label>
+                <input type="password" id="gen-key-pass" placeholder="Enter passphrase">
+              </div>
+              <div class="form-group">
+                <label>Comment</label>
+                <input type="text" id="gen-key-comment" placeholder="user@hostname">
+              </div>
+              <button class="btn btn-primary" id="gen-key-btn" style="margin-top:12px;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                Generate SSH Key
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="statusbar">
+      <span id="status-mode">Local Mode</span>
+      <span class="status-sep">|</span>
+      <span id="status-size">108x28</span>
+      <span class="status-sep">|</span>
+      <span id="status-cursor">Ln 5, Col 3</span>
+      <span class="status-sep">|</span>
+      <span>UTF-8</span>
+      <span class="status-sep">|</span>
+      <span>bash</span>
+      <span class="spacer"></span>
+      <span class="accent" id="about-btn">Rterm</span>
+    </div>
+  </div>
+
+  <div id="right-sidebar">
+    <div class="rsection-header">
+      Sessions
+      <div class="rsection-actions">
+        <span class="rsection-action" id="rs-add-session" title="Add Session">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        </span>
+      </div>
+    </div>
+    <div class="session-list" id="session-list"><div class="sempty">No saved sessions</div></div>
+
+    <div class="rsection" style="flex:1;overflow:hidden;display:flex;flex-direction:column;">
+      <div class="rsection-header">
+        Command History
+        <div class="rsection-actions">
+          <span class="rsection-action" id="rs-clear-history" title="Clear">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path></svg>
+          </span>
+        </div>
+      </div>
+      <div class="history-list" id="history-list">
+        <div class="history-item"><span class="dot"></span>ls -la</div>
+        <div class="history-item"><span class="dot"></span>cd ~/Projects</div>
+        <div class="history-item"><span class="dot"></span>git status</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="context-menu">
+  <div class="dropdown-item" id="ctx-copy">Copy</div>
+  <div class="dropdown-item" id="ctx-paste">Paste</div>
+  <div class="dropdown-divider"></div>
+  <div class="dropdown-item" id="ctx-split-h">Split Horizontal</div>
+  <div class="dropdown-item" id="ctx-split-v">Split Vertical</div>
+  <div class="dropdown-divider"></div>
+  <div class="dropdown-item" id="ctx-clear">Clear Terminal</div>
+  <div class="dropdown-item" id="ctx-zoom">Reset Font Size</div>
+</div>
+
+<!-- MODAL -->
+<div id="modal-overlay" class="">
+  <div class="modal" id="modal-content">
+    <div class="modal-header">
+      <h3 id="modal-title">Settings</h3>
+      <span class="close-btn" id="modal-close-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </span>
+    </div>
+
+    <div id="modal-connect" style="display: none;">
+      <div class="modal-tabs">
+        <div class="modal-tab active" data-type="local">Local</div>
+        <div class="modal-tab" data-type="ssh">SSH</div>
+        <div class="modal-tab" data-type="telnet">Telnet</div>
+        <div class="modal-tab" data-type="serial">Serial</div>
+      </div>
+
+      <div class="modal-body">
+        <div id="local-fields">
+          <div class="form-group">
+            <label>Session Name</label>
+            <input type="text" id="local-name" placeholder="Local Shell">
+          </div>
+          <div class="form-group">
+            <label>Shell</label>
+            <select id="local-shell">
+              <option value="">Default</option>
+              <option value="/bin/bash">bash</option>
+              <option value="/bin/zsh">zsh</option>
+              <option value="/bin/sh">sh</option>
+            </select>
+          </div>
+          <div class="form-group" style="display:flex;align-items:center;justify-content:space-between;">
+            <label style="margin:0">Save Session</label>
+            <div class="toggle on" id="local-save-toggle"></div>
+          </div>
+        </div>
+
+        <div id="ssh-fields" style="display:none;">
+          <div class="form-group">
+            <label>Session Name</label>
+            <input type="text" id="ssh-name" placeholder="My Server" value="Alpine Server">
+          </div>
+          <div class="form-group">
+            <label>Host</label>
+              <input type="text" id="ssh-host" placeholder="hostname or IP" value="">
+          </div>
+          <div class="form-row-3">
+            <div class="form-group">
+              <label>Port</label>
+              <input type="number" id="ssh-port" value="22">
+            </div>
+            <div class="form-group">
+              <label>Username</label>
+              <input type="text" id="ssh-user" placeholder="user" value="root">
+            </div>
+            <div class="form-group">
+              <label>Term Type</label>
+              <select id="ssh-term">
+                <option value="xterm-256color" selected="">xterm-256color</option>
+                <option value="xterm">xterm</option>
+                <option value="vt100">vt100</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Authentication</label>
+            <select id="ssh-auth-method">
+              <option value="password">Password</option>
+              <option value="key">SSH Key</option>
+              <option value="agent">SSH Agent</option>
+            </select>
+          </div>
+          <div id="ssh-password-fields">
+            <div class="form-group">
+              <label>Password</label>
+              <input type="password" id="ssh-pass" placeholder="Enter password" value="">
+            </div>
+          </div>
+          <div id="ssh-key-fields" style="display:none;">
+            <div class="form-group">
+              <label>Private Key</label>
+              <select id="ssh-key-select">
+                <option value="">Select a key...</option>
+                <option value="~/.ssh/id_rsa">~/.ssh/id_rsa</option>
+                <option value="~/.ssh/id_ed25519">~/.ssh/id_ed25519</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Passphrase</label>
+              <input type="password" id="ssh-key-pass" placeholder="Key passphrase (optional)">
+            </div>
+          </div>
+          <div class="form-group" style="display:flex;align-items:center;justify-content:space-between;">
+            <label style="margin:0">Save Session</label>
+            <div class="toggle on" id="ssh-save-toggle"></div>
+          </div>
+        </div>
+
+        <div id="telnet-fields" style="display:none;">
+          <div class="form-group">
+            <label>Session Name</label>
+            <input type="text" id="telnet-name" placeholder="Telnet Session">
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Host</label>
+              <input type="text" id="telnet-host" placeholder="hostname or IP">
+            </div>
+            <div class="form-group">
+              <label>Port</label>
+              <input type="number" id="telnet-port" value="23">
+            </div>
+          </div>
+          <div class="form-group" style="display:flex;align-items:center;justify-content:space-between;">
+            <label style="margin:0">Save Session</label>
+            <div class="toggle on" id="telnet-save-toggle"></div>
+          </div>
+        </div>
+
+        <div id="serial-fields" style="display:none;">
+          <div class="form-group">
+            <label>Session Name</label>
+            <input type="text" id="serial-name" placeholder="Serial Session">
+          </div>
+          <div class="form-group">
+            <label>Port</label>
+            <select id="serial-port">
+              <option value="">Select a port...</option>
+              <option value="/dev/ttyUSB0">/dev/ttyUSB0</option>
+              <option value="/dev/ttyUSB1">/dev/ttyUSB1</option>
+            </select>
+          </div>
+          <div class="form-row-2">
+            <div class="form-group">
+              <label>Baud Rate</label>
+              <select id="serial-baud">
+                <option value="9600">9600</option>
+                <option value="19200">19200</option>
+                <option value="38400">38400</option>
+                <option value="57600">57600</option>
+                <option value="115200" selected="">115200</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Data Bits</label>
+              <select id="serial-bits">
+                <option value="5">5</option>
+                <option value="6">6</option>
+                <option value="7">7</option>
+                <option value="8" selected="">8</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group" style="display:flex;align-items:center;justify-content:space-between;">
+            <label style="margin:0">Save Session</label>
+            <div class="toggle on" id="serial-save-toggle"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-cancel" id="modal-cancel-btn">Cancel</button>
+        <button class="btn btn-primary" id="modal-connect-btn">Connect</button>
+      </div>
+    </div>
+
+    <div id="modal-settings" style="display: none;">
+      <div class="modal-tabs">
+        <div class="modal-tab" data-settings="terminal">Terminal</div>
+        <div class="modal-tab" data-settings="appearance">Appearance</div>
+        <div class="modal-tab" data-settings="connection">Connection</div>
+        <div class="modal-tab active" data-settings="security">Security</div>
+        <div class="modal-tab" data-settings="sftp">SFTP</div>
+      </div>
+
+      <div class="modal-body">
+        <div id="settings-terminal" class="settings-content tab-content">
+          <div class="settings-section">
+            <h4>Text</h4>
+            <div class="setting-row">
+              <div class="setting-label">Font Size<small>Terminal font size</small></div>
+              <select id="setting-font">
+                <option value="10">10px</option>
+                <option value="12">12px</option>
+                <option value="13" selected="">13px</option>
+                <option value="14">14px</option>
+                <option value="16">16px</option>
+                <option value="18">18px</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">Cursor Style<small>Terminal cursor shape</small></div>
+              <select id="setting-cursor">
+                <option value="block" selected="">Block</option>
+                <option value="underline">Underline</option>
+                <option value="bar">Bar</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">Cursor Blink<small>Animate the cursor</small></div>
+              <div class="toggle on" id="setting-cursor-blink"></div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h4>Behavior</h4>
+            <div class="setting-row">
+              <div class="setting-label">Scrollback<small>Lines in scrollback buffer</small></div>
+              <input type="number" id="setting-scrollback" value="10000">
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">Bell<small>Play sound on terminal bell</small></div>
+              <div class="toggle" id="setting-bell"></div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">Copy on Select<small>Auto-copy selection to clipboard</small></div>
+              <div class="toggle on" id="setting-copy-select"></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="settings-appearance" class="settings-content tab-content">
+          <div class="settings-section">
+            <h4>Color Scheme</h4>
+            <div class="setting-row">
+              <div class="setting-label">Theme<small>Terminal color theme</small></div>
+              <select id="setting-theme">
+                <option value="default" selected="">Default Dark</option>
+                <option value="monokai">Monokai</option>
+                <option value="solarized">Solarized</option>
+                <option value="nord">Nord</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div id="settings-connection" class="settings-content tab-content">
+          <div class="settings-section">
+            <h4>SSH Defaults</h4>
+            <div class="setting-row">
+              <div class="setting-label">Default Port<small>SSH default port</small></div>
+              <input type="number" id="setting-ssh-port" value="22">
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">Keep Alive<small>Keepalive interval (seconds, 0=off)</small></div>
+              <input type="number" id="setting-keepalive" value="0">
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">Compression<small>Enable SSH compression</small></div>
+              <div class="toggle" id="setting-compression"></div>
+            </div>
+          </div>
+          <div class="settings-section">
+            <h4>Serial Defaults</h4>
+            <div class="setting-row">
+              <div class="setting-label">Default Baud Rate<small>Serial default baud rate</small></div>
+              <select id="setting-serial-baud">
+                <option value="9600">9600</option>
+                <option value="19200">19200</option>
+                <option value="38400">38400</option>
+                <option value="57600">57600</option>
+                <option value="115200" selected="">115200</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">Default Data Bits<small>Serial data bits</small></div>
+              <select id="setting-serial-bits">
+                <option value="5">5</option>
+                <option value="6">6</option>
+                <option value="7">7</option>
+                <option value="8" selected="">8</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div id="settings-security" class="settings-content tab-content active">
+          <div class="settings-section">
+            <h4>Vault Encryption</h4>
+            <div class="setting-row">
+              <div class="setting-label">Enable Vault<small>Encrypt saved passwords with vault</small></div>
+              <div class="toggle" id="setting-vault"></div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">Vault Password<small>Master password for vault</small></div>
+              <input type="password" id="setting-vault-pass" placeholder="Set master password">
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h4>Hashing Algorithm</h4>
+            <div class="setting-row">
+              <div class="setting-label">Password Hash<small>Algorithm for password hashing</small></div>
+              <select id="setting-hash-algo">
+                <option value="argon2" selected="">Argon2id</option>
+                <option value="bcrypt">Bcrypt</option>
+                <option value="scrypt">Scrypt</option>
+                <option value="sha256">SHA-256</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h4>Session Security</h4>
+            <div class="setting-row">
+              <div class="setting-label">Lock Timeout<small>Lock app after inactivity (minutes)</small></div>
+              <input type="number" id="setting-lock-timeout" value="0">
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">Confirm Exit<small>Confirm before closing with active sessions</small></div>
+              <div class="toggle on" id="setting-confirm-exit"></div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">Clear on Close<small>Clear scrollback on tab close</small></div>
+              <div class="toggle" id="setting-clear-close"></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="settings-sftp" class="settings-content tab-content">
+          <div class="settings-section">
+            <h4>Transfer Settings</h4>
+            <div class="setting-row">
+              <div class="setting-label">Concurrent Downloads<small>Number of parallel transfers</small></div>
+              <input type="number" id="setting-sftp-concurrent" value="3" min="1" max="10">
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">Max Speed<small>Transfer speed limit (KB/s, 0=unlimited)</small></div>
+              <input type="number" id="setting-sftp-speed" value="0">
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">Preserve Timestamps<small>Keep file modification times</small></div>
+              <div class="toggle on" id="setting-sftp-timestamps"></div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">Auto Resume<small>Resume interrupted transfers</small></div>
+              <div class="toggle on" id="setting-sftp-resume"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-primary" id="settings-done-btn">Done</button>
+      </div>
+    </div>
+
+    <!-- SSH Keys Modal -->
+    <div id="modal-keys" style="display:none;">
+      <div class="modal-header">
+        <h3>SSH Key Manager</h3>
+        <span class="close-btn" id="keys-close-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </span>
+      </div>
+
+      <div class="modal-body">
+        <div class="settings-section">
+          <h4>Generate New Key</h4>
+          <div class="form-row-2">
+            <div class="form-group">
+              <label>Key Type</label>
+              <select id="gen-key-type">
+                <option value="ed25519">Ed25519 (Recommended)</option>
+                <option value="rsa">RSA</option>
+                <option value="ecdsa">ECDSA</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Key Size/Bits</label>
+              <select id="gen-key-size">
+                <option value="256">256 (ECDSA)</option>
+                <option value="384">384 (ECDSA)</option>
+                <option value="4096">4096 (RSA)</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Key Name</label>
+            <input type="text" id="gen-key-name" placeholder="my_key">
+          </div>
+          <div class="form-group">
+            <label>Passphrase</label>
+            <input type="password" id="gen-key-pass" placeholder="Enter passphrase (optional)">
+          </div>
+          <div class="form-group">
+            <label>Comment</label>
+            <input type="text" id="gen-key-comment" placeholder="user@hostname">
+          </div>
+          <button class="btn btn-primary" id="gen-key-btn" style="width:100%;margin-top:8px;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align:middle;margin-right:6px;"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+            Generate SSH Key
+          </button>
+        </div>
+
+        <div class="settings-section">
+          <h4>Your SSH Keys</h4>
+          <div id="keys-list">
+            <div class="key-item">
+              <span class="key-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="1.5" width="16" height="16"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+              </span>
+              <div class="key-info">
+                <div class="key-name">id_ed25519</div>
+                <div class="key-path">~/.ssh/id_ed25519</div>
+              </div>
+              <div class="sactions" style="display:flex;gap:4px;">
+                <span class="saction" title="Copy Public Key">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"></path></svg>
+                </span>
+                <span class="saction" title="Delete">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path></svg>
+                </span>
+              </div>
+            </div>
+            <div class="key-item">
+              <span class="key-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="1.5" width="16" height="16"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+              </span>
+              <div class="key-info">
+                <div class="key-name">id_rsa</div>
+                <div class="key-path">~/.ssh/id_rsa</div>
+              </div>
+              <div class="sactions" style="display:flex;gap:4px;">
+                <span class="saction" title="Copy Public Key">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"></path></svg>
+                </span>
+                <span class="saction" title="Delete">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path></svg>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h4>SSH Agent</h4>
+          <div class="setting-row">
+            <div class="setting-label">Enable SSH Agent<small>Forward agent connections to remote hosts</small></div>
+            <div class="toggle on" id="setting-ssh-agent"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="import-key-btn">Import Key</button>
+        <button class="btn btn-primary" id="keys-done-btn">Done</button>
+      </div>
+    </div>
+
+    <div id="modal-about" style="display: block;">
+      <div style="padding:24px;text-align:center;">
+        <div style="width:48px;height:48px;background:var(--bg3);border-radius:12px;display:flex;align-items:center;justify-content:center;margin:0 auto 12px;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" width="24" height="24"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+        </div>
+        <h2 style="font-size:16px;font-weight:600;margin-bottom:4px;">Rterm</h2>
+        <p style="color:var(--text2);font-size:12px;margin-bottom:4px;">A modern terminal emulator</p>
+        <p style="color:var(--accent);font-size:12px;margin-bottom:20px;">v1.0.0 · by <strong>@Libalpm64</strong></p>
+        
+        <div style="padding-top:16px;border-top:1px solid var(--border);text-align:left;">
+          <p style="color:var(--text3);font-size:12px;line-height:1.6;">
+            Built with: <span style="color:var(--text2);">Tauri</span>, <span style="color:var(--text2);">Rust</span>, <span style="color:var(--text2);">xterm.js</span>, <span style="color:var(--text2);">ssh2</span><br>
+            License: <span style="color:var(--text2);">MIT</span> · Free and open source
+          </p>
+          <p style="color:var(--text3);font-size:12px;margin-top:12px;">If you paid for this, you were scammed. Great inspiration from <strong style="color:var(--text2);">WindTerm</strong>, much love to their team.</p>
+          <a href="https://github.com/libalpm64/RTerm" target="_blank" style="color:var(--accent);font-size:12px;text-decoration:none;margin-top:10px;display:inline-flex;align-items:center;gap:6px;">
+            <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"></path></svg>
+            Rterm
+          </a>
+        </div>
+      </div>
+      <div class="modal-footer" style="justify-content:center;border-top:1px solid var(--border);padding:12px 20px;">
+        <button class="btn btn-primary" id="about-close-btn">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Generate SSH Key Modal -->
+<div id="generate-key-modal" style="position: fixed; inset: 0px; background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(4px); z-index: 3000; display: none; align-items: center; justify-content: center;">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:8px;width:400px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);">
+    <div style="display:flex;align-items:center;padding:16px 20px;border-bottom:1px solid var(--border);">
+      <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" width="20" height="20" style="margin-right:10px;"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+      <h3 style="font-size:14px;font-weight:600;flex:1;">Generate New SSH Key</h3>
+      <span id="gen-key-close" style="cursor:pointer;color:var(--text3);font-size:16px;padding:4px;border-radius:4px;">×</span>
+    </div>
+    <div style="padding:20px;">
+      <div class="form-group">
+        <label>Key Name</label>
+        <input type="text" id="gen-key-modal-name" placeholder="my_key" style="width: 100%; background: var(--bg3); border-color: var(--red); border-top-style: ; border-top-width: ; border-right-style: ; border-right-width: ; border-bottom-style: ; border-bottom-width: ; border-left-style: ; border-left-width: ; border-image-source: ; border-image-slice: ; border-image-width: ; border-image-outset: ; border-image-repeat: ; border-radius: 4px; color: var(--text); font-size: 12px; padding: 8px 10px; outline: none;">
+      </div>
+      <div class="form-group">
+        <label>Key Type</label>
+        <select id="gen-key-modal-type" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:8px 10px;outline:none;cursor:pointer;">
+          <option value="ed25519">Ed25519 (Recommended)</option>
+          <option value="rsa">RSA</option>
+          <option value="ecdsa">ECDSA</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Passphrase (optional)</label>
+        <input type="password" id="gen-key-modal-pass" placeholder="Enter passphrase" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:8px 10px;outline:none;">
+      </div>
+      <div class="form-group">
+        <label>Comment (optional)</label>
+        <input type="text" id="gen-key-modal-comment" placeholder="user@hostname" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:8px 10px;outline:none;">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;padding:16px 20px;border-top:1px solid var(--border);">
+      <button id="gen-key-cancel" class="btn btn-secondary" style="flex:1;padding:10px;">Cancel</button>
+      <button id="gen-key-confirm" class="btn btn-primary" style="flex:1;padding:10px;">Generate</button>
+    </div>
+  </div>
+</div>
+
+<!-- Delete Warning Modal -->
+<div id="delete-key-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(4px);z-index:3000;display:none;align-items:center;justify-content:center;">
+  <div style="background:var(--bg2);border:1px solid var(--red);border-radius:8px;width:360px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);">
+    <div style="display:flex;align-items:center;padding:16px 20px;border-bottom:1px solid var(--border);">
+      <svg viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2" width="20" height="20" style="margin-right:10px;"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+      <h3 style="font-size:14px;font-weight:600;color:var(--red);flex:1;">Delete SSH Key?</h3>
+    </div>
+    <div style="padding:20px;">
+      <p style="color:var(--text);font-size:13px;margin-bottom:8px;">Are you sure you want to delete this key?</p>
+      <p id="delete-key-name" style="color:var(--text2);font-size:12px;font-family:'JetBrains Mono',monospace;background:var(--bg3);padding:8px;border-radius:4px;"></p>
+      <p style="color:var(--text3);font-size:11px;margin-top:12px;">This action cannot be undone.</p>
+    </div>
+    <div style="display:flex;gap:8px;padding:16px 20px;border-top:1px solid var(--border);">
+      <button id="delete-key-cancel" class="btn btn-secondary" style="flex:1;padding:10px;">Cancel</button>
+      <button id="delete-key-confirm" class="btn btn-danger" style="flex:1;padding:10px;background:var(--red);color:#fff;">Delete</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<script>
+const sessions = new Map();
+
+// IPC wrapper for Wry
+window.ipc = window.ipc || { postMessage: function() {} };
+
+// Response handler for async calls
+window.__rterm_pending = null;
+window.__rterm_resp = function(data) {
+  if (window.__rterm_pending) {
+    window.__rterm_pending(data);
+    window.__rterm_pending = null;
+  }
+};
+
+// SSH data callback
+window.__rterm_onData = function(id, data) {
+  for (const [key, sess] of sessions) {
+    if (sess.sshId === id && sess.term && data !== 'EOF') {
+      sess.term.write(data);
+      break;
+    }
+  }
+};
+
+// Load saved sessions from backend on startup
+async function initSessions() {
+  if (window.rterm?.loadSessions) {
+    try {
+      const result = await window.rterm.loadSessions();
+      if (result.success && result.result) {
+        result.result.forEach(s => {
+          savedSessions.push({...s, name: s.name || s.user + '@' + s.host});
+        });
+        savedSessionsDirty = true;
+        if (typeof renderSavedSessions === 'function') renderSavedSessions();
+      }
+    } catch (e) { console.error('Load sessions error:', e); }
+  }
+  setTimeout(() => { if (sessions.size === 0) newTerminal(); }, 500);
+}
+
+initSessions();
+
+// Load saved sessions from Rust backend on startup
+async function loadSavedSessions() {
+  if (window.rterm?.loadSessions) {
+    try {
+      const result = await window.rterm.loadSessions();
+      if (result.success && result.result) {
+        return result.result;
+      }
+    } catch (e) {}
+  }
+  return [];
+}
+
+// Save session to Rust backend
+async function saveSessionToBackend(name, type, config) {
+  if (window.rterm?.saveSessions) {
+    try {
+      await window.rterm.saveSessions([{
+        host: config.host,
+        port: config.port,
+        user: config.user,
+        password: config.password,
+        key_path: config.key_path
+      }]);
+    } catch (e) {}
+  }
+}
+function saveSession(name, type, config) {
+  try {
+    const saved = loadSavedSessions();
+    saved.push({ name, type, config, savedAt: Date.now() });
+    localStorage.setItem(SAVED_SESSIONS_KEY, JSON.stringify(saved));
+  } catch (e) {}
+}
+function deleteSavedSession(index) {
+  try {
+    const saved = loadSavedSessions();
+    saved.splice(index, 1);
+    localStorage.setItem(SAVED_SESSIONS_KEY, JSON.stringify(saved));
+  } catch (e) {}
+}
+const savedSessions = [];
+let savedSessionsLoaded = false;
+let savedSessionsDirty = false;
+
+async function initSavedSessions() {
+  if (savedSessionsLoaded) return;
+  savedSessionsLoaded = true;
+  const loaded = await loadSavedSessions();
+  loaded.forEach(s => savedSessions.push({...s, name: s.name || s.user + '@' + s.host}));
+  savedSessionsDirty = true;
+  if (typeof renderSavedSessions === 'function') renderSavedSessions();
+}
+
+initSavedSessions();
+let activeId = null;
+let fontSize = 13;
+let cursorStyle = 'block';
+let cursorBlink = true;
+
+const invoke = window.__TAURI__?.core?.invoke ?? null;
+// Running without Tauri - demo mode
+
+// ── Menu System ──
+let activeMenu = null;
+
+document.querySelectorAll('.menu-btn').forEach(btn => {
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const menu = btn.querySelector('.dropdown');
+    if (activeMenu === menu) {
+      closeMenus();
+    } else {
+      closeMenus();
+      menu.classList.add('show');
+      btn.classList.add('active');
+      activeMenu = menu;
+    }
+  });
+});
+
+function closeMenus() {
+  document.querySelectorAll('.dropdown').forEach(m => m.classList.remove('show'));
+  document.querySelectorAll('.menu-btn').forEach(b => b.classList.remove('active'));
+  activeMenu = null;
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.menu-btn') && !e.target.closest('.dropdown')) {
+    closeMenus();
+  }
+});
+
+// ── Modal System ──
+let currentView = 'terminal';
+
+function showModal(type) {
+  closeMenus();
+  document.getElementById('modal-connect').style.display = type === 'connect' ? 'block' : 'none';
+  document.getElementById('modal-settings').style.display = type === 'settings' ? 'block' : 'none';
+  document.getElementById('modal-about').style.display = type === 'about' ? 'block' : 'none';
+  document.getElementById('modal-keys').style.display = type === 'keys' ? 'block' : 'none';
+  document.getElementById('modal-overlay').classList.add('show');
+  
+  if (type === 'connect') {
+    document.getElementById('modal-title').textContent = 'New Session';
+    resetConnectModal();
+  } else if (type === 'settings') {
+    document.getElementById('modal-title').textContent = 'Settings';
+    initSettingsTabs();
+  }
+}
+
+function showKeysPanel() {
+  closeMenus();
+  document.getElementById('empty-state').style.display = 'none';
+  document.getElementById('terminal-container').classList.add('hidden');
+  document.getElementById('keys-panel').classList.remove('hidden');
+  document.getElementById('keys-panel').style.display = 'flex';
+  currentView = 'keys';
+}
+
+function showTerminalView() {
+  document.getElementById('keys-panel').style.display = 'none';
+  document.getElementById('keys-panel').classList.add('hidden');
+  if (sessions.size > 0) {
+    const hasTerminal = Array.from(sessions.values()).some(s => s.type !== 'keys');
+    if (hasTerminal) {
+      document.getElementById('terminal-container').classList.remove('hidden');
+      document.getElementById('empty-state').style.display = 'none';
+    }
+  }
+  if (!document.querySelector('#terminals > div[style*="display: block"]')) {
+    const terminalSessions = Array.from(sessions.entries()).find(([id, s]) => s.type !== 'keys');
+    if (terminalSessions) {
+      showTerminal(terminalSessions[0]);
+    }
+  }
+  currentView = 'terminal';
+}
+
+function hideModal() {
+  document.getElementById('modal-overlay').classList.remove('show');
+}
+
+document.getElementById('keys-close-btn').addEventListener('click', hideModal);
+document.getElementById('keys-done-btn').addEventListener('click', hideModal);
+document.getElementById('import-key-btn').addEventListener('click', () => {
+  alert('Import SSH Key dialog would open here');
+});
+
+function resetConnectModal() {
+  document.querySelectorAll('#modal-connect .modal-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector('#modal-connect .modal-tab[data-type="local"]').classList.add('active');
+  document.getElementById('local-fields').style.display = '';
+  document.getElementById('ssh-fields').style.display = 'none';
+  document.getElementById('telnet-fields').style.display = 'none';
+  document.getElementById('serial-fields').style.display = 'none';
+  
+  document.querySelectorAll('#modal-connect .toggle').forEach(t => t.classList.add('on'));
+}
+
+document.getElementById('modal-close-btn').addEventListener('click', hideModal);
+document.getElementById('modal-overlay').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('modal-overlay')) hideModal();
+});
+
+// ── Connect Modal Tabs ──
+document.querySelectorAll('#modal-connect .modal-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('#modal-connect .modal-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    const type = tab.dataset.type;
+    
+    document.getElementById('local-fields').style.display = type === 'local' ? 'block' : 'none';
+    document.getElementById('ssh-fields').style.display = type === 'ssh' ? 'block' : 'none';
+    document.getElementById('telnet-fields').style.display = type === 'telnet' ? 'block' : 'none';
+    document.getElementById('serial-fields').style.display = type === 'serial' ? 'block' : 'none';
+  });
+});
+
+// SSH Auth method toggle
+document.getElementById('ssh-auth-method').addEventListener('change', (e) => {
+  const method = e.target.value;
+  document.getElementById('ssh-password-fields').style.display = method === 'password' ? '' : 'none';
+  document.getElementById('ssh-key-fields').style.display = method === 'key' ? '' : 'none';
+});
+
+// ── Settings Modal Tabs ──
+function initSettingsTabs() {
+  document.querySelectorAll('#modal-settings .modal-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector('#modal-settings .modal-tab[data-settings="terminal"]').classList.add('active');
+  document.querySelectorAll('.settings-content').forEach(s => s.classList.remove('active'));
+  document.getElementById('settings-terminal').classList.add('active');
+}
+
+document.querySelectorAll('#modal-settings .modal-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('#modal-settings .modal-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    const section = tab.dataset.settings;
+    document.querySelectorAll('.settings-content').forEach(s => s.classList.remove('active'));
+    document.getElementById('settings-' + section).classList.add('active');
+  });
+});
+
+// Toggle switches
+document.querySelectorAll('.toggle').forEach(toggle => {
+  toggle.addEventListener('click', () => toggle.classList.toggle('on'));
+});
+
+// Generate SSH Key button
+document.getElementById('gen-key-btn').addEventListener('click', () => {
+  const type = document.getElementById('gen-key-type').value;
+  const name = document.getElementById('gen-key-name').value || 'id_' + type;
+  alert('SSH Key generation: ' + type + ' - ' + name + '\n(Feature coming soon)');
+});
+
+// ── Sidebar Tabs ──
+document.querySelectorAll('.sidebar-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    const panel = tab.dataset.panel;
+    document.querySelectorAll('.sidebar-panel').forEach(p => p.classList.remove('active'));
+    document.getElementById('panel-' + panel).classList.add('active');
+  });
+});
+
+// ── Saved Sessions ──
+function renderSavedSessions() {
+  if (!savedSessionsDirty) return;
+  savedSessionsDirty = false;
+  
+  const list = document.getElementById('session-list');
+  if (savedSessions.length === 0) {
+    list.innerHTML = '<div class="sempty">No saved sessions</div>';
+    return;
+  }
+  
+  list.innerHTML = savedSessions.map((s, i) => `
+    <div class="session-item" data-index="${i}">
+      <span class="sicon">
+        ${s.type === 'local' ? '<svg viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>' :
+          s.type === 'ssh' ? '<svg viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="1.5"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>' :
+          '<svg viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="1.5"><path d="M18 8h1a4 4 0 010 8h-1M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8zM6 1v3M10 1v3M14 1v3"/></svg>'}
+      </span>
+      <div class="sinfo">
+        <div class="sname">${s.name}</div>
+        <div class="shost">${s.host || s.type}</div>
+      </div>
+      <div class="sactions">
+        <span class="saction" data-action="edit" title="Edit">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        </span>
+        <span class="saction" data-action="delete" title="Delete">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+        </span>
+      </div>
+    </div>
+  `).join('');
+
+  list.querySelectorAll('.session-item').forEach(item => {
+    item.addEventListener('click', (e) => {
+      if (e.target.closest('.saction')) {
+        const action = e.target.closest('.saction').dataset.action;
+        const idx = parseInt(item.dataset.index);
+        if (action === 'edit') {
+          editSession(idx);
+        } else if (action === 'delete') {
+          deleteSession(idx);
+        }
+      } else {
+        connectSession(parseInt(item.dataset.index));
+      }
+    });
+  });
+}
+
+function addSession(type, data, save = true) {
+  const session = {
+    type,
+    name: data.name || `${type} Session`,
+    host: data.host || '',
+    port: data.port || 22,
+    user: data.user || '',
+    ...data
+  };
+  
+  savedSessions.push(session);
+  savedSessionsDirty = true;
+  if (save) renderSavedSessions();
+}
+
+function editSession(idx) {
+  const s = savedSessions[idx];
+  showModal('connect');
+  
+  setTimeout(() => {
+    document.querySelectorAll('#modal-connect .modal-tab').forEach(t => t.classList.remove('active'));
+    document.querySelector(`#modal-connect .modal-tab[data-type="${s.type}"]`).classList.add('active');
+    
+    document.getElementById('local-fields').style.display = s.type === 'local' ? '' : 'none';
+    document.getElementById('ssh-fields').style.display = s.type === 'ssh' ? '' : 'none';
+    document.getElementById('telnet-fields').style.display = s.type === 'telnet' ? '' : 'none';
+    document.getElementById('serial-fields').style.display = s.type === 'serial' ? '' : 'none';
+    
+    if (s.type === 'ssh') {
+      document.getElementById('ssh-name').value = s.name || '';
+      document.getElementById('ssh-host').value = s.host || '';
+      document.getElementById('ssh-port').value = s.port || 22;
+      document.getElementById('ssh-user').value = s.user || '';
+    }
+    
+    document.getElementById('modal-title').textContent = 'Edit Session';
+    document.getElementById('modal-connect-btn').textContent = 'Save';
+  }, 10);
+}
+
+function deleteSession(idx) {
+  savedSessions.splice(idx, 1);
+  savedSessionsDirty = true;
+  renderSavedSessions();
+}
+
+function connectSession(idx) {
+  const s = savedSessions[idx];
+  if (!s || !s.host) return;
+  
+  // Connect to saved SSH session
+  closeMenus();
+  hideModal();
+  
+  const id = 'session-' + Date.now();
+  sessions.set(id, { name: s.name, type: 'ssh', term: null, fitAddon: null, sshId: null });
+  activeId = id;
+  
+  if (splitLayout.type === 'single' && !splitLayout.id) {
+    splitLayout.id = id;
+  }
+  
+  renderTabs();
+  createTerminalInstance(id, async (term, sess) => {
+    // Try to connect via rterm backend
+    if (window.rterm) {
+      const config = {
+        host: s.host,
+        port: s.port || 22,
+        user: s.user,
+        password: s.password,
+        key_path: s.key_path
+      };
+      try {
+        const result = await window.rterm.sshConnect(config);
+        if (result.success) {
+          sess.sshId = result.id;
+          await window.rterm.sshShell(result.id);
+        }
+      } catch (e) {
+        term.write('\x1b[1;31mFailed to connect: ' + e + '\x1b[0m\r\n');
+      }
+    }
+  });
+}
+
+// ── Terminal (Multi-tab support) ──
+let currentTerm = null;
+let currentFitAddon = null;
+
+async function newTerminal(type = 'local') {
+  closeMenus();
+  hideModal();
+  
+  const id = 'session-' + Date.now();
+  let name = 'Terminal ' + (sessions.size + 1);
+  
+  sessions.set(id, { name, type, term: null, fitAddon: null });
+  activeId = id;
+  
+  if (splitLayout.type === 'single' && !splitLayout.id) {
+    splitLayout.id = id;
+  }
+  
+  renderTabs();
+  createTerminalInstance(id);
+  updateSplitLayout();
+}
+
+let connecting = false;
+
+async function doConnect() {
+  if (connecting) return;
+  connecting = true;
+  
+  // Close modal immediately
+  hideModal();
+  
+  const activeTab = document.querySelector('#modal-connect .modal-tab.active');
+  const type = activeTab?.dataset.type || 'local';
+  console.log('doConnect called, type:', type);
+  
+  let name = 'Session';
+  let host = '';
+  let save = false;
+  let sshId = null;
+  
+  if (type === 'local') {
+    name = document.getElementById('local-name').value || 'Local Shell';
+    save = document.getElementById('local-save-toggle').classList.contains('on');
+  } else if (type === 'ssh') {
+    name = document.getElementById('ssh-name').value || (document.getElementById('ssh-user').value + '@' + document.getElementById('ssh-host').value);
+    host = document.getElementById('ssh-host').value;
+    save = document.getElementById('ssh-save-toggle').classList.contains('on');
+    
+    console.log('SSH connect:', {host, user: document.getElementById('ssh-user').value});
+    
+    // Close any existing local/demo terminals when connecting via SSH
+    for (const [key, sess] of sessions) {
+      if (sess.type === 'local' && !sess.sshId) {
+        closeTab(key);
+      }
+    }
+    
+    // Connect via rterm backend
+    const config = {
+      host: host,
+      port: parseInt(document.getElementById('ssh-port').value) || 22,
+      user: document.getElementById('ssh-user').value,
+      password: document.getElementById('ssh-pass').value || null,
+      key_path: null
+    };
+    
+    console.log('Config:', JSON.stringify(config));
+    
+    try {
+      const result = await window.rterm.sshConnect(config);
+      console.log('Result:', result);
+      if (!result.success) {
+        alert('Connection failed: ' + result.error);
+        connecting = false;
+        return;
+      }
+      sshId = result.id;
+      type = 'ssh';
+      
+      // Start shell
+      const shellResult = await window.rterm.sshShell(sshId);
+      console.log('Shell:', shellResult);
+      if (!shellResult.success) {
+        alert('Shell failed: ' + shellResult.error);
+        connecting = false;
+        return;
+      }
+      
+      // Save session if toggle is on
+      if (save) {
+        try {
+          await window.rterm.saveSessions([{
+            host: config.host,
+            port: config.port,
+            user: config.user,
+            password: config.password,
+            key_path: config.key_path
+          }]);
+        } catch (e) {
+          console.error('Failed to save session:', e);
+        }
+      }
+      
+      // Clear screen after connect
+setTimeout(() => {
+        window.rterm.sshWrite(sshId, 'clear\r');
+      }, 200);
+      
+      // Create terminal for SSH session
+      const id = 'session-' + Date.now();
+      sessions.set(id, { name, type: 'ssh', term: null, fitAddon: null, sshId });
+      activeId = id;
+      
+      if (splitLayout.type === 'single' && !splitLayout.id) {
+        splitLayout.id = id;
+      }
+      
+      renderTabs();
+      createTerminalInstance(id);
+      updateSplitLayout();
+      
+      hideModal();
+      connecting = false;
+      return;
+    } catch (e) {
+      alert('Connection error: ' + e);
+      connecting = false;
+      return;
+    }
+  } else if (type === 'telnet') {
+    name = document.getElementById('telnet-name').value || document.getElementById('telnet-host').value;
+    host = document.getElementById('telnet-host').value;
+    save = document.getElementById('telnet-save-toggle').classList.contains('on');
+  } else if (type === 'serial') {
+    name = document.getElementById('serial-name').value || document.getElementById('serial-port').value;
+    save = document.getElementById('serial-save-toggle').classList.contains('on');
+  }
+  
+  const id = 'session-' + Date.now();
+  sessions.set(id, { name, type, term: null, fitAddon: null, sshId });
+  activeId = id;
+  
+  if (splitLayout.type === 'single' && !splitLayout.id) {
+    splitLayout.id = id;
+  }
+  
+  renderTabs();
+  createTerminalInstance(id);
+  updateSplitLayout();
+  
+  if (save) {
+    addSession(type, { name, host });
+  }
+  
+  hideModal();
+  connecting = false;
+  
+  // Focus the terminal input after connecting
+  setTimeout(() => {
+    const sess = sessions.get(id);
+    if (sess && sess.term) {
+      sess.term.focus();
+    }
+}, 100);
+}
+
+function createTerminalInstance(id, onReady) {
+  const sess = sessions.get(id);
+  if (!sess) return;
+  
+  const emptyState = document.getElementById('empty-state');
+  const terminalContainer = document.getElementById('terminal-container');
+  emptyState.classList.add('hidden');
+  terminalContainer.classList.remove('hidden');
+  
+  splitLayout.id = id;
+  
+  const container = document.getElementById('terminals');
+  let termDiv = document.getElementById('term-' + id);
+  if (!termDiv) {
+    termDiv = document.createElement('div');
+    termDiv.id = 'term-' + id;
+    termDiv.style.cssText = 'flex:1;display:block;min-width:0;min-height:0;width:100%;height:100%;overflow:hidden;';
+    container.appendChild(termDiv);
+  }
+  
+  const term = new Terminal({
+    cursorBlink: cursorBlink,
+    cursorStyle: cursorStyle,
+    theme: { background: '#000', cursor: '#4fc3f7', foreground: '#e0e0e0' },
+    fontSize: fontSize,
+    fontFamily: 'JetBrains Mono, monospace',
+    allowProposedApi: true,
+  });
+  
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  
+  sess.term = term;
+  sess.fitAddon = fitAddon;
+  
+  term.open(termDiv);
+
+  requestAnimationFrame(() => {
+    fitAddon.fit();
+    requestAnimationFrame(() => fitAddon.fit());
+  });
+  
+  if (onReady) {
+    onReady(term, sess);
+  }
+  
+  term.onData(data => {
+    const sess = sessions.get(id);
+    if (sess?.type === 'ssh' && sess?.sshId && window.rterm) {
+      if (data === '\r') {
+        window.rterm.sshWrite(sess.sshId, '\n');
+      } else if (data === '\x7f') {
+        window.rterm.sshWrite(sess.sshId, '\x7f');
+      } else if (data.startsWith('\x1b[') && data.endsWith('R')) {
+        // Skip cursor position query
+      } else {
+        window.rterm.sshWrite(sess.sshId, data);
+      }
+    } else if (invoke) {
+      invoke('write_to_session', { id: id, data }).catch(console.error);
+    } else {
+      const code = data.charCodeAt(0);
+      if (data === '\r' || data === '\n') {
+        term.write('\r\n$ ');
+      } else if (data === '\x7f' || data === '\b') {
+        term.write('\b \b');
+      } else if (code === 3) {
+        term.write('^C');
+      } else if (data.length === 1) {
+        term.write(data);
+      }
+    }
+  });
+  
+  term.onResize(({ cols, rows }) => {
+    const sess = sessions.get(id);
+    if (sess?.type === 'ssh' && sess?.sshId && window.rterm) {
+      window.ipc.postMessage(JSON.stringify({
+        method: "ssh_resize",
+        args: { id: sess.sshId, cols, rows }
+      }));
+    }
+  });
+  
+  term.onCursorMove(() => updateStatus(id));
+  
+  if (!invoke && !window.rterm) {
+    if (sess?.type === 'ssh') {
+      term.write('\x1b[1;32mConnected to SSH session\x1b[0m\r\n\x1b[1;34m$\x1b[0m ');
+    } else {
+      term.write('\x1b[1;32mWelcome to Rterm (Demo Mode)\x1b[0m\r\n$ ');
+    }
+  } else if (sess?.type === 'ssh') {
+    term.write('\x1b[1;32mSSH Connected, ready\x1b[0m\r\n\x1b[1;34m$\x1b[0m ');
+  }
+  
+  updateSplitLayout();
+  showTerminal(id);
+}
+
+let splitLayout = { type: 'single', id: null };
+
+function updateSplitLayout() {
+  const terminals = document.getElementById('terminals');
+  if (!terminals) return;
+  
+  function renderNode(node) {
+    if (node.type === 'single') {
+      if (!node.id) return null;
+      let termDiv = document.getElementById('term-' + node.id);
+      if (termDiv) {
+        termDiv.style.cssText = 'flex:1;display:block;min-width:0;min-height:0;width:100%;height:100%;overflow:hidden;';
+        return termDiv;
+      }
+      termDiv = document.createElement('div');
+      termDiv.id = 'term-' + node.id;
+      termDiv.style.cssText = 'flex:1;display:block;min-width:0;min-height:0;width:100%;height:100%;overflow:hidden;';
+      return termDiv;
+    } else if (node.type === 'split') {
+      const container = document.createElement('div');
+      container.className = 'split-container ' + node.direction;
+      container.style.cssText = 'display:flex;flex:1;min-width:0;min-height:0;';
+      
+      const left = renderNode(node.left);
+      if (left) container.appendChild(left);
+      
+      const divider = document.createElement('div');
+      divider.className = 'split-divider ' + node.direction;
+      divider.dataset.direction = node.direction;
+      container.appendChild(divider);
+      
+      const right = renderNode(node.right);
+      if (right) container.appendChild(right);
+      
+      return container;
+    }
+    return null;
+  }
+  
+  if (splitLayout.type === 'single' && splitLayout.id) {
+    const termDiv = document.getElementById('term-' + splitLayout.id);
+    if (termDiv) {
+      termDiv.style.cssText = 'flex:1;display:block;min-width:0;min-height:0;width:100%;height:100%;overflow:hidden;';
+      terminals.innerHTML = '';
+      terminals.appendChild(termDiv);
+    }
+  } else if (splitLayout.type === 'split') {
+    terminals.innerHTML = '';
+    const root = renderNode(splitLayout);
+    if (root) terminals.appendChild(root);
+  }
+  
+  document.querySelectorAll('.split-divider').forEach(div => {
+    div.addEventListener('mousedown', startResize);
+  });
+  
+  requestAnimationFrame(() => {
+    sessions.forEach((sess) => {
+      if (sess.fitAddon) {
+        sess.fitAddon.fit();
+      }
+    });
+  });
+}
+
+function splitPane(direction) {
+  if (!activeId || sessions.get(activeId)?.type === 'keys') return;
+  
+  if (splitLayout.type === 'single') {
+    const oldId = splitLayout.id;
+    const newId = 'term-' + Date.now();
+    
+    splitLayout = {
+      type: 'split',
+      direction: direction,
+      left: { type: 'single', id: oldId },
+      right: { type: 'single', id: newId }
+    };
+    
+    sessions.set(newId, {
+      name: 'Shell ' + (sessions.size + 1),
+      type: 'local',
+      term: null,
+      fitAddon: null
+    });
+    
+    renderTabs();
+    createTerminalInstance(newId);
+  } else {
+    const newId = 'term-' + Date.now();
+    splitLayout = {
+      type: 'split',
+      direction: direction,
+      left: splitLayout,
+      right: { type: 'single', id: newId }
+    };
+    
+    sessions.set(newId, {
+      name: 'Shell ' + (sessions.size + 1),
+      type: 'local',
+      term: null,
+      fitAddon: null
+    });
+    
+    renderTabs();
+    createTerminalInstance(newId);
+  }
+  
+  updateSplitLayout();
+}
+
+function startResize(e) {
+  e.preventDefault();
+  const divider = e.target;
+  divider.classList.add('dragging');
+  document.addEventListener('mousemove', doResize);
+  document.addEventListener('mouseup', stopResize);
+}
+
+function doResize(e) {
+  const divider = document.querySelector('.split-divider.dragging');
+  if (!divider) return;
+  
+  const container = divider.parentElement;
+  const rect = container.getBoundingClientRect();
+  
+  if (divider.dataset.direction === 'horizontal') {
+    const percent = ((e.clientX - rect.left) / rect.width) * 100;
+    const leftPane = container.children[0];
+    const rightPane = container.children[2];
+    leftPane.style.flex = '0 0 ' + Math.max(10, Math.min(90, percent)) + '%';
+    rightPane.style.flex = '1';
+  } else {
+    const percent = ((e.clientY - rect.top) / rect.height) * 100;
+    const topPane = container.children[0];
+    const bottomPane = container.children[2];
+    topPane.style.flex = '0 0 ' + Math.max(10, Math.min(90, percent)) + '%';
+    bottomPane.style.flex = '1';
+  }
+}
+
+function stopResize() {
+  document.querySelectorAll('.split-divider').forEach(d => d.classList.remove('dragging'));
+  document.removeEventListener('mousemove', doResize);
+  document.removeEventListener('mouseup', stopResize);
+  
+  sessions.forEach(sess => {
+    if (sess.fitAddon) sess.fitAddon.fit();
+  });
+}
+
+function showTerminal(id) {
+  const sess = sessions.get(id);
+  if (!sess || !sess.term) return;
+  
+  document.querySelectorAll('div[id^="term-"]').forEach(d => {
+    d.style.display = d.id === 'term-' + id ? 'block' : 'none';
+  });
+  
+  currentTerm = sess.term;
+  currentFitAddon = sess.fitAddon;
+  
+  requestAnimationFrame(() => sess.fitAddon?.fit());
+  
+  updateStatus(id);
+}
+
+function updateStatus(id) {
+  const sess = sessions.get(id) || sessions.get(activeId);
+  if (sess && sess.term) {
+    document.getElementById('status-size').textContent = sess.term.cols + 'x' + sess.term.rows;
+    document.getElementById('status-cursor').textContent = 'Ln ' + (sess.term.buffer.active.cursorY + 1) + ', Col ' + (sess.term.buffer.active.cursorX + 1);
+  }
+}
+
+function renderTabs() {
+  const tabbar = document.getElementById('tabbar');
+  const tabAddBtn = tabbar.querySelector('.tab-add');
+  
+  // Track existing tabs
+  const existingTabs = new Map();
+  tabbar.querySelectorAll('.tab').forEach(t => existingTabs.set(t.dataset.id, t));
+  
+  // Remove tabs that no longer exist in sessions
+  existingTabs.forEach((tab, id) => {
+    if (!sessions.has(id)) tab.remove();
+  });
+  
+  // Add or update tabs
+  sessions.forEach((sess, id) => {
+    const dotColor = sess.type === 'local' ? 'var(--green)' : sess.type === 'ssh' ? 'var(--blue)' : sess.type === 'keys' ? 'var(--yellow)' : 'var(--purple)';
+    const dotHtml = sess.type === 'keys' ? 
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" class="tab-icon"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>' :
+      `<span class="tab-dot" style="background:${dotColor}" data-id="${id}"></span>`;
+    
+    let tab = existingTabs.get(id);
+    if (!tab) {
+      // Create new tab only if it doesn't exist
+      tab = document.createElement('div');
+      tab.className = 'tab';
+      tab.dataset.id = id;
+      tab.innerHTML = `
+        <span class="tab-indicator" data-id="${id}">${dotHtml}</span>
+        <span class="tab-name">${sess.name}</span>
+        <span class="tab-close" data-id="${id}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="12" height="12"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+        </span>
+      `;
+      tab.onclick = (e) => {
+        if (e.target.closest('.tab-close')) {
+          closeTab(e.target.closest('.tab-close').dataset.id);
+        } else {
+          selectTab(id);
+        }
+      };
+      tab.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showTabMenu(e, id);
+      });
+      tab.setAttribute('draggable', 'true');
+      tab.addEventListener('dragstart', handleTabDragStart);
+      tab.addEventListener('dragend', handleTabDragEnd);
+      tab.addEventListener('dragover', handleTabDragOver);
+      tab.addEventListener('drop', handleTabDrop);
+      tab.addEventListener('dragleave', handleTabDragLeave);
+      tabbar.insertBefore(tab, tabAddBtn);
+    } else {
+      // Update existing tab
+      tab.querySelector('.tab-indicator').innerHTML = dotHtml;
+      tab.querySelector('.tab-name').textContent = sess.name;
+    }
+    
+    tab.className = 'tab' + (id === activeId ? ' active' : '');
+  });
+  
+  document.getElementById('current-session').textContent = sessions.get(activeId)?.name || 'No session';
+}
+
+let draggedTabId = null;
+
+function handleTabDragStart(e) {
+  draggedTabId = e.currentTarget.dataset.id;
+  e.currentTarget.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+}
+
+function handleTabDragEnd(e) {
+  e.currentTarget.classList.remove('dragging');
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over'));
+  document.querySelectorAll('.drop-indicator').forEach(i => i.remove());
+  draggedTabId = null;
+}
+
+function handleTabDragOver(e) {
+  e.preventDefault();
+  if (!draggedTabId || e.currentTarget.dataset.id === draggedTabId) return;
+  
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over'));
+  e.currentTarget.classList.add('drag-over');
+  
+  const rect = e.currentTarget.getBoundingClientRect();
+  const isLeft = e.clientX < rect.left + rect.width / 2;
+  
+  document.querySelectorAll('.drop-indicator').forEach(i => i.remove());
+  
+  const indicator = document.createElement('div');
+  indicator.className = 'drop-indicator ' + (isLeft ? 'vertical' : 'vertical');
+  indicator.style.top = rect.top + 'px';
+  indicator.style.height = rect.height + 'px';
+  indicator.style.left = (isLeft ? rect.left : rect.right - 4) + 'px';
+  document.body.appendChild(indicator);
+}
+
+function handleTabDragLeave(e) {
+  if (!e.currentTarget.contains(e.relatedTarget)) {
+    e.currentTarget.classList.remove('drag-over');
+    document.querySelectorAll('.drop-indicator').forEach(i => i.remove());
+  }
+}
+
+function handleTabDrop(e) {
+  e.preventDefault();
+  if (!draggedTabId) return;
+  
+  const targetId = e.currentTarget.dataset.id;
+  if (targetId === draggedTabId) return;
+  
+  const rect = e.currentTarget.getBoundingClientRect();
+  const direction = e.clientX < rect.left + rect.width / 2 ? 'horizontal' : 'horizontal';
+  
+  splitWithTab(draggedTabId, targetId, direction);
+  
+  document.querySelectorAll('.drop-indicator').forEach(i => i.remove());
+}
+
+function splitWithTab(sourceId, targetId, direction) {
+  const sourceSess = sessions.get(sourceId);
+  const targetSess = sessions.get(targetId);
+  if (!sourceSess || !targetSess) return;
+  
+  if (splitLayout.type === 'single') {
+    const newSourceId = 'term-' + Date.now();
+    
+    sessions.set(newSourceId, { ...sourceSess });
+    sourceSess.term = null;
+    sourceSess.fitAddon = null;
+    
+    splitLayout = {
+      type: 'split',
+      direction: direction,
+      left: { type: 'single', id: sourceId },
+      right: { type: 'single', id: newSourceId }
+    };
+  } else {
+    const newSourceId = 'term-' + Date.now();
+    sessions.set(newSourceId, { ...sourceSess });
+    sourceSess.term = null;
+    sourceSess.fitAddon = null;
+    
+    splitLayout = {
+      type: 'split',
+      direction: direction,
+      left: splitLayout,
+      right: { type: 'single', id: newSourceId }
+    };
+  }
+  
+  updateSplitLayout();
+}
+
+function showTabMenu(e, id) {
+  e.stopPropagation();
+  let menu = document.getElementById('tab-context-menu');
+  if (!menu) {
+    menu = document.createElement('div');
+    menu.id = 'tab-context-menu';
+    menu.style.cssText = 'position:fixed;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:4px;z-index:3000;min-width:150px;box-shadow:0 8px 24px rgba(0,0,0,.5);display:none;';
+    document.body.appendChild(menu);
+  }
+  
+  const sess = sessions.get(id);
+  const isKeysTab = sess?.type === 'keys';
+  
+  menu.innerHTML = `
+    ${isKeysTab ? '' : '<div class="dropdown-item" data-action="rename">Rename</div>'}
+    ${isKeysTab ? '' : '<div class="dropdown-item" data-action="duplicate">Duplicate</div>'}
+    ${isKeysTab ? '' : '<div class="dropdown-divider"></div>'}
+    <div class="dropdown-item" data-action="close">Close</div>
+    <div class="dropdown-item" data-action="close-others">Close Others</div>
+    <div class="dropdown-item" data-action="close-all">Close All</div>
+  `;
+  
+  menu.querySelectorAll('.dropdown-item').forEach(item => {
+    item.onclick = () => {
+      const action = item.dataset.action;
+      if (action === 'close') closeTab(id);
+      else if (action === 'close-others') {
+        const ids = Array.from(sessions.keys()).filter(sid => sid !== id);
+        ids.forEach(sid => closeTab(sid));
+      }
+      else if (action === 'close-all') {
+        const ids = Array.from(sessions.keys());
+        ids.forEach(sid => closeTab(sid));
+      }
+      else if (action === 'duplicate' && !isKeysTab) {
+        const sess = sessions.get(id);
+        if (sess) {
+          newTerminal(sess.type);
+        }
+      }
+      else if (action === 'rename' && !isKeysTab) {
+        const tab = document.querySelector(`.tab[data-id="${id}"] .tab-name`);
+        if (tab) {
+          const newName = prompt('Enter new name:', sess.name);
+          if (newName) {
+            sess.name = newName;
+            renderTabs();
+          }
+        }
+      }
+      menu.style.display = 'none';
+    };
+  });
+  
+  menu.style.left = e.clientX + 'px';
+  menu.style.top = e.clientY + 'px';
+  menu.style.display = 'block';
+  
+  const closeMenu = (ev) => {
+    if (!menu.contains(ev.target)) {
+      menu.style.display = 'none';
+      document.removeEventListener('click', closeMenu);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', closeMenu), 10);
+}
+
+function selectTab(id) {
+  activeId = id;
+  renderTabs();
+  const sess = sessions.get(id);
+  if (sess) {
+    if (sess.type === 'keys') {
+      showKeysPanel();
+    } else {
+      showTerminal(id);
+      showTerminalView();
+    }
+  }
+}
+
+function closeTab(id) {
+  const sess = sessions.get(id);
+  
+  if (sess?.type === 'keys') {
+    keysTabOpen = false;
+  } else {
+    const termDiv = document.getElementById('term-' + id);
+    if (termDiv) termDiv.remove();
+    
+    if (sess?.term) {
+      sess.term.dispose();
+    }
+  }
+  
+  sessions.delete(id);
+  
+  if (activeId === id || !sessions.has(activeId)) {
+    const keys = Array.from(sessions.keys());
+    activeId = keys.length > 0 ? keys[keys.length - 1] : null;
+  }
+  
+  renderTabs();
+  
+  if (sessions.size === 0) {
+    document.getElementById('terminal-container').classList.add('hidden');
+    document.getElementById('keys-panel').style.display = 'none';
+    document.getElementById('empty-state').classList.remove('hidden');
+    currentTerm = null;
+    currentFitAddon = null;
+  } else if (activeId) {
+    selectTab(activeId);
+  }
+}
+
+// ── Actions ──
+function toggleSidebar(side) {
+  const el = side === 'left' ? document.getElementById('sidebar') : document.getElementById('right-sidebar');
+  el.classList.toggle('collapsed');
+}
+
+function zoomIn() {
+  fontSize = Math.min(24, fontSize + 2);
+  sessions.forEach((sess) => {
+    if (sess.term) {
+      sess.term.options.fontSize = fontSize;
+      sess.fitAddon?.fit();
+    }
+  });
+  updateStatus();
+}
+
+function zoomOut() {
+  fontSize = Math.max(8, fontSize - 2);
+  sessions.forEach((sess) => {
+    if (sess.term) {
+      sess.term.options.fontSize = fontSize;
+      sess.fitAddon?.fit();
+    }
+  });
+  updateStatus();
+}
+
+function resetZoom() {
+  fontSize = 13;
+  sessions.forEach((sess) => {
+    if (sess.term) {
+      sess.term.options.fontSize = fontSize;
+      sess.fitAddon?.fit();
+    }
+  });
+  updateStatus();
+}
+
+function updateFontSize(size) {
+  fontSize = parseInt(size);
+  sessions.forEach((sess) => {
+    if (sess.term) {
+      sess.term.options.fontSize = fontSize;
+      sess.fitAddon?.fit();
+    }
+  });
+  updateStatus();
+}
+
+function updateCursorStyle(style) {
+  cursorStyle = style;
+  sessions.forEach((sess) => {
+    if (sess.term) sess.term.options.cursorStyle = style;
+  });
+}
+
+function updateCursorBlink(enabled) {
+  cursorBlink = enabled;
+  sessions.forEach((sess) => {
+    if (sess.term) sess.term.options.cursorBlink = enabled;
+  });
+}
+
+function copySelection() { currentTerm?.copySelection(); }
+function pasteClipboard() { navigator.clipboard.readText().then(t => currentTerm?.paste(t)); }
+function selectAll() { currentTerm?.selectAll(); }
+function clearTerminal() { if (currentTerm) { currentTerm.clear(); currentTerm.write('\x1b[1;32mTerminal cleared\x1b[0m\r\n$ '); } }
+
+function showContextMenu(e) {
+  e.preventDefault();
+  const menu = document.getElementById('context-menu');
+  menu.style.left = e.clientX + 'px';
+  menu.style.top = e.clientY + 'px';
+  menu.classList.add('show');
+}
+
+function showQuickMenu(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const menu = document.getElementById('context-menu');
+  menu.style.left = e.clientX + 'px';
+  menu.style.top = e.clientY + 'px';
+  menu.classList.add('show');
+}
+
+document.addEventListener('click', () => {
+  document.getElementById('context-menu').classList.remove('show');
+});
+
+// ── Event Listeners ──
+document.getElementById('action-new').onclick = () => newTerminal();
+document.getElementById('action-connect').onclick = () => showModal('connect');
+document.getElementById('action-settings').onclick = () => showModal('settings');
+document.getElementById('action-exit').onclick = () => window.close();
+document.getElementById('action-copy').onclick = copySelection;
+document.getElementById('action-paste').onclick = pasteClipboard;
+document.getElementById('action-selectall').onclick = selectAll;
+document.getElementById('action-clear').onclick = clearTerminal;
+document.getElementById('action-toggle-filer').onclick = () => toggleSidebar('left');
+document.getElementById('action-toggle-sessions').onclick = () => toggleSidebar('right');
+document.getElementById('action-zoomin').onclick = zoomIn;
+document.getElementById('action-zoomout').onclick = zoomOut;
+document.getElementById('action-zoomreset').onclick = resetZoom;
+document.getElementById('action-close-tab').onclick = () => { if (activeId) closeTab(activeId); };
+document.getElementById('action-close-all').onclick = () => { sessions.clear(); closeTab(null); };
+document.getElementById('action-about').onclick = () => showModal('about');
+document.getElementById('action-docs').onclick = () => window.open('https://github.com', '_blank');
+document.getElementById('action-issue').onclick = () => window.open('https://github.com', '_blank');
+
+let keysTabId = 'keys-' + Date.now();
+let keysTabOpen = false;
+
+document.getElementById('action-keys-open').onclick = () => {
+  closeMenus();
+  if (!keysTabOpen) {
+    keysTabOpen = true;
+    sessions.set(keysTabId, { name: 'SSH Keys', type: 'keys', term: null });
+    activeId = keysTabId;
+    renderTabs();
+    showKeysPanel();
+  } else {
+    selectTab(keysTabId);
+    showKeysPanel();
+  }
+};
+document.getElementById('action-keys-agent').onclick = () => {
+  const agentToggle = document.getElementById('setting-ssh-agent');
+  if (agentToggle) agentToggle.classList.toggle('on');
+};
+
+// Keys panel toolbar buttons
+document.getElementById('keys-new-btn').onclick = () => {
+  document.getElementById('gen-key-modal-name').value = '';
+  document.getElementById('gen-key-modal-type').value = 'ed25519';
+  document.getElementById('gen-key-modal-pass').value = '';
+  document.getElementById('gen-key-modal-comment').value = '';
+  document.getElementById('generate-key-modal').style.display = 'flex';
+  document.getElementById('gen-key-modal-name').focus();
+};
+document.getElementById('keys-import-btn').onclick = () => {
+  alert('Import SSH Key dialog would open here');
+};
+document.getElementById('keys-export-btn').onclick = () => {
+  alert('Export SSH Key dialog would open here');
+};
+document.getElementById('keys-copy-btn').onclick = () => {
+  const pubKey = document.querySelector('#key-details .panel-card:first-child pre')?.textContent || 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBt2LW7qT8bZ7vMKvF6zJq2fY6x8hK9jL2mN4oP5qQ8 user@hostname';
+  navigator.clipboard.writeText(pubKey);
+  alert('Public key copied to clipboard!');
+};
+document.getElementById('keys-delete-btn').onclick = () => {
+  const selected = document.querySelector('.keys-list .key-item.selected');
+  if (selected) {
+    const keyName = selected.dataset.key;
+    document.getElementById('delete-key-name').textContent = keyName;
+    document.getElementById('delete-key-modal').style.display = 'flex';
+  }
+};
+
+// Generate Key Modal handlers
+document.getElementById('gen-key-close').onclick = () => {
+  document.getElementById('generate-key-modal').style.display = 'none';
+};
+document.getElementById('gen-key-cancel').onclick = () => {
+  document.getElementById('generate-key-modal').style.display = 'none';
+};
+document.getElementById('gen-key-confirm').onclick = () => {
+  const name = document.getElementById('gen-key-modal-name').value.trim();
+  const type = document.getElementById('gen-key-modal-type').value;
+  if (!name) {
+    document.getElementById('gen-key-modal-name').style.borderColor = 'var(--red)';
+    return;
+  }
+  alert(`Generating ${type} key: ${name}\n\n(Feature coming soon)`);
+  document.getElementById('generate-key-modal').style.display = 'none';
+};
+document.getElementById('generate-key-modal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('generate-key-modal')) {
+    document.getElementById('generate-key-modal').style.display = 'none';
+  }
+});
+
+// Delete Key Modal handlers
+document.getElementById('delete-key-cancel').onclick = () => {
+  document.getElementById('delete-key-modal').style.display = 'none';
+};
+document.getElementById('delete-key-confirm').onclick = () => {
+  const selected = document.querySelector('.keys-list .key-item.selected');
+  if (selected) {
+    selected.remove();
+  }
+  document.getElementById('delete-key-modal').style.display = 'none';
+};
+document.getElementById('delete-key-modal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('delete-key-modal')) {
+    document.getElementById('delete-key-modal').style.display = 'none';
+  }
+});
+document.getElementById('keys-refresh-btn').onclick = () => {
+  alert('Refreshing key list...');
+};
+document.getElementById('copy-pubkey-btn').onclick = () => {
+  const pubKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBt2LW7qT8bZ7vMKvF6zJq2fY6x8hK9jL2mN4oP5qQ8 user@hostname';
+  navigator.clipboard.writeText(pubKey);
+  alert('Public key copied to clipboard!');
+};
+document.getElementById('gen-key-btn').onclick = () => {
+  const type = document.getElementById('gen-key-type').value;
+  const name = document.getElementById('gen-key-name').value || 'id_' + type;
+  const pass = document.getElementById('gen-key-pass').value;
+  const comment = document.getElementById('gen-key-comment').value;
+  alert(`Generate SSH Key:\nType: ${type}\nName: ${name}\nComment: ${comment}\n\n(Feature coming soon)`);
+};
+
+// Key selection in list
+document.getElementById('keys-list').addEventListener('click', (e) => {
+  const item = e.target.closest('.key-item');
+  if (item) {
+    document.querySelectorAll('.keys-list .key-item').forEach(x => x.classList.remove('selected'));
+    item.classList.add('selected');
+    const keyName = item.dataset.key;
+    document.getElementById('selected-key-name').textContent = keyName;
+    document.getElementById('selected-key-path').textContent = '~/.ssh/' + keyName;
+  }
+});
+
+document.getElementById('ctx-copy').onclick = copySelection;
+document.getElementById('ctx-paste').onclick = pasteClipboard;
+document.getElementById('ctx-split-h').onclick = () => splitPane('horizontal');
+document.getElementById('ctx-split-v').onclick = () => splitPane('vertical');
+document.getElementById('ctx-clear').onclick = clearTerminal;
+document.getElementById('ctx-zoom').onclick = resetZoom;
+
+document.getElementById('action-split-h').onclick = () => { closeMenus(); splitPane('horizontal'); };
+document.getElementById('action-split-v').onclick = () => { closeMenus(); splitPane('vertical'); };
+
+document.getElementById('tab-add-btn').onclick = () => newTerminal();
+document.getElementById('empty-new-btn').onclick = () => newTerminal();
+document.getElementById('empty-connect-btn').onclick = () => showModal('connect');
+document.getElementById('new-session-btn').onclick = () => newTerminal();
+document.getElementById('menu-btn').onclick = showQuickMenu;
+document.getElementById('zoom-in-btn').onclick = zoomIn;
+document.getElementById('about-btn').onclick = () => showModal('about');
+
+document.getElementById('rs-add-session').onclick = () => showModal('connect');
+document.getElementById('rs-clear-history').onclick = () => {
+  document.getElementById('history-list').innerHTML = '<div class="sempty">History cleared</div>';
+};
+
+document.getElementById('modal-cancel-btn').onclick = hideModal;
+document.getElementById('modal-connect-btn').onclick = doConnect;
+document.getElementById('settings-done-btn').onclick = hideModal;
+document.getElementById('about-close-btn').onclick = hideModal;
+document.getElementById('setting-font').onchange = (e) => updateFontSize(e.target.value);
+document.getElementById('setting-cursor').onchange = (e) => updateCursorStyle(e.target.value);
+document.getElementById('setting-cursor-blink').addEventListener('click', function() {
+  this.classList.toggle('on');
+  updateCursorBlink(this.classList.contains('on'));
+});
+
+document.getElementById('filer-refresh').onclick = () => console.log('Refresh local');
+document.getElementById('filer-toggle').onclick = () => toggleSidebar('left');
+document.getElementById('sftp-refresh').onclick = () => console.log('Refresh SFTP');
+
+document.getElementById('tabbar').onclick = (e) => {
+  const closeBtn = e.target.closest('.tab-close');
+  if (closeBtn) {
+    const id = closeBtn.dataset.id;
+    if (id) closeTab(id);
+  }
+};
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') hideModal();
+  if (e.ctrlKey && e.key === 'n') { e.preventDefault(); newTerminal(); }
+  if (e.ctrlKey && e.key === 'k') { e.preventDefault(); showModal('connect'); }
+  if (e.ctrlKey && e.key === 'w') { e.preventDefault(); if (activeId) closeTab(activeId); }
+  if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomIn(); }
+  if (e.ctrlKey && e.key === '-') { e.preventDefault(); zoomOut(); }
+  if (e.ctrlKey && e.key === '0') { e.preventDefault(); resetZoom(); }
+});
+
+const ro = new ResizeObserver(() => {
+  sessions.forEach(sess => sess.fitAddon?.fit());
+});
+ro.observe(document.getElementById('terminals'));
+
+document.querySelectorAll('#filer-list .filer-item, #sftp-list .filer-item').forEach(el => {
+  el.addEventListener('click', function() {
+    this.parentElement.querySelectorAll('.filer-item').forEach(x => x.classList.remove('selected'));
+    this.classList.add('selected');
+  });
+});
+
+initSettingsTabs();
+renderSavedSessions();
+updateStatus();
+
+if (sessions.size === 0) {
+  newTerminal();
+}
+
+// IPC API for Rust backend
+window.__rterm_pending = null;
+window.__rterm_resp = function(data) {
+  if (window.__rterm_pending) {
+    window.__rterm_pending(data);
+    window.__rterm_pending = null;
+  }
+};
+
+// SSH data callback
+window.__rterm_onData = function(id, data) {
+  for (const [key, sess] of sessions) {
+    if (sess.sshId === id && sess.term && data !== 'EOF') {
+      sess.term.write(data);
+      break;
+    }
+  }
+};
+
+window.rterm = {
+  sshConnect: function(config) {
+    return new Promise((resolve) => {
+      window.__rterm_pending = resolve;
+      window.ipc.postMessage(JSON.stringify({method: "ssh_connect", args: config}));
+    });
+  },
+  sshShell: function(id) {
+    return new Promise((resolve) => {
+      window.__rterm_pending = resolve;
+      window.ipc.postMessage(JSON.stringify({method: "ssh_shell", args: {id: id}}));
+    });
+  },
+  sshWrite: function(id, data) {
+    window.ipc.postMessage(JSON.stringify({method: "ssh_write", args: {id: id, data: data}}));
+    return Promise.resolve();
+  },
+  sshResize: function(id, cols, rows) {
+    return new Promise((resolve) => {
+      window.__rterm_pending = resolve;
+      window.ipc.postMessage(JSON.stringify({method: "ssh_resize", args: {id: id, cols: cols, rows: rows}}));
+    });
+  },
+  saveSessions: function(sessions) {
+    return new Promise((resolve) => {
+      window.__rterm_pending = resolve;
+      window.ipc.postMessage(JSON.stringify({method: "save_sessions", args: {sessions: sessions}}));
+    });
+  },
+  loadSessions: function() {
+    return new Promise((resolve) => {
+      window.__rterm_pending = resolve;
+      window.ipc.postMessage(JSON.stringify({method: "load_sessions", args: {}}));
+    });
+  },
+  sshExec: function(id, cmd) {
+    return new Promise((resolve) => {
+      window.__rterm_pending = resolve;
+      window.ipc.postMessage(JSON.stringify({method: "ssh_exec", args: {id, command: cmd}}));
+    });
+  },
+  localExec: function(cmd) {
+    return new Promise((resolve) => {
+      window.__rterm_pending = resolve;
+      window.ipc.postMessage(JSON.stringify({method: "local_exec", args: {command: cmd}}));
+    });
+  }
+};
+
+// Window resize - refit terminals and send resize to SSH
+window.addEventListener('resize', () => {
+  sessions.forEach((sess, id) => {
+    if (sess.fitAddon) {
+      sess.fitAddon.fit();
+      if (sess.type === 'ssh' && sess.sshId && sess.term) {
+        const dims = sess.fitAddon.proposeDimensions();
+        if (dims) {
+          window.rterm?.sshResize(sess.sshId, dims.cols, dims.rows);
+        }
+      }
+    }
+  });
+});
+</script></body>
+</html>
