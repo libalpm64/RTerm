@@ -223,10 +223,23 @@ fn main() {
                                         continue;
                                     }
                                 };
-if sessions.remove(&id).is_some() {
+                                sessions.remove(&id);
+                                read_halves.remove(&id);
+                                write_halves.remove(&id);
+                                let _ = reply_tx.send(r#"{"success":true}"#.to_string());
+                            }
+                            "resize" => {
+                                let parts: Vec<&str> = data.splitn(3, ':').collect();
+                                if parts.len() == 3 {
+                                    let id: u32 = match parts[0].parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid id"}"#.to_string()); continue; } };
+                                    let cols: u32 = match parts[1].parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid cols"}"#.to_string()); continue; } };
+                                    let rows: u32 = match parts[2].parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid rows"}"#.to_string()); continue; } };
+                                    if let Some(channel) = write_halves.get_mut(&id) {
+                                        let _ = runtime.block_on(channel.window_change(cols, rows, 0, 0));
+                                    }
                                     let _ = reply_tx.send(r#"{"success":true}"#.to_string());
                                 } else {
-                                    let _ = reply_tx.send(r#"{"success":false,"error":"Not found"}"#.to_string());
+                                    let _ = reply_tx.send(r#"{"success":false,"error":"Invalid format"}"#.to_string());
                                 }
                             }
                             _ => {
@@ -328,6 +341,18 @@ if sessions.remove(&id).is_some() {
                     match reply_rx.recv_timeout(Duration::from_secs(1)) {
                         Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
                         Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
+                    }
+                }
+                "ssh_resize" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let id: u32 = match args.get("id").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
+                    let cols: u32 = args.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u32;
+                    let rows: u32 = args.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u32;
+                    let (reply_tx, reply_rx) = mpsc::channel();
+                    ssh_tx_clone.send((format!("resize:{}:{}:{}", id, cols, rows), reply_tx)).ok();
+                    match reply_rx.recv_timeout(Duration::from_secs(1)) {
+                        Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
+                        Err(_) => send_resp(&serde_json::json!({"success": true})),
                     }
                 }
                 "ssh_disconnect" => {

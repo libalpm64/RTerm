@@ -1948,7 +1948,7 @@ async function newTerminal(type = 'local') {
 let connecting = false;
 
 async function doConnect() {
-  if (connecting) return;
+  if (connecting) { console.log('doConnect: already connecting'); return; }
   connecting = true;
   
   // Close modal immediately
@@ -1957,30 +1957,14 @@ async function doConnect() {
   const activeTab = document.querySelector('#modal-connect .modal-tab.active');
   const type = activeTab?.dataset.type || 'local';
   console.log('doConnect called, type:', type);
-  
-  let name = 'Session';
-  let host = '';
-  let save = false;
+
   let sshId = null;
   
-  if (type === 'local') {
-    name = document.getElementById('local-name').value || 'Local Shell';
-    save = document.getElementById('local-save-toggle').classList.contains('on');
-  } else if (type === 'ssh') {
-    name = document.getElementById('ssh-name').value || (document.getElementById('ssh-user').value + '@' + document.getElementById('ssh-host').value);
-    host = document.getElementById('ssh-host').value;
-    save = document.getElementById('ssh-save-toggle').classList.contains('on');
+  if (type === 'ssh') {
+    const name = document.getElementById('ssh-name').value || (document.getElementById('ssh-user').value + '@' + document.getElementById('ssh-host').value);
+    const host = document.getElementById('ssh-host').value;
+    const save = document.getElementById('ssh-save-toggle').classList.contains('on');
     
-    console.log('SSH connect:', {host, user: document.getElementById('ssh-user').value});
-    
-    // Close any existing local/demo terminals when connecting via SSH
-    for (const [key, sess] of sessions) {
-      if (sess.type === 'local' && !sess.sshId) {
-        closeTab(key);
-      }
-    }
-    
-    // Connect via rterm backend
     const config = {
       host: host,
       port: parseInt(document.getElementById('ssh-port').value) || 22,
@@ -1991,102 +1975,67 @@ async function doConnect() {
     
     console.log('Config:', JSON.stringify(config));
     
-    try {
-      const result = await window.rterm.sshConnect(config);
-      console.log('Result:', result);
-      if (!result.success) {
-        alert('Connection failed: ' + result.error);
-        connecting = false;
-        return;
-      }
-      sshId = result.id;
-      type = 'ssh';
-      
-      // Start shell
-      const shellResult = await window.rterm.sshShell(sshId);
-      console.log('Shell:', shellResult);
-      if (!shellResult.success) {
-        alert('Shell failed: ' + shellResult.error);
-        connecting = false;
-        return;
-      }
-      
-      // Save session if toggle is on
-      if (save) {
-        try {
-          await window.rterm.saveSessions([{
-            host: config.host,
-            port: config.port,
-            user: config.user,
-            password: config.password,
-            key_path: config.key_path
-          }]);
-        } catch (e) {
-          console.error('Failed to save session:', e);
+    // Create terminal tab immediately
+    const id = 'session-' + Date.now();
+    sessions.set(id, { name, type: 'ssh', term: null, fitAddon: null, sshId: null });
+    activeId = id;
+    renderTabs();
+    createTerminalInstance(id);
+    
+    // Connect in background
+    setTimeout(async () => {
+      try {
+        console.log('Attempting SSH connect...');
+        const result = await window.rterm.sshConnect(config);
+        console.log('Result:', JSON.stringify(result));
+        if (!result || !result.success) {
+          console.error('Connection failed:', result?.error);
+          closeTab(id);
+          connecting = false;
+          return;
         }
+        sshId = result.id;
+        console.log('SSH connected, id:', sshId);
+        
+        const sess = sessions.get(id);
+        if (sess) sess.sshId = sshId;
+        
+        const shellResult = await window.rterm.sshShell(sshId);
+        console.log('Shell result:', JSON.stringify(shellResult));
+        if (!shellResult || !shellResult.success) {
+          console.error('Shell failed:', shellResult?.error);
+          closeTab(id);
+          connecting = false;
+          return;
+        }
+        
+        console.log('Shell ready!');
+        // Focus the terminal
+        const sess2 = sessions.get(id);
+        if (sess2 && sess2.term) {
+          setTimeout(() => {
+            sess2.term.focus();
+            // Try focusing the underlying textarea directly
+            const ta = document.querySelector('.xterm-helper-textarea');
+            if (ta) ta.focus();
+          }, 100);
+        }
+      } catch (e) {
+        console.error('Connection error:', e);
+        closeTab(id);
       }
-      
-      // Clear screen after connect
-setTimeout(() => {
-        window.rterm.sshWrite(sshId, 'clear\r');
-      }, 200);
-      
-      // Create terminal for SSH session
-      const id = 'session-' + Date.now();
-      sessions.set(id, { name, type: 'ssh', term: null, fitAddon: null, sshId });
-      activeId = id;
-      
-      if (splitLayout.type === 'single' && !splitLayout.id) {
-        splitLayout.id = id;
-      }
-      
-      renderTabs();
-      createTerminalInstance(id);
-      updateSplitLayout();
-      
-      hideModal();
       connecting = false;
-      return;
-    } catch (e) {
-      alert('Connection error: ' + e);
-      connecting = false;
-      return;
-    }
-  } else if (type === 'telnet') {
-    name = document.getElementById('telnet-name').value || document.getElementById('telnet-host').value;
-    host = document.getElementById('telnet-host').value;
-    save = document.getElementById('telnet-save-toggle').classList.contains('on');
-  } else if (type === 'serial') {
-    name = document.getElementById('serial-name').value || document.getElementById('serial-port').value;
-    save = document.getElementById('serial-save-toggle').classList.contains('on');
+    }, 100);
+    return;
   }
   
+  // Local / telnet / serial
   const id = 'session-' + Date.now();
-  sessions.set(id, { name, type, term: null, fitAddon: null, sshId });
+  sessions.set(id, { name: type, type, term: null, fitAddon: null, sshId: null });
   activeId = id;
-  
-  if (splitLayout.type === 'single' && !splitLayout.id) {
-    splitLayout.id = id;
-  }
-  
   renderTabs();
   createTerminalInstance(id);
-  updateSplitLayout();
-  
-  if (save) {
-    addSession(type, { name, host });
-  }
-  
-  hideModal();
   connecting = false;
-  
-  // Focus the terminal input after connecting
-  setTimeout(() => {
-    const sess = sessions.get(id);
-    if (sess && sess.term) {
-      sess.term.focus();
-    }
-}, 100);
 }
 
 function createTerminalInstance(id, onReady) {
@@ -2137,16 +2086,20 @@ function createTerminalInstance(id, onReady) {
   
   term.onData(data => {
     const sess = sessions.get(id);
-    if (sess?.type === 'ssh' && sess?.sshId && window.rterm) {
-      if (data === '\r') {
-        window.rterm.sshWrite(sess.sshId, '\n');
-      } else if (data === '\x7f') {
-        window.rterm.sshWrite(sess.sshId, '\x7f');
-      } else if (data.startsWith('\x1b[') && data.endsWith('R')) {
-        // Skip cursor position query
-      } else {
-        window.rterm.sshWrite(sess.sshId, data);
+    if (sess?.type === 'ssh') {
+      if (sess.sshId !== null && sess.sshId !== undefined && window.rterm) {
+        // SSH connected - send to remote
+        if (data === '\r') {
+          window.rterm.sshWrite(sess.sshId, '\n');
+        } else if (data === '\x7f') {
+          window.rterm.sshWrite(sess.sshId, '\x7f');
+        } else if (data.startsWith('\x1b[') && data.endsWith('R')) {
+          // Skip cursor position query
+        } else {
+          window.rterm.sshWrite(sess.sshId, data);
+        }
       }
+      // Wait for SSH - don't echo locally
     } else if (invoke) {
       invoke('write_to_session', { id: id, data }).catch(console.error);
     } else {
@@ -2165,11 +2118,8 @@ function createTerminalInstance(id, onReady) {
   
   term.onResize(({ cols, rows }) => {
     const sess = sessions.get(id);
-    if (sess?.type === 'ssh' && sess?.sshId && window.rterm) {
-      window.ipc.postMessage(JSON.stringify({
-        method: "ssh_resize",
-        args: { id: sess.sshId, cols, rows }
-      }));
+    if (sess?.type === 'ssh' && sess?.sshId !== null && sess?.sshId !== undefined && window.rterm) {
+      window.rterm.sshResize(sess.sshId, cols, rows);
     }
   });
   
@@ -2937,15 +2887,7 @@ if (sessions.size === 0) {
   newTerminal();
 }
 
-// IPC API for Rust backend
-window.__rterm_pending = null;
-window.__rterm_resp = function(data) {
-  if (window.__rterm_pending) {
-    window.__rterm_pending(data);
-    window.__rterm_pending = null;
-  }
-};
-
+// IPC API for Rust backend (already defined in main script above)
 // SSH data callback
 window.__rterm_onData = function(id, data) {
   for (const [key, sess] of sessions) {
@@ -3010,7 +2952,7 @@ window.addEventListener('resize', () => {
   sessions.forEach((sess, id) => {
     if (sess.fitAddon) {
       sess.fitAddon.fit();
-      if (sess.type === 'ssh' && sess.sshId && sess.term) {
+      if (sess.type === 'ssh' && sess.sshId !== null && sess.sshId !== undefined && sess.term) {
         const dims = sess.fitAddon.proposeDimensions();
         if (dims) {
           window.rterm?.sshResize(sess.sshId, dims.cols, dims.rows);
@@ -3019,5 +2961,10 @@ window.addEventListener('resize', () => {
     }
   });
 });
+
+// Initial fit on startup
+setTimeout(() => {
+  sessions.forEach(sess => sess.fitAddon?.fit());
+}, 500);
 </script></body>
 </html>
