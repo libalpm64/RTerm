@@ -146,7 +146,10 @@ fn main() {
                                     Ok(c) => c,
                                     Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); continue; }
                                 };
-                                let config_ssh = Arc::new(Config::default());
+                                let mut cfg = Config::default();
+                                cfg.window_size = 8388608;       // 8MB window for better throughput
+                                cfg.maximum_packet_size = 131072; // 128KB packets
+                                let config_ssh = Arc::new(cfg);
                                 match client::connect(config_ssh.clone(), (config.host.as_str(), config.port), SshHandler).await {
                                     Ok(mut session) => {
                                         let auth_result = if let Some(key_path) = &config.key_path {
@@ -325,10 +328,9 @@ fn main() {
                                     let save_path = parts[2].to_string();
                                     // Respond immediately to unblock IPC
                                     let _ = reply_tx.send(r#"{"success":true}"#.to_string());
-                                    // Spawn download in background
+                                    // Spawn download in background (streaming)
                                     let ipc = ipc_tx_for_ssh_clone.clone();
                                     if let Some(sftp) = sftp_sessions.get(&id) {
-                                        // Clone SFTP session for the background task
                                         if let Ok(mut file) = sftp.open(&remote_path).await {
                                             tokio::spawn(async move {
                                                 use tokio::io::AsyncReadExt;
@@ -336,34 +338,37 @@ fn main() {
                                                 let mut out = match tokio::fs::File::create(&save_path).await {
                                                     Ok(f) => f,
                                                     Err(e) => {
-                                                        let _ = ipc.send(IpcOutMsg { script: format!("console.log('DL error: create: {}')", e) });
+                                                        let _ = ipc.send(IpcOutMsg { script: format!("console.log('DL error: {}')", e) });
                                                         return;
                                                     }
                                                 };
                                                 let mut buf = vec![0u8; 1024*1024];
-                                                let mut total = 0u64;
                                                 let start = std::time::Instant::now();
+                                                let mut total = 0u64;
+                                                let mut last_progress = std::time::Instant::now();
                                                 loop {
                                                     match file.read(&mut buf).await {
                                                         Ok(0) => break,
                                                         Ok(n) => {
                                                             if out.write_all(&buf[..n]).await.is_err() { break; }
                                                             total += n as u64;
-                                                            // Progress every 2 seconds
-                                                            if start.elapsed().as_secs() % 2 == 0 && n > 0 {
-                                                                let speed = total as f64 / start.elapsed().as_secs_f64().max(0.1);
+                                                            if last_progress.elapsed().as_secs_f64() >= 1.0 {
+                                                                let speed = total as f64 / start.elapsed().as_secs_f64().max(0.1) / (1024.0*1024.0);
+                                                                let mb = total as f64 / (1024.0*1024.0);
                                                                 let _ = ipc.send(IpcOutMsg {
-                                                                    script: format!("{{let p=document.getElementById('dl-progress');if(p)p.innerHTML='<span>Downloading... {:.1}MB/s</span>'}}", speed / 1024.0 / 1024.0),
+                                                                    script: format!("{{let p=document.getElementById('dl-progress');if(p)p.innerHTML='<span>Downloaded {:.1}MB @ {:.1}MB/s</span>'}}", mb, speed),
                                                                 });
+                                                                last_progress = std::time::Instant::now();
                                                             }
                                                         }
                                                         Err(_) => break,
                                                     }
                                                 }
                                                 let elapsed = start.elapsed().as_secs_f64();
-                                                let speed = total as f64 / elapsed.max(0.1) / 1024.0 / 1024.0;
+                                                let mb = total as f64 / (1024.0*1024.0);
+                                                let speed = total as f64 / elapsed.max(0.1) / (1024.0*1024.0);
                                                 let _ = ipc.send(IpcOutMsg {
-                                                    script: "var p=document.getElementById('dl-progress');if(p){p.innerHTML='<span style=\"color:var(--green)\">Download complete</span>';setTimeout(function(){p.remove()},5000)}".to_string(),
+                                                    script: format!("{{let p=document.getElementById('dl-progress');if(p){{p.innerHTML='<span style=\"color:var(--green)\">Saved {:.1}MB ({:.1}MB/s)</span>';setTimeout(function(){{p.remove()}},5000)}}}}", mb, speed),
                                                 });
                                             });
                                         }
