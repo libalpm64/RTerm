@@ -28,32 +28,22 @@
 
   html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); font-size: 12px; overflow: hidden; }
 
-  #titlebar {
-    height: 32px;
-    background: #000;
-    display: flex;
-    align-items: center;
-    padding: 0 16px;
-    gap: 8px;
-    border-bottom: 1px solid var(--border);
-  }
-  .traffic { display: flex; gap: 6px; }
-  .dot { width: 12px; height: 12px; border-radius: 50%; }
-  .dot.red    { background: #ff5f57; }
-  .dot.yellow { background: #febc2e; }
-  .dot.green  { background: #28c840; }
-  #titlebar .title { flex: 1; text-align: center; color: var(--text2); font-size: 12px; }
+  // no titlebar needed
 
   #menubar {
     height: 26px;
     background: var(--bg2);
-    display: flex;
+    display: flex !important;
     align-items: center;
     padding: 0 4px;
     border-bottom: 1px solid var(--border);
     gap: 2px;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
   }
   .menu-btn {
+    display: inline-flex !important;
+    align-items: center;
     padding: 4px 10px;
     border-radius: 4px;
     cursor: pointer;
@@ -62,6 +52,7 @@
     position: relative;
     transition: background .1s, color .1s;
     user-select: none;
+    white-space: nowrap;
   }
   .menu-btn:hover, .menu-btn.active { background: var(--bg4); color: var(--text); }
 
@@ -614,15 +605,6 @@
 </head>
 <body>
 
-<div id="titlebar">
-  <div class="traffic">
-    <div class="dot red"></div>
-    <div class="dot yellow"></div>
-    <div class="dot green"></div>
-  </div>
-  <div class="title">Rterm</div>
-</div>
-
 <div id="menubar">
   <div class="menu-btn" id="menu-file-btn">File
     <div class="dropdown" id="menu-file">
@@ -976,6 +958,17 @@
 
 <!-- MODAL -->
 <div id="modal-overlay" class="">
+  <!-- Lock Screen -->
+  <div id="lock-screen" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:var(--bg);z-index:10000;display:flex;align-items:center;justify-content:center;flex-direction:column;">
+    <div style="font-size:48px;margin-bottom:16px;">&#x1F512;</div>
+    <h2 style="color:var(--fg);margin-bottom:24px;">Session Vault Locked</h2>
+    <div style="display:flex;flex-direction:column;gap:8px;width:300px;">
+      <input type="password" id="lock-pass" placeholder="Enter vault password" style="padding:10px 16px;border-radius:6px;border:1px solid var(--bg3);background:var(--bg2);color:var(--fg);font-size:16px;">
+      <div id="lock-error" style="color:var(--red);display:none;font-size:13px;"></div>
+      <button id="lock-unlock-btn" style="padding:10px;border-radius:6px;background:var(--blue);color:white;border:none;font-size:16px;cursor:pointer;">Unlock</button>
+      <button id="lock-reset-btn" style="margin-top:8px;background:none;border:none;color:var(--fg2);font-size:13px;cursor:pointer;text-decoration:underline;">Reset vault (delete all saved sessions)</button>
+    </div>
+  </div>
   <div class="modal" id="modal-content">
     <div class="modal-header">
       <h3 id="modal-title">Settings</h3>
@@ -1542,7 +1535,9 @@ window.__rterm_onData = function(id, data) {
 async function initSessions() {
   if (window.rterm?.loadSessions) {
     try {
-      const result = await window.rterm.loadSessions();
+      // Try loading with stored vault password (will fail if not unlocked yet)
+      const pass = window.__rterm_vault_pass || '';
+      const result = await window.rterm.loadSessions(pass);
       if (result.success && result.result) {
         result.result.forEach(s => {
           savedSessions.push({...s, name: s.name || s.user + '@' + s.host});
@@ -1550,7 +1545,7 @@ async function initSessions() {
         savedSessionsDirty = true;
         if (typeof renderSavedSessions === 'function') renderSavedSessions();
       }
-    } catch (e) { console.error('Load sessions error:', e); }
+    } catch (e) { /* vault locked - will prompt */ }
   }
   setTimeout(() => { if (sessions.size === 0) newTerminal(); }, 500);
 }
@@ -1572,7 +1567,7 @@ async function loadSavedSessions() {
 
 // Save session to Rust backend
 async function saveSessionToBackend(name, type, config) {
-  if (window.rterm?.saveSessions) {
+  if (window.rterm?.saveSessions && window.__rterm_vault_pass) {
     try {
       await window.rterm.saveSessions([{
         host: config.host,
@@ -1580,7 +1575,7 @@ async function saveSessionToBackend(name, type, config) {
         user: config.user,
         password: config.password,
         key_path: config.key_path
-      }]);
+      }], window.__rterm_vault_pass);
     } catch (e) {}
   }
 }
@@ -1886,10 +1881,6 @@ function connectSession(idx) {
   const s = savedSessions[idx];
   if (!s || !s.host) return;
   
-  // Connect to saved SSH session
-  closeMenus();
-  hideModal();
-  
   const id = 'session-' + Date.now();
   sessions.set(id, { name: s.name, type: 'ssh', term: null, fitAddon: null, sshId: null });
   activeId = id;
@@ -1900,23 +1891,35 @@ function connectSession(idx) {
   
   renderTabs();
   createTerminalInstance(id, async (term, sess) => {
-    // Try to connect via rterm backend
     if (window.rterm) {
       const config = {
-        host: s.host,
-        port: s.port || 22,
-        user: s.user,
-        password: s.password,
-        key_path: s.key_path
+        host: s.host, port: s.port || 22,
+        user: s.user, password: s.password, key_path: s.key_path
       };
       try {
         const result = await window.rterm.sshConnect(config);
-        if (result.success) {
-          sess.sshId = result.id;
-          await window.rterm.sshShell(result.id);
+        if (!result.success) {
+          term.write('\x1b[1;31mFailed to connect: ' + (result.error || 'unknown error') + '\x1b[0m\r\n');
+          return;
         }
+        sess.sshId = result.id;
+        const shellResult = await window.rterm.sshShell(result.id);
+        if (!shellResult.success) {
+          term.write('\x1b[1;31mShell failed: ' + (shellResult.error || 'unknown error') + '\x1b[0m\r\n');
+          return;
+        }
+        // Initial resize + clear
+        setTimeout(() => {
+          if (sess.fitAddon) {
+            sess.fitAddon.fit();
+            const dims = sess.fitAddon.proposeDimensions();
+            if (dims) window.rterm?.sshResize(result.id, dims.cols, dims.rows);
+          }
+          window.rterm?.sshWrite(result.id, 'clear\r');
+          term.focus();
+        }, 200);
       } catch (e) {
-        term.write('\x1b[1;31mFailed to connect: ' + e + '\x1b[0m\r\n');
+        term.write('\x1b[1;31mError: ' + e + '\x1b[0m\r\n');
       }
     }
   });
@@ -1933,7 +1936,7 @@ async function newTerminal(type = 'local') {
   const id = 'session-' + Date.now();
   let name = 'Terminal ' + (sessions.size + 1);
   
-  sessions.set(id, { name, type, term: null, fitAddon: null });
+  sessions.set(id, { name, type, term: null, fitAddon: null, buffer: '' });
   activeId = id;
   
   if (splitLayout.type === 'single' && !splitLayout.id) {
@@ -2010,14 +2013,34 @@ async function doConnect() {
         }
         
         console.log('Shell ready!');
+        
+        // Save session if vault is unlocked and save toggle is on
+        if (save && window.__rterm_vault_pass) {
+          await window.rterm.saveSessions([{
+            host: config.host, port: config.port,
+            user: config.user, password: config.password,
+            key_path: config.key_path, name
+          }], window.__rterm_vault_pass);
+          // Refresh sidebar
+          savedSessionsDirty = true;
+          renderSavedSessions();
+        }
+        
         // Focus the terminal
         const sess2 = sessions.get(id);
         if (sess2 && sess2.term) {
           setTimeout(() => {
             sess2.term.focus();
-            // Try focusing the underlying textarea directly
             const ta = document.querySelector('.xterm-helper-textarea');
             if (ta) ta.focus();
+            // Force initial PTY resize
+            if (sess2.fitAddon) {
+              sess2.fitAddon.fit();
+              const dims = sess2.fitAddon.proposeDimensions();
+              if (dims) {
+                window.rterm?.sshResize(sess2.sshId, dims.cols, dims.rows);
+              }
+            }
           }, 100);
         }
       } catch (e) {
@@ -2080,6 +2103,10 @@ function createTerminalInstance(id, onReady) {
     requestAnimationFrame(() => fitAddon.fit());
   });
   
+  // Force fit after layout settles
+  setTimeout(() => fitAddon.fit(), 100);
+  setTimeout(() => fitAddon.fit(), 500);
+  
   if (onReady) {
     onReady(term, sess);
   }
@@ -2102,15 +2129,33 @@ function createTerminalInstance(id, onReady) {
       // Wait for SSH - don't echo locally
     } else if (invoke) {
       invoke('write_to_session', { id: id, data }).catch(console.error);
-    } else {
-      const code = data.charCodeAt(0);
+    } else if (sess?.type === 'local' && window.rterm) {
+      // Local terminal - execute commands
+      if (!sess.buffer) sess.buffer = '';
       if (data === '\r' || data === '\n') {
-        term.write('\r\n$ ');
+        const cmd = sess.buffer;
+        sess.buffer = '';
+        term.write('\r\n');
+        if (cmd.trim()) {
+          window.rterm.localExec(cmd, term.cols).then(resp => {
+            if (resp && resp.result) {
+              term.write(resp.result);
+            }
+            if (!resp || resp.error) {
+              term.write('\r\nCommand failed: ' + (resp?.error || 'unknown'));
+            }
+            term.write('$ ');
+          });
+        } else {
+          term.write('$ ');
+        }
       } else if (data === '\x7f' || data === '\b') {
-        term.write('\b \b');
-      } else if (code === 3) {
-        term.write('^C');
+        if (sess.buffer.length > 0) {
+          sess.buffer = sess.buffer.slice(0, -1);
+          term.write('\b \b');
+        }
       } else if (data.length === 1) {
+        sess.buffer += data;
         term.write(data);
       }
     }
@@ -2133,6 +2178,8 @@ function createTerminalInstance(id, onReady) {
     }
   } else if (sess?.type === 'ssh') {
     term.write('\x1b[1;32mSSH Connected, ready\x1b[0m\r\n\x1b[1;34m$\x1b[0m ');
+  } else {
+    term.write('\x1b[1;32mLocal Terminal\x1b[0m\r\n$ ');
   }
   
   updateSplitLayout();
@@ -2301,7 +2348,10 @@ function showTerminal(id) {
   currentTerm = sess.term;
   currentFitAddon = sess.fitAddon;
   
-  requestAnimationFrame(() => sess.fitAddon?.fit());
+  requestAnimationFrame(() => {
+    sess.fitAddon?.fit();
+    setTimeout(() => sess.fitAddon?.fit(), 50);
+  });
   
   updateStatus(id);
 }
@@ -2838,6 +2888,71 @@ document.getElementById('modal-cancel-btn').onclick = hideModal;
 document.getElementById('modal-connect-btn').onclick = doConnect;
 document.getElementById('settings-done-btn').onclick = hideModal;
 document.getElementById('about-close-btn').onclick = hideModal;
+
+// Vault handlers
+// Vault - settings toggle + password
+const vaultToggle = document.getElementById('setting-vault');
+const vaultPass = document.getElementById('setting-vault-pass');
+
+// Settings done - save vault if enabled
+document.getElementById('settings-done-btn').onclick = async () => {
+  if (vaultToggle?.classList.contains('on') && vaultPass?.value) {
+    const pass = vaultPass.value;
+    await window.rterm.saveSessions(savedSessions.map(s => ({
+      host: s.host, port: s.port, user: s.user,
+      password: s.password, key_path: s.key_path, name: s.name
+    })), pass);
+    window.__rterm_vault_pass = pass;
+  } else {
+    // Vault disabled or no password - delete vault if it exists
+    await window.rterm.deleteVault();
+    window.__rterm_vault_pass = '';
+  }
+  hideModal();
+};
+
+// Lock screen unlock
+document.getElementById('lock-unlock-btn').onclick = async () => {
+  const pass = document.getElementById('lock-pass').value;
+  const errEl = document.getElementById('lock-error');
+  const result = await window.rterm.loadSessions(pass);
+  if (result.success) {
+    window.__rterm_vault_pass = pass;
+    document.getElementById('lock-screen').style.display = 'none';
+    // Load sessions
+    if (result.result) {
+      savedSessions.length = 0;
+      result.result.forEach(s => savedSessions.push({...s, name: s.name || s.user + '@' + s.host}));
+      savedSessionsDirty = true;
+      renderSavedSessions();
+    }
+  } else {
+    errEl.textContent = 'Wrong password';
+    errEl.style.display = '';
+  }
+};
+
+// Lock screen reset vault
+document.getElementById('lock-reset-btn').onclick = async () => {
+  await window.rterm.deleteVault();
+  document.getElementById('lock-screen').style.display = 'none';
+  window.__rterm_vault_pass = '';
+  savedSessions.length = 0;
+  savedSessionsDirty = true;
+  renderSavedSessions();
+};
+
+// Check vault on app start - show lock screen if vault exists
+(async () => {
+  if (window.rterm) {
+    const exists = await window.rterm.vaultExists();
+    if (exists && exists.result) {
+      document.getElementById('lock-screen').style.display = 'flex';
+      document.getElementById('lock-pass').focus();
+    }
+  }
+})();
+
 document.getElementById('setting-font').onchange = (e) => updateFontSize(e.target.value);
 document.getElementById('setting-cursor').onchange = (e) => updateCursorStyle(e.target.value);
 document.getElementById('setting-cursor-blink').addEventListener('click', function() {
@@ -2921,16 +3036,28 @@ window.rterm = {
       window.ipc.postMessage(JSON.stringify({method: "ssh_resize", args: {id: id, cols: cols, rows: rows}}));
     });
   },
-  saveSessions: function(sessions) {
+  saveSessions: function(sessions, password) {
     return new Promise((resolve) => {
       window.__rterm_pending = resolve;
-      window.ipc.postMessage(JSON.stringify({method: "save_sessions", args: {sessions: sessions}}));
+      window.ipc.postMessage(JSON.stringify({method: "save_sessions", args: {sessions: sessions, password: password || ''}}));
     });
   },
-  loadSessions: function() {
+  loadSessions: function(password) {
     return new Promise((resolve) => {
       window.__rterm_pending = resolve;
-      window.ipc.postMessage(JSON.stringify({method: "load_sessions", args: {}}));
+      window.ipc.postMessage(JSON.stringify({method: "load_sessions", args: {password: password || ''}}));
+    });
+  },
+  vaultExists: function() {
+    return new Promise((resolve) => {
+      window.__rterm_pending = resolve;
+      window.ipc.postMessage(JSON.stringify({method: "vault_exists", args: {}}));
+    });
+  },
+  deleteVault: function() {
+    return new Promise((resolve) => {
+      window.__rterm_pending = resolve;
+      window.ipc.postMessage(JSON.stringify({method: "delete_vault", args: {}}));
     });
   },
   sshExec: function(id, cmd) {
@@ -2939,10 +3066,10 @@ window.rterm = {
       window.ipc.postMessage(JSON.stringify({method: "ssh_exec", args: {id, command: cmd}}));
     });
   },
-  localExec: function(cmd) {
+  localExec: function(cmd, cols) {
     return new Promise((resolve) => {
       window.__rterm_pending = resolve;
-      window.ipc.postMessage(JSON.stringify({method: "local_exec", args: {command: cmd}}));
+      window.ipc.postMessage(JSON.stringify({method: "local_exec", args: {command: cmd, cols: cols || 120}}));
     });
   }
 };

@@ -38,27 +38,59 @@ impl client::Handler for SshHandler {
 
 struct IpcOutMsg { script: String }
 
+use chacha20poly1305::XChaCha20Poly1305;
+use chacha20poly1305::XNonce;
+use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
+
+fn derive_key(password: &str) -> [u8; 32] {
+    let p = password.as_bytes();
+    let mut key = [0u8; 32];
+    let len = p.len().min(32);
+    key[..len].copy_from_slice(&p[..len]);
+    // xor with repeating pattern to mix better
+    for i in len..32 {
+        key[i] = p[i % p.len().max(1)] ^ (i as u8);
+    }
+    key
+}
+
 fn get_config_dir() -> std::path::PathBuf {
     std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config").join("rterm"))
         .unwrap_or_else(|_| std::path::PathBuf::from("rterm"))
 }
 
-fn save_sessions(sessions_data: &[SshConfig]) -> std::io::Result<()> {
+fn vault_exists() -> bool {
+    get_config_dir().join("vault.dat").exists()
+}
+
+fn save_vault(sessions_data: &[SshConfig], password: &str) -> Result<(), String> {
     let config_dir = get_config_dir();
-    std::fs::create_dir_all(&config_dir)?;
-    let json = serde_json::to_string(sessions_data)?;
-    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, json);
-    std::fs::write(config_dir.join("sessions.dat"), encoded)?;
+    std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string(sessions_data).map_err(|e| e.to_string())?;
+    let key = derive_key(password);
+    let cipher = XChaCha20Poly1305::new_from_slice(&key).unwrap();
+    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let ciphertext = cipher.encrypt(&nonce, json.as_bytes())
+        .map_err(|e| format!("encrypt error: {:?}", e))?;
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&nonce);
+    buf.extend_from_slice(&ciphertext);
+    std::fs::write(config_dir.join("vault.dat"), buf).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-fn load_sessions() -> std::io::Result<Vec<SshConfig>> {
+fn load_vault(password: &str) -> Result<Vec<SshConfig>, String> {
     let config_dir = get_config_dir();
-    let encoded = std::fs::read_to_string(config_dir.join("sessions.dat"))?;
-    let json = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &encoded)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid base64"))?;
-    let json_str = String::from_utf8(json).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid utf8"))?;
-    serde_json::from_str(&json_str).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid json"))
+    let data = std::fs::read(config_dir.join("vault.dat")).map_err(|e| e.to_string())?;
+    if data.len() < 24 { return Err("vault too small".into()); }
+    let nonce = XNonce::from_slice(&data[..24]);
+    let ciphertext = &data[24..];
+    let key = derive_key(password);
+    let cipher = XChaCha20Poly1305::new_from_slice(&key).unwrap();
+    let plaintext = cipher.decrypt(nonce, ciphertext)
+        .map_err(|_| "wrong password or corrupted vault".to_string())?;
+    let json = String::from_utf8(plaintext).map_err(|_| "invalid utf8".to_string())?;
+    serde_json::from_str(&json).map_err(|_| "invalid json".to_string())
 }
 
 fn main() {
@@ -368,8 +400,20 @@ fn main() {
                 "local_exec" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                    let resp = match std::process::Command::new("sh").arg("-c").arg(cmd).output() {
-                        Ok(o) => serde_json::json!({"success": true, "result": String::from_utf8_lossy(&o.stdout)}),
+                    let cols: u16 = args.get("cols").and_then(|v| v.as_u64()).map(|v| v as u16).unwrap_or(80);
+                    let resp = match std::process::Command::new("script")
+                        .arg("-q").arg("/dev/null")
+                        .arg("sh").arg("-c").arg(cmd)
+                        .env("COLUMNS", cols.to_string())
+                        .env("LINES", "40")
+                        .env("TERM", "xterm-256color")
+                        .output() {
+                        Ok(o) => {
+                            let out = String::from_utf8_lossy(&o.stdout);
+                            // script prepends shell output marker, strip it
+                            let clean = out.trim_start_matches(|c| c == '\r' || c == '\n');
+                            serde_json::json!({"success": true, "result": clean})
+                        }
                         Err(e) => serde_json::json!({"success": false, "error": e.to_string()}),
                     };
                     send_resp(&resp);
@@ -390,16 +434,30 @@ fn main() {
                         Ok(s) => s,
                         Err(_) => { send_resp(&serde_json::json!({"success": false, "error": "invalid sessions"})); return }
                     };
-                    match save_sessions(&sessions) {
+                    let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
+                    match save_vault(&sessions, password) {
                         Ok(_) => send_resp(&serde_json::json!({"success": true})),
-                        Err(e) => send_resp(&serde_json::json!({"success": false, "error": e.to_string()})),
+                        Err(e) => send_resp(&serde_json::json!({"success": false, "error": e})),
                     }
                 }
                 "load_sessions" => {
-                    match load_sessions() {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
+                    match load_vault(password) {
                         Ok(sessions) => send_resp(&serde_json::json!({"success": true, "result": sessions})),
-                        Err(e) => send_resp(&serde_json::json!({"success": false, "error": e.to_string()})),
+                        Err(e) => send_resp(&serde_json::json!({"success": false, "error": e})),
                     }
+                }
+                "vault_exists" => {
+                    send_resp(&serde_json::json!({"success": true, "result": vault_exists()}));
+                }
+                "delete_vault" => {
+                    let config_dir = get_config_dir();
+                    let path = config_dir.join("vault.dat");
+                    if path.exists() {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    send_resp(&serde_json::json!({"success": true}));
                 }
                 _ => send_resp(&serde_json::json!({"success": false, "error": "Unknown method"})),
             }
