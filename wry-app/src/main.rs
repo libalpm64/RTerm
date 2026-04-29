@@ -42,15 +42,20 @@ use chacha20poly1305::XChaCha20Poly1305;
 use chacha20poly1305::XNonce;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
 
-fn derive_key(password: &str) -> [u8; 32] {
-    let p = password.as_bytes();
+const VAULT_MAGIC: &[u8; 4] = b"RTVL";
+const VAULT_VERSION: u16 = 1;
+const ALGO_ARGON2: u16 = 0;
+const ALGO_BLAKE3: u16 = 1;
+
+fn derive_key_argon2(password: &str) -> [u8; 32] {
     let mut key = [0u8; 32];
-    let len = p.len().min(32);
-    key[..len].copy_from_slice(&p[..len]);
-    // xor with repeating pattern to mix better
-    for i in len..32 {
-        key[i] = p[i % p.len().max(1)] ^ (i as u8);
-    }
+    let _ = argon2::Argon2::default().hash_password_into(password.as_bytes(), b"rterm-vault-salt", &mut key);
+    key
+}
+
+fn derive_key_blake3(password: &str) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&blake3::hash(password.as_bytes()).as_bytes()[..32]);
     key
 }
 
@@ -63,16 +68,26 @@ fn vault_exists() -> bool {
     get_config_dir().join("vault.dat").exists()
 }
 
-fn save_vault(sessions_data: &[SshConfig], password: &str) -> Result<(), String> {
+fn save_vault(sessions_data: &[SshConfig], password: &str, algo: u16) -> Result<(), String> {
     let config_dir = get_config_dir();
     std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
-    let json = serde_json::to_string(sessions_data).map_err(|e| e.to_string())?;
-    let key = derive_key(password);
+    let container = serde_json::json!({
+        "v": 1,
+        "sessions": sessions_data
+    });
+    let json = serde_json::to_string(&container).map_err(|e| e.to_string())?;
+    let key = match algo {
+        ALGO_BLAKE3 => derive_key_blake3(password),
+        _ => derive_key_argon2(password),
+    };
     let cipher = XChaCha20Poly1305::new_from_slice(&key).unwrap();
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ciphertext = cipher.encrypt(&nonce, json.as_bytes())
         .map_err(|e| format!("encrypt error: {:?}", e))?;
     let mut buf = Vec::new();
+    buf.extend_from_slice(VAULT_MAGIC);
+    buf.extend_from_slice(&VAULT_VERSION.to_le_bytes());
+    buf.extend_from_slice(&algo.to_le_bytes());
     buf.extend_from_slice(&nonce);
     buf.extend_from_slice(&ciphertext);
     std::fs::write(config_dir.join("vault.dat"), buf).map_err(|e| e.to_string())?;
@@ -82,15 +97,48 @@ fn save_vault(sessions_data: &[SshConfig], password: &str) -> Result<(), String>
 fn load_vault(password: &str) -> Result<Vec<SshConfig>, String> {
     let config_dir = get_config_dir();
     let data = std::fs::read(config_dir.join("vault.dat")).map_err(|e| e.to_string())?;
-    if data.len() < 24 { return Err("vault too small".into()); }
-    let nonce = XNonce::from_slice(&data[..24]);
-    let ciphertext = &data[24..];
-    let key = derive_key(password);
+    if data.len() < 12 { return Err("vault too small".into()); }
+    if &data[..4] != VAULT_MAGIC { return Err("invalid vault magic".into()); }
+    let _version = u16::from_le_bytes([data[4], data[5]]);
+    let algo = u16::from_le_bytes([data[6], data[7]]);
+    let nonce = XNonce::from_slice(&data[8..32]);
+    let ciphertext = &data[32..];
+    let key = match algo {
+        ALGO_BLAKE3 => derive_key_blake3(password),
+        _ => derive_key_argon2(password),
+    };
     let cipher = XChaCha20Poly1305::new_from_slice(&key).unwrap();
     let plaintext = cipher.decrypt(nonce, ciphertext)
         .map_err(|_| "wrong password or corrupted vault".to_string())?;
-    let json = String::from_utf8(plaintext).map_err(|_| "invalid utf8".to_string())?;
-    serde_json::from_str(&json).map_err(|_| "invalid json".to_string())
+    let json_str = String::from_utf8(plaintext).map_err(|_| "invalid utf8".to_string())?;
+    let container: serde_json::Value = serde_json::from_str(&json_str).map_err(|_| "invalid json".to_string())?;
+    // Extract sessions from container (optional, future versions may have more fields)
+    let sessions = container.get("sessions")
+        .and_then(|s| serde_json::from_value(s.clone()).ok())
+        .unwrap_or_default();
+    Ok(sessions)
+}
+
+fn get_settings_path() -> std::path::PathBuf {
+    get_config_dir().join("settings.json")
+}
+
+fn save_setting(key: &str, value: &str) {
+    let config_dir = get_config_dir();
+    let _ = std::fs::create_dir_all(&config_dir);
+    let path = get_settings_path();
+    let mut settings: serde_json::Value = std::fs::read_to_string(&path)
+        .ok().and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({}));
+    settings[key] = serde_json::json!(value);
+    let _ = std::fs::write(&path, settings.to_string());
+}
+
+fn load_setting(key: &str) -> Option<String> {
+    let path = get_settings_path();
+    let settings: serde_json::Value = std::fs::read_to_string(&path)
+        .ok().and_then(|s| serde_json::from_str(&s).ok())?;
+    settings.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
 }
 
 fn main() {
@@ -619,6 +667,61 @@ fn main() {
                         Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
                     }
                 }
+                                "local_list" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                    // Expand ~ to home directory
+                    let expanded = if dir.starts_with("~") {
+                        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                        dir.replacen('~', &home, 1)
+                    } else {
+                        dir.to_string()
+                    };
+                    // Handle relative paths - use CWD
+                    let path = if expanded.starts_with('/') {
+                        std::path::PathBuf::from(&expanded)
+                    } else {
+                        std::env::current_dir().unwrap_or_default().join(&expanded)
+                    };
+                    match std::fs::read_dir(&path) {
+                        Ok(entries) => {
+                            let mut files = Vec::new();
+                            for entry in entries.flatten() {
+                                let name = entry.file_name().to_string_lossy().to_string();
+                                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                                files.push(serde_json::json!({"name": name, "dir": is_dir, "size": size}));
+                            }
+                            files.sort_by(|a, b| {
+                                let ad = a.get("dir").and_then(|v| v.as_bool()).unwrap_or(false);
+                                let bd = b.get("dir").and_then(|v| v.as_bool()).unwrap_or(false);
+                                bd.cmp(&ad).then(a.get("name").and_then(|v| v.as_str()).unwrap_or("").cmp(b.get("name").and_then(|v| v.as_str()).unwrap_or("")))
+                            });
+                            send_resp(&serde_json::json!({"success": true, "result": files, "path": dir}));
+                        }
+                        Err(e) => send_resp(&serde_json::json!({"success": false, "error": e.to_string()})),
+                    }
+                }
+                "local_delete" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    let is_dir = args.get("dir").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let expanded = if path.starts_with("~") {
+                        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                        path.replacen('~', &home, 1)
+                    } else {
+                        path.to_string()
+                    };
+                    let result = if is_dir {
+                        std::fs::remove_dir_all(&expanded)
+                    } else {
+                        std::fs::remove_file(&expanded)
+                    };
+                    match result {
+                        Ok(_) => send_resp(&serde_json::json!({"success": true})),
+                        Err(e) => send_resp(&serde_json::json!({"success": false, "error": e.to_string()})),
+                    }
+                }
                 "local_exec" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
@@ -650,6 +753,12 @@ fn main() {
                     });
                     send_resp(&serde_json::json!({"success": true, "result": config}));
                 }
+                "get_env" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                    let val = std::env::var(key).ok();
+                    send_resp(&serde_json::json!({"success": true, "result": val}));
+                }
                 "save_sessions" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let sessions: Vec<SshConfig> = match serde_json::from_value(args.get("sessions").cloned().unwrap_or_default()) {
@@ -657,7 +766,8 @@ fn main() {
                         Err(_) => { send_resp(&serde_json::json!({"success": false, "error": "invalid sessions"})); return }
                     };
                     let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
-                    match save_vault(&sessions, password) {
+                    let algo: u16 = args.get("algo").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                    match save_vault(&sessions, password, algo) {
                         Ok(_) => send_resp(&serde_json::json!({"success": true})),
                         Err(e) => send_resp(&serde_json::json!({"success": false, "error": e})),
                     }
@@ -680,6 +790,19 @@ fn main() {
                         let _ = std::fs::remove_file(&path);
                     }
                     send_resp(&serde_json::json!({"success": true}));
+                }
+                "save_setting" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                    let value = args.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                    save_setting(key, value);
+                    send_resp(&serde_json::json!({"success": true}));
+                }
+                "load_setting" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                    let value = load_setting(key);
+                    send_resp(&serde_json::json!({"success": true, "result": value}));
                 }
                 _ => send_resp(&serde_json::json!({"success": false, "error": "Unknown method"})),
             }

@@ -25,6 +25,41 @@
     --purple:    #c586c0;
     --blue:      #569cd6;
   }
+  .theme-dracula {
+    --bg:#1e1f29; --bg2:#282a36; --bg3:#343746; --bg4:#3d3f51;
+    --border:#45475a; --border2:#555;
+    --text:#f8f8f2; --text2:#a9a9b8; --text3:#6c6c80;
+    --accent:#bd93f9; --green:#50fa7b; --red:#ff5555;
+    --yellow:#f1fa8c; --orange:#ffb86c; --purple:#bd93f9; --blue:#6272a4;
+  }
+  .theme-monokai {
+    --bg:#171717; --bg2:#1e1e1e; --bg3:#252526; --bg4:#2d2d2d;
+    --border:#3c3c3c; --border2:#555;
+    --text:#d4d4d4; --text2:#999; --text3:#666;
+    --accent:#a6e22e; --green:#a6e22e; --red:#f92672;
+    --yellow:#e6db74; --orange:#fd971f; --purple:#ae81ff; --blue:#66d9ef;
+  }
+  .theme-nord {
+    --bg:#2e3440; --bg2:#3b4252; --bg3:#434c5e; --bg4:#4c566a;
+    --border:#5e6a82; --border2:#6e7a92;
+    --text:#eceff4; --text2:#d8dee9; --text3:#a3b1cc;
+    --accent:#88c0d0; --green:#a3be8c; --red:#bf616a;
+    --yellow:#ebcb8b; --orange:#d08770; --purple:#b48ead; --blue:#81a1c1;
+  }
+  .theme-solarized {
+    --bg:#002b36; --bg2:#073642; --bg3:#094452; --bg4:#0b5e6e;
+    --border:#0d7a8b; --border2:#1596a8;
+    --text:#839496; --text2:#657b83; --text3:#506870;
+    --accent:#2aa198; --green:#859900; --red:#dc322f;
+    --yellow:#b58900; --orange:#cb4b16; --purple:#6c71c4; --blue:#268bd2;
+  }
+  .theme-light {
+    --bg:#ffffff; --bg2:#f5f5f5; --bg3:#e8e8e8; --bg4:#ddd;
+    --border:#ccc; --border2:#bbb;
+    --text:#333; --text2:#666; --text3:#999;
+    --accent:#0066cc; --green:#008800; --red:#cc0000;
+    --yellow:#cc8800; --orange:#cc6600; --purple:#8800cc; --blue:#0066cc;
+  }
 
   html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); font-size: 12px; overflow: hidden; }
 
@@ -85,7 +120,17 @@
   .dropdown-item .shortcut { color: var(--text3); margin-left: auto; font-size: 11px; }
   .dropdown-divider { height: 1px; background: var(--border); margin: 4px 0; }
 
-  #app { display: flex; height: calc(100vh - 58px); }
+  #app { display: flex; height: calc(100vh - 26px); position: relative; }
+
+  .resize-bar {
+    width: 4px;
+    cursor: col-resize;
+    flex-shrink: 0;
+    background: transparent;
+    transition: background .15s;
+    z-index: 5;
+  }
+  .resize-bar:hover, .resize-bar.active { background: var(--accent); }
 
   #sidebar {
     width: 240px;
@@ -359,7 +404,7 @@
   .rsection-action:hover { opacity: 1; }
   .rsection-action svg { width: 12px; height: 12px; }
 
-  .session-list { padding: 4px 0; max-height: 300px; overflow-y: auto; }
+  .session-list { padding: 4px 0; flex: 1; overflow-y: auto; }
   .session-list::-webkit-scrollbar { width: 6px; }
   .session-list::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
 
@@ -737,7 +782,7 @@
       </div>
     </div>
   </div>
-
+  <div class="resize-bar" id="resize-left"></div>
   <div id="main">
     <div id="tabbar">
       <div class="tab-add" id="tab-add-btn">
@@ -902,20 +947,18 @@
     </div>
 
     <div id="statusbar">
-      <span id="status-mode">Local Mode</span>
+      <span id="status-mode">Ready</span>
       <span class="status-sep">|</span>
-      <span id="status-size">108x28</span>
+      <span id="status-size">80x24</span>
       <span class="status-sep">|</span>
-      <span id="status-cursor">Ln 5, Col 3</span>
+      <span id="status-cursor">Ln 1, Col 1</span>
       <span class="status-sep">|</span>
-      <span>UTF-8</span>
-      <span class="status-sep">|</span>
-      <span>bash</span>
+      <span id="status-time"></span>
       <span class="spacer"></span>
       <span class="accent" id="about-btn">Rterm</span>
     </div>
   </div>
-
+  <div class="resize-bar" id="resize-right"></div>
   <div id="right-sidebar">
     <div class="rsection-header">
       Sessions
@@ -925,10 +968,11 @@
         </span>
       </div>
     </div>
+    <div style="padding:4px 8px;flex-shrink:0"><input type="text" id="session-search" placeholder="Filter sessions..." style="width:100%;padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg3);color:var(--text);font-size:11px;outline:none;"></div>
     <div class="session-list" id="session-list"><div class="sempty">No saved sessions</div></div>
 
-    <div class="rsection" style="flex:1;overflow:hidden;display:flex;flex-direction:column;">
-      <div class="rsection-header">
+    <div class="rsection" style="flex:0 0 auto;max-height:120px;overflow:hidden;display:flex;flex-direction:column;border-top:1px solid var(--border);">
+      <div class="rsection-header" style="cursor:pointer" onclick="const e=document.getElementById('history-list');e.style.maxHeight=e.style.maxHeight==='0px'?'120px':'0px'">
         Command History
         <div class="rsection-actions">
           <span class="rsection-action" id="rs-clear-history" title="Clear">
@@ -1197,9 +1241,11 @@
               <div class="setting-label">Theme<small>Terminal color theme</small></div>
               <select id="setting-theme">
                 <option value="default" selected="">Default Dark</option>
+                <option value="dracula">Dracula</option>
                 <option value="monokai">Monokai</option>
-                <option value="solarized">Solarized</option>
                 <option value="nord">Nord</option>
+                <option value="solarized">Solarized Dark</option>
+                <option value="light">Light</option>
               </select>
             </div>
           </div>
@@ -1264,9 +1310,7 @@
               <div class="setting-label">Password Hash<small>Algorithm for password hashing</small></div>
               <select id="setting-hash-algo">
                 <option value="argon2" selected="">Argon2id</option>
-                <option value="bcrypt">Bcrypt</option>
-                <option value="scrypt">Scrypt</option>
-                <option value="sha256">SHA-256</option>
+                <option value="blake3">Blake3</option>
               </select>
             </div>
           </div>
@@ -2472,7 +2516,11 @@ function updateStatus(id) {
   if (sess && sess.term) {
     document.getElementById('status-size').textContent = sess.term.cols + 'x' + sess.term.rows;
     document.getElementById('status-cursor').textContent = 'Ln ' + (sess.term.buffer.active.cursorY + 1) + ', Col ' + (sess.term.buffer.active.cursorX + 1);
+    document.getElementById('status-mode').textContent = sess.type === 'ssh' ? 'SSH' : 'Local';
   }
+  // Update clock every second
+  const now = new Date();
+  document.getElementById('status-time').textContent = now.toLocaleTimeString();
 }
 
 function renderTabs() {
@@ -2992,8 +3040,41 @@ document.getElementById('about-btn').onclick = () => showModal('about');
 
 document.getElementById('rs-add-session').onclick = () => showModal('connect');
 document.getElementById('rs-clear-history').onclick = () => {
-  document.getElementById('history-list').innerHTML = '<div class="sempty">History cleared</div>';
+  document.getElementById('history-list').innerHTML = '<div class="sempty" style="padding:8px;font-size:11px">History cleared</div>';
 };
+
+// Session search filter
+const searchInput = document.getElementById('session-search');
+if (searchInput) {
+  searchInput.addEventListener('input', function() {
+    const q = this.value.toLowerCase();
+    document.querySelectorAll('.session-item').forEach(el => {
+      el.style.display = el.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+  });
+}
+
+// Resize sidebars
+['resize-left', 'resize-right'].forEach(id => {
+  const bar = document.getElementById(id);
+  if (!bar) return;
+  let startX, startW;
+  bar.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const target = id === 'resize-left' ? document.getElementById('sidebar') : document.getElementById('right-sidebar');
+    startX = e.clientX;
+    startW = target.offsetWidth;
+    bar.classList.add('active');
+    const onMove = (ev) => {
+      const diff = ev.clientX - startX;
+      const newW = id === 'resize-left' ? Math.max(60, Math.min(500, startW + diff)) : Math.max(60, Math.min(500, startW - diff));
+      target.style.width = newW + 'px';
+    };
+    const onUp = () => { bar.classList.remove('active'); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+});
 
 document.getElementById('modal-cancel-btn').onclick = hideModal;
 document.getElementById('modal-connect-btn').onclick = doConnect;
@@ -3007,15 +3088,21 @@ const vaultPass = document.getElementById('setting-vault-pass');
 
 // Settings done - save vault if enabled
 document.getElementById('settings-done-btn').onclick = async () => {
+  const hashAlgo = parseInt(document.getElementById('setting-hash-algo')?.value === 'blake3' ? '1' : '0');
+  const vaultOn = vaultToggle?.classList.contains('on') ? '1' : '0';
+  
+  // Persist settings
+  await window.rterm.saveSetting('vault_enabled', vaultOn);
+  await window.rterm.saveSetting('vault_hash', String(hashAlgo));
+  
   if (vaultToggle?.classList.contains('on') && vaultPass?.value) {
     const pass = vaultPass.value;
     await window.rterm.saveSessions(savedSessions.map(s => ({
       host: s.host, port: s.port, user: s.user,
       password: s.password, key_path: s.key_path, name: s.name
-    })), pass);
+    })), pass, hashAlgo);
     window.__rterm_vault_pass = pass;
   } else {
-    // Vault disabled or no password - delete vault if it exists
     await window.rterm.deleteVault();
     window.__rterm_vault_pass = '';
   }
@@ -3056,6 +3143,16 @@ document.getElementById('lock-reset-btn').onclick = async () => {
 // Check vault on app start - show lock screen if vault exists
 (async () => {
   if (window.rterm) {
+    // Load persisted settings
+    const vaultEnabled = await window.rterm.loadSetting('vault_enabled');
+    const vaultHash = await window.rterm.loadSetting('vault_hash');
+    if (vaultToggle && vaultEnabled?.result) {
+      if (vaultEnabled.result === '1') vaultToggle.classList.add('on');
+    }
+    if (vaultHash?.result && document.getElementById('setting-hash-algo')) {
+      document.getElementById('setting-hash-algo').value = vaultHash.result === '1' ? 'blake3' : 'argon2';
+    }
+    
     const exists = await window.rterm.vaultExists();
     if (exists && exists.result) {
       document.getElementById('lock-screen').style.display = 'flex';
@@ -3071,8 +3168,105 @@ document.getElementById('setting-cursor-blink').addEventListener('click', functi
   updateCursorBlink(this.classList.contains('on'));
 });
 
-document.getElementById('filer-refresh').onclick = () => console.log('Refresh local');
+// Theme switching
+function setTheme(name) {
+  document.documentElement.className = name === 'default' ? '' : 'theme-' + name;
+  try { localStorage.setItem('rterm-theme', name); } catch(e) {}
+}
+document.getElementById('setting-theme').onchange = (e) => setTheme(e.target.value);
+// Load saved theme
+const savedTheme = (() => { try { return localStorage.getItem('rterm-theme'); } catch(e) {} })();
+if (savedTheme && savedTheme !== 'default') {
+  document.getElementById('setting-theme').value = savedTheme;
+  setTheme(savedTheme);
+}
+
+// Local file browser
+let localPath = '~';
+let localExpanded = '';
+let localHome = '';
+async function loadLocalDir(dir) {
+  const listEl = document.getElementById('filer-list');
+  const pathEl = document.getElementById('filer-path');
+  if (!listEl) return;
+  
+  // Get home once
+  if (!localHome) {
+    const h = await window.rterm.getEnv('HOME');
+    localHome = (h.result || '').trim() || '/';
+  }
+  
+  const resolved = dir === '~' || dir === '' ? localHome : dir;
+  localExpanded = resolved;
+  localPath = dir;
+  
+  const result = await window.rterm.localList(resolved);
+  if (!result.success) { listEl.innerHTML = '<div style="padding:8px;color:var(--red)">Error: ' + (result.error || 'unknown') + '</div>'; return; }
+  
+  const parts = dir.split('/').filter(Boolean);
+  pathEl.innerHTML = parts.map((p, i) => {
+    const path = '/' + parts.slice(0, i+1).join('/');
+    return `<span style="color:var(--text3)">/</span><span onclick="loadLocalDir('${path}')">${p}</span>`;
+  }).join('');
+  if (dir === '/') pathEl.innerHTML = '<span style="color:var(--text3)">/</span>';
+  else if (dir === '~') pathEl.innerHTML = '<span style="color:var(--text3)">~</span>';
+  
+  listEl.innerHTML = '';
+  
+  // Parent dir
+  if (dir !== '/' && dir !== '~') {
+    const parentDiv = document.createElement('div');
+    parentDiv.className = 'filer-item';
+    parentDiv.innerHTML = '<span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path></svg></span><span class="name" style="color:var(--text3)">..</span>';
+    parentDiv.onclick = () => loadLocalDir(dir.split('/').filter(Boolean).slice(0,-1).join('/') || '/');
+    listEl.appendChild(parentDiv);
+  }
+  
+  const files = result.result || [];
+  files.forEach(f => {
+    const div = document.createElement('div');
+    div.className = 'filer-item' + (f.dir ? ' selected' : '');
+    const icon = f.dir
+      ? '<svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path></svg>'
+      : '<svg viewBox="0 0 24 24" fill="none" stroke="var(--text2)" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>';
+    const sizeStr = f.size ? (f.size > 1024*1024*1024 ? (f.size/1024/1024/1024).toFixed(1)+'G' : f.size > 1024*1024 ? (f.size/1024/1024).toFixed(1)+'M' : f.size > 1024 ? (f.size/1024).toFixed(1)+'K' : f.size+'B') : '';
+    div.innerHTML = `<span class="icon">${icon}</span><span class="name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px">${f.name}</span>${sizeStr ? `<span style="margin-left:auto;padding-right:8px;color:var(--text3);font-size:11px">${sizeStr}</span>` : ''}`;
+    if (f.dir) { div.onclick = () => loadLocalDir((dir === '/' ? '/' : dir + '/') + f.name); }
+    div.oncontextmenu = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const fullPath = '/' + f.name; // relative, the backend expands
+      // Remove existing context menu
+      const old = document.getElementById('local-ctx');
+      if (old) old.remove();
+      const menu = document.createElement('div');
+      menu.id = 'local-ctx';
+      menu.style.cssText = 'position:fixed;z-index:9999;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:4px;box-shadow:0 8px 24px rgba(0,0,0,.5);min-width:140px;font-size:12px;';
+      menu.innerHTML = '<div class="dropdown-item" id="lctx-delete" style="color:var(--red)">Delete ' + (f.dir ? 'Folder' : 'File') + '</div>';
+      document.body.appendChild(menu);
+      menu.style.left = Math.min(e.clientX, window.innerWidth - 160) + 'px';
+      menu.style.top = Math.min(e.clientY, window.innerHeight - 60) + 'px';
+      document.getElementById('lctx-delete').onclick = async () => {
+        menu.remove();
+        if (!confirm('Delete "' + f.name + '"?')) return;
+        const path = localExpanded + '/' + f.name;
+        const result = await window.rterm.localDelete(path, f.dir);
+        if (result.success) { loadLocalDir(localPath); }
+        else { alert('Delete failed: ' + (result.error || 'unknown')); }
+      };
+      setTimeout(() => {
+        document.addEventListener('click', () => { const m = document.getElementById('local-ctx'); if (m) m.remove(); }, { once: true });
+      }, 10);
+    };
+    listEl.appendChild(div);
+  });
+}
+
+document.getElementById('filer-refresh').onclick = () => setTimeout(() => loadLocalDir(localPath), 100);
 document.getElementById('filer-toggle').onclick = () => toggleSidebar('left');
+
+// Init local file browser when Local tab is clicked
+document.querySelector('.sidebar-tab[data-panel="local"]').addEventListener('click', () => setTimeout(() => loadLocalDir('~'), 50));
 
 document.getElementById('tabbar').onclick = (e) => {
   const closeBtn = e.target.closest('.tab-close');
@@ -3107,6 +3301,10 @@ document.querySelectorAll('#filer-list .filer-item, #sftp-list .filer-item').for
 initSettingsTabs();
 renderSavedSessions();
 updateStatus();
+setInterval(() => updateStatus(activeId), 1000);
+
+// Load local files on startup
+setTimeout(() => loadLocalDir('~'), 200);
 
 if (sessions.size === 0) {
   newTerminal();
@@ -3146,16 +3344,28 @@ window.rterm = {
       window.ipc.postMessage(JSON.stringify({method: "ssh_resize", args: {id: id, cols: cols, rows: rows}}));
     });
   },
-  saveSessions: function(sessions, password) {
+  saveSessions: function(sessions, password, algo) {
     return new Promise((resolve) => {
       window.__rterm_pending = resolve;
-      window.ipc.postMessage(JSON.stringify({method: "save_sessions", args: {sessions: sessions, password: password || ''}}));
+      window.ipc.postMessage(JSON.stringify({method: "save_sessions", args: {sessions: sessions, password: password || '', algo: algo || 0}}));
     });
   },
   loadSessions: function(password) {
     return new Promise((resolve) => {
       window.__rterm_pending = resolve;
       window.ipc.postMessage(JSON.stringify({method: "load_sessions", args: {password: password || ''}}));
+    });
+  },
+  saveSetting: function(key, value) {
+    return new Promise((resolve) => {
+      window.__rterm_pending = resolve;
+      window.ipc.postMessage(JSON.stringify({method: "save_setting", args: {key: key, value: value}}));
+    });
+  },
+  loadSetting: function(key) {
+    return new Promise((resolve) => {
+      window.__rterm_pending = resolve;
+      window.ipc.postMessage(JSON.stringify({method: "load_setting", args: {key: key}}));
     });
   },
   vaultExists: function() {
@@ -3216,6 +3426,24 @@ window.rterm = {
     return new Promise((resolve) => {
       window.__rterm_pending = resolve;
       window.ipc.postMessage(JSON.stringify({method: "local_exec", args: {command: cmd, cols: cols || 120}}));
+    });
+  },
+  localList: function(path) {
+    return new Promise((resolve) => {
+      window.__rterm_pending = resolve;
+      window.ipc.postMessage(JSON.stringify({method: "local_list", args: {path: path || '.'}}));
+    });
+  },
+  localDelete: function(path, dir) {
+    return new Promise((resolve) => {
+      window.__rterm_pending = resolve;
+      window.ipc.postMessage(JSON.stringify({method: "local_delete", args: {path: path, dir: dir || false}}));
+    });
+  },
+  getEnv: function(key) {
+    return new Promise((resolve) => {
+      window.__rterm_pending = resolve;
+      window.ipc.postMessage(JSON.stringify({method: "get_env", args: {key: key}}));
     });
   }
 };
