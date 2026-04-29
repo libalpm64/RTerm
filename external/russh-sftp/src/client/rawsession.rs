@@ -319,9 +319,11 @@ impl RawSftpSession {
         offset: u64,
         len: u32,
     ) -> SftpResult<Data> {
-        if self.options.limits.read_len.is_some_and(|r| len as u64 > r) {
-            return Err(Error::Limited("read limit reached".to_owned()));
-        }
+        let len = if self.options.limits.read_len.is_some_and(|r| len as u64 > r) {
+            self.options.limits.as_ref().read_len.unwrap_or(len as u64) as u32
+        } else {
+            len
+        };
 
         let id = self.use_next_id();
         let result = self

@@ -18,7 +18,7 @@ use crate::{
 
 type StateFn<T> = Option<Pin<Box<dyn Future<Output = io::Result<T>> + Send + Sync + 'static>>>;
 
-const MAX_READ_LENGTH: u64 = 261120;
+const MAX_READ_LENGTH: u64 = 8388608; // 8MB read requests
 const MAX_WRITE_LENGTH: u64 = 261120;
 
 struct FileState {
@@ -68,6 +68,11 @@ impl File {
         }
     }
 
+    /// Get the raw SFTP session and file handle for pipelined operations
+    pub fn raw(&self) -> (Arc<RawSftpSession>, &str) {
+        (self.session.clone(), &self.handle)
+    }
+    
     /// Queries metadata about the remote file.
     pub async fn metadata(&self) -> SftpResult<Metadata> {
         Ok(self.session.fstat(self.handle.as_str()).await?.attrs)

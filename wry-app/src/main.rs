@@ -328,47 +328,99 @@ fn main() {
                                     let save_path = parts[2].to_string();
                                     // Respond immediately to unblock IPC
                                     let _ = reply_tx.send(r#"{"success":true}"#.to_string());
-                                    // Spawn download in background (streaming)
+                                    // Parallel chunked download
                                     let ipc = ipc_tx_for_ssh_clone.clone();
                                     if let Some(sftp) = sftp_sessions.get(&id) {
-                                        if let Ok(mut file) = sftp.open(&remote_path).await {
+                                        // Open first handle to get file info
+                                        if let Ok(file) = sftp.open(&remote_path).await {
+                                            let (raw, _) = file.raw();
+                                            let raw_session = raw;
+                                            let meta = file.metadata().await.ok();
+                                            let file_size = meta.map(|m| m.len()).unwrap_or(0);
+                                            
                                             tokio::spawn(async move {
-                                                use tokio::io::AsyncReadExt;
                                                 use tokio::io::AsyncWriteExt;
-                                                let mut out = match tokio::fs::File::create(&save_path).await {
-                                                    Ok(f) => f,
-                                                    Err(e) => {
-                                                        let _ = ipc.send(IpcOutMsg { script: format!("console.log('DL error: {}')", e) });
-                                                        return;
+                                                
+                                                if file_size == 0 {
+                                                    let _ = ipc.send(IpcOutMsg { script: "console.log('DL: unknown file size, aborting')".to_string() });
+                                                    return;
+                                                }
+                                                
+                                                use std::sync::atomic::{AtomicU64, Ordering};
+                                                use std::sync::Arc;
+                                                
+                                                let num_parts = 6usize;
+                                                let part_size = (file_size as usize + num_parts - 1) / num_parts;
+                                                let start_time = std::time::Instant::now();
+                                                let progress = Arc::new(AtomicU64::new(0));
+                                                
+                                                // Spawn progress updater
+                                                let prog = progress.clone();
+                                                let ipc_p = ipc.clone();
+                                                let total_sz = file_size;
+                                                let progress_task = tokio::spawn(async move {
+                                                    loop {
+                                                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                                        let done = prog.load(Ordering::Relaxed);
+                                                        if done >= total_sz { break; }
+                                                        let speed = done as f64 / start_time.elapsed().as_secs_f64().max(0.1) / (1024.0*1024.0);
+                                                        let mb = done as f64 / (1024.0*1024.0);
+                                                        let _ = ipc_p.send(IpcOutMsg {
+                                                            script: format!("{{let p=document.getElementById('dl-progress');if(p)p.innerHTML='<span>Downloaded {:.1}MB @ {:.1}MB/s</span>'}}", mb, speed),
+                                                        });
                                                     }
-                                                };
-                                                let mut buf = vec![0u8; 1024*1024];
-                                                let start = std::time::Instant::now();
-                                                let mut total = 0u64;
-                                                let mut last_progress = std::time::Instant::now();
-                                                loop {
-                                                    match file.read(&mut buf).await {
-                                                        Ok(0) => break,
-                                                        Ok(n) => {
-                                                            if out.write_all(&buf[..n]).await.is_err() { break; }
-                                                            total += n as u64;
-                                                            if last_progress.elapsed().as_secs_f64() >= 1.0 {
-                                                                let speed = total as f64 / start.elapsed().as_secs_f64().max(0.1) / (1024.0*1024.0);
-                                                                let mb = total as f64 / (1024.0*1024.0);
-                                                                let _ = ipc.send(IpcOutMsg {
-                                                                    script: format!("{{let p=document.getElementById('dl-progress');if(p)p.innerHTML='<span>Downloaded {:.1}MB @ {:.1}MB/s</span>'}}", mb, speed),
-                                                                });
-                                                                last_progress = std::time::Instant::now();
+                                                });
+                                                
+                                                let mut part_handles = Vec::new();
+                                                for pi in 0..num_parts {
+                                                    let rs = raw_session.clone();
+                                                    let p = remote_path.clone();
+                                                    let sp = save_path.clone() + ".part" + &pi.to_string();
+                                                    let begin = pi * part_size;
+                                                    let end = ((pi + 1) * part_size).min(file_size as usize);
+                                                    let prog = progress.clone();
+                                                    
+                                                    part_handles.push(tokio::spawn(async move {
+                                                        if begin >= end { return; }
+                                                        if let Ok(h) = rs.open(&p, russh_sftp::protocol::OpenFlags::READ, Default::default()).await {
+                                                            let handle_str = h.handle;
+                                                            let mut pos = begin as u64;
+                                                            if let Ok(mut out) = tokio::fs::File::create(&sp).await {
+                                                                while pos < end as u64 {
+                                                                    let remaining = (end as u64 - pos).min(262144);
+                                                                    match rs.read(&handle_str, pos, remaining as u32).await {
+                                                                        Ok(data) if data.data.is_empty() => break,
+                                                                        Ok(data) => {
+                                                                            if out.write_all(&data.data).await.is_err() { break; }
+                                                                            pos += data.data.len() as u64;
+                                                                            prog.fetch_add(data.data.len() as u64, Ordering::Relaxed);
+                                                                        }
+                                                                        Err(_) => break,
+                                                                    }
+                                                                }
                                                             }
                                                         }
-                                                        Err(_) => break,
+                                                    }));
+                                                }
+                                                
+                                                for h in part_handles { let _ = h.await; }
+                                                let _ = progress_task.await;
+                                                
+                                                // Merge parts
+                                                if let Ok(mut out) = tokio::fs::File::create(&save_path).await {
+                                                    for pi in 0..num_parts {
+                                                        let pp = save_path.clone() + ".part" + &pi.to_string();
+                                                        if let Ok(data) = tokio::fs::read(&pp).await {
+                                                            let _ = out.write_all(&data).await;
+                                                        }
+                                                        let _ = tokio::fs::remove_file(&pp).await;
                                                     }
                                                 }
-                                                let elapsed = start.elapsed().as_secs_f64();
-                                                let mb = total as f64 / (1024.0*1024.0);
-                                                let speed = total as f64 / elapsed.max(0.1) / (1024.0*1024.0);
+                                                
+                                                let elapsed = start_time.elapsed().as_secs_f64();
+                                                let speed = file_size as f64 / elapsed.max(0.1) / (1024.0*1024.0);
                                                 let _ = ipc.send(IpcOutMsg {
-                                                    script: format!("{{let p=document.getElementById('dl-progress');if(p){{p.innerHTML='<span style=\"color:var(--green)\">Saved {:.1}MB ({:.1}MB/s)</span>';setTimeout(function(){{p.remove()}},5000)}}}}", mb, speed),
+                                                    script: format!("{{let p=document.getElementById('dl-progress');if(p){{p.innerHTML='<span style=\"color:var(--green)\">Saved {:.1}MB ({:.1}MB/s)</span>';setTimeout(function(){{p.remove()}},5000)}}}}", file_size as f64/(1024.0*1024.0), speed),
                                                 });
                                             });
                                         }
