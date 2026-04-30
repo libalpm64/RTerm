@@ -97,26 +97,45 @@ fn save_vault(sessions_data: &[SshConfig], password: &str, algo: u16) -> Result<
 fn load_vault(password: &str) -> Result<Vec<SshConfig>, String> {
     let config_dir = get_config_dir();
     let data = std::fs::read(config_dir.join("vault.dat")).map_err(|e| e.to_string())?;
-    if data.len() < 12 { return Err("vault too small".into()); }
-    if &data[..4] != VAULT_MAGIC { return Err("invalid vault magic".into()); }
-    let _version = u16::from_le_bytes([data[4], data[5]]);
-    let algo = u16::from_le_bytes([data[6], data[7]]);
-    let nonce = XNonce::from_slice(&data[8..32]);
-    let ciphertext = &data[32..];
-    let key = match algo {
-        ALGO_BLAKE3 => derive_key_blake3(password),
-        _ => derive_key_argon2(password),
-    };
-    let cipher = XChaCha20Poly1305::new_from_slice(&key).unwrap();
-    let plaintext = cipher.decrypt(nonce, ciphertext)
-        .map_err(|_| "wrong password or corrupted vault".to_string())?;
-    let json_str = String::from_utf8(plaintext).map_err(|_| "invalid utf8".to_string())?;
-    let container: serde_json::Value = serde_json::from_str(&json_str).map_err(|_| "invalid json".to_string())?;
-    // Extract sessions from container (optional, future versions may have more fields)
-    let sessions = container.get("sessions")
-        .and_then(|s| serde_json::from_value(s.clone()).ok())
-        .unwrap_or_default();
-    Ok(sessions)
+    
+    // Try new format first (with header)
+    if data.len() >= 12 && &data[..4] == VAULT_MAGIC {
+        let _version = u16::from_le_bytes([data[4], data[5]]);
+        let algo = u16::from_le_bytes([data[6], data[7]]);
+        let nonce = XNonce::from_slice(&data[8..32]);
+        let ciphertext = &data[32..];
+        let key = match algo {
+            ALGO_BLAKE3 => derive_key_blake3(password),
+            _ => derive_key_argon2(password),
+        };
+        let cipher = XChaCha20Poly1305::new_from_slice(&key).unwrap();
+        match cipher.decrypt(nonce, ciphertext) {
+            Ok(plaintext) => {
+                let json_str = String::from_utf8(plaintext).map_err(|_| "invalid utf8".to_string())?;
+                let container: serde_json::Value = serde_json::from_str(&json_str).map_err(|_| "invalid json".to_string())?;
+                let sessions = container.get("sessions")
+                    .and_then(|s| serde_json::from_value(s.clone()).ok())
+                    .unwrap_or_default();
+                return Ok(sessions);
+            }
+            Err(_) => return Err("wrong password".to_string()),
+        }
+    }
+    
+    // Try old format (no header, nonce + ciphertext, blake3 key)
+    if data.len() >= 24 {
+        let nonce = XNonce::from_slice(&data[..24]);
+        let ciphertext = &data[24..];
+        let key = derive_key_blake3(password);
+        let cipher = XChaCha20Poly1305::new_from_slice(&key).unwrap();
+        if let Ok(plaintext) = cipher.decrypt(nonce, ciphertext) {
+            let json_str = String::from_utf8(plaintext).map_err(|_| "invalid utf8".to_string())?;
+            let sessions: Vec<SshConfig> = serde_json::from_str(&json_str).map_err(|_| "invalid json".to_string())?;
+            return Ok(sessions);
+        }
+    }
+    
+    Err("wrong password or corrupted vault".to_string())
 }
 
 fn get_settings_path() -> std::path::PathBuf {
