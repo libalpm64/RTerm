@@ -25,6 +25,8 @@ pub struct SshConfig {
     user: String,
     password: Option<String>,
     key_path: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 struct SshHandler;
@@ -43,19 +45,13 @@ use chacha20poly1305::XNonce;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
 
 const VAULT_MAGIC: &[u8; 4] = b"RTVL";
-const VAULT_VERSION: u16 = 1;
-const ALGO_ARGON2: u16 = 0;
-const ALGO_BLAKE3: u16 = 1;
+const VAULT_VERSION: u16 = 2;
 
-fn derive_key_argon2(password: &str) -> [u8; 32] {
+fn derive_key(password: &str) -> [u8; 32] {
     let mut key = [0u8; 32];
-    let _ = argon2::Argon2::default().hash_password_into(password.as_bytes(), b"rterm-vault-salt", &mut key);
-    key
-}
-
-fn derive_key_blake3(password: &str) -> [u8; 32] {
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&blake3::hash(password.as_bytes()).as_bytes()[..32]);
+    let hash = blake3::hash(b"rterm-vault-v2");
+    let salt: &[u8; 16] = hash.as_bytes()[..16].try_into().unwrap();
+    let _ = argon2::Argon2::default().hash_password_into(password.as_bytes(), salt, &mut key);
     key
 }
 
@@ -68,18 +64,15 @@ fn vault_exists() -> bool {
     get_config_dir().join("vault.dat").exists()
 }
 
-fn save_vault(sessions_data: &[SshConfig], password: &str, algo: u16) -> Result<(), String> {
+fn save_vault(sessions_data: &[SshConfig], password: &str) -> Result<(), String> {
     let config_dir = get_config_dir();
     std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
     let container = serde_json::json!({
-        "v": 1,
+        "v": 2,
         "sessions": sessions_data
     });
     let json = serde_json::to_string(&container).map_err(|e| e.to_string())?;
-    let key = match algo {
-        ALGO_BLAKE3 => derive_key_blake3(password),
-        _ => derive_key_argon2(password),
-    };
+    let key = derive_key(password);
     let cipher = XChaCha20Poly1305::new_from_slice(&key).unwrap();
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ciphertext = cipher.encrypt(&nonce, json.as_bytes())
@@ -87,7 +80,6 @@ fn save_vault(sessions_data: &[SshConfig], password: &str, algo: u16) -> Result<
     let mut buf = Vec::new();
     buf.extend_from_slice(VAULT_MAGIC);
     buf.extend_from_slice(&VAULT_VERSION.to_le_bytes());
-    buf.extend_from_slice(&algo.to_le_bytes());
     buf.extend_from_slice(&nonce);
     buf.extend_from_slice(&ciphertext);
     std::fs::write(config_dir.join("vault.dat"), buf).map_err(|e| e.to_string())?;
@@ -97,45 +89,24 @@ fn save_vault(sessions_data: &[SshConfig], password: &str, algo: u16) -> Result<
 fn load_vault(password: &str) -> Result<Vec<SshConfig>, String> {
     let config_dir = get_config_dir();
     let data = std::fs::read(config_dir.join("vault.dat")).map_err(|e| e.to_string())?;
-    
-    // Try new format first (with header)
-    if data.len() >= 12 && &data[..4] == VAULT_MAGIC {
-        let _version = u16::from_le_bytes([data[4], data[5]]);
-        let algo = u16::from_le_bytes([data[6], data[7]]);
-        let nonce = XNonce::from_slice(&data[8..32]);
-        let ciphertext = &data[32..];
-        let key = match algo {
-            ALGO_BLAKE3 => derive_key_blake3(password),
-            _ => derive_key_argon2(password),
-        };
-        let cipher = XChaCha20Poly1305::new_from_slice(&key).unwrap();
-        match cipher.decrypt(nonce, ciphertext) {
-            Ok(plaintext) => {
-                let json_str = String::from_utf8(plaintext).map_err(|_| "invalid utf8".to_string())?;
-                let container: serde_json::Value = serde_json::from_str(&json_str).map_err(|_| "invalid json".to_string())?;
-                let sessions = container.get("sessions")
-                    .and_then(|s| serde_json::from_value(s.clone()).ok())
-                    .unwrap_or_default();
-                return Ok(sessions);
-            }
-            Err(_) => return Err("wrong password".to_string()),
-        }
+    if data.len() < 6 || &data[..4] != VAULT_MAGIC {
+        return Err("wrong password or corrupted vault".to_string());
     }
-    
-    // Try old format (no header, nonce + ciphertext, blake3 key)
-    if data.len() >= 24 {
-        let nonce = XNonce::from_slice(&data[..24]);
-        let ciphertext = &data[24..];
-        let key = derive_key_blake3(password);
-        let cipher = XChaCha20Poly1305::new_from_slice(&key).unwrap();
-        if let Ok(plaintext) = cipher.decrypt(nonce, ciphertext) {
+    let nonce = XNonce::from_slice(&data[6..30]);
+    let ciphertext = &data[30..];
+    let key = derive_key(password);
+    let cipher = XChaCha20Poly1305::new_from_slice(&key).unwrap();
+    match cipher.decrypt(nonce, ciphertext) {
+        Ok(plaintext) => {
             let json_str = String::from_utf8(plaintext).map_err(|_| "invalid utf8".to_string())?;
-            let sessions: Vec<SshConfig> = serde_json::from_str(&json_str).map_err(|_| "invalid json".to_string())?;
-            return Ok(sessions);
+            let container: serde_json::Value = serde_json::from_str(&json_str).map_err(|_| "invalid json".to_string())?;
+            let sessions = container.get("sessions")
+                .and_then(|s| serde_json::from_value(s.clone()).ok())
+                .unwrap_or_default();
+            Ok(sessions)
         }
+        Err(_) => Err("wrong password".to_string()),
     }
-    
-    Err("wrong password or corrupted vault".to_string())
 }
 
 fn get_settings_path() -> std::path::PathBuf {
@@ -666,8 +637,14 @@ fn main() {
                     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let filename = args.get("filename").and_then(|v| v.as_str()).unwrap_or("download").to_string();
                     
-                    // Save to Downloads folder
-                    let save_path = std::env::var("HOME").unwrap_or_else(|_| ".".to_string()) + "/Downloads/" + &filename;
+                    // Use provided save_path or fallback to ~/Downloads
+                    let save_dir = args.get("save_path").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| {
+                            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                            home + "/Downloads"
+                        });
+                    let save_path = save_dir + "/" + &filename;
                     let (reply_tx, reply_rx) = mpsc::channel();
                     ssh_tx_clone.send((format!("sftp_download:{}:{}:{}", id, path, save_path), reply_tx)).ok();
                     match reply_rx.recv_timeout(Duration::from_secs(300)) {
@@ -785,8 +762,7 @@ fn main() {
                         Err(_) => { send_resp(&serde_json::json!({"success": false, "error": "invalid sessions"})); return }
                     };
                     let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
-                    let algo: u16 = args.get("algo").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-                    match save_vault(&sessions, password, algo) {
+                    match save_vault(&sessions, password) {
                         Ok(_) => send_resp(&serde_json::json!({"success": true})),
                         Err(e) => send_resp(&serde_json::json!({"success": false, "error": e})),
                     }

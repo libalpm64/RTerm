@@ -557,6 +557,19 @@
     padding: 16px 20px;
     border-top: 1px solid var(--border);
   }
+
+  #save-dialog .sd-item {
+    display: flex;
+    align-items: center;
+    padding: 5px 16px;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text);
+  }
+  #save-dialog .sd-item:hover { background: var(--bg4); }
+  #save-dialog .sd-item.active { background: var(--bg4); color: var(--accent); }
+  #save-dialog .sd-item .icon { flex-shrink: 0; width: 16px; height: 16px; }
   .modal-footer .btn-cancel { background: var(--bg3); color: var(--text2); }
   .modal-footer .btn-cancel:hover { background: var(--bg4); }
   .modal-footer .btn-primary { background: var(--accent); color: #000; flex: 1; }
@@ -1000,19 +1013,35 @@
   <div class="dropdown-item" id="ctx-zoom">Reset Font Size</div>
 </div>
 
-<!-- MODAL -->
-<div id="modal-overlay" class="">
-  <!-- Lock Screen -->
-  <div id="lock-screen" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:var(--bg);z-index:10000;display:flex;align-items:center;justify-content:center;flex-direction:column;">
-    <div style="font-size:48px;margin-bottom:16px;">&#x1F512;</div>
-    <h2 style="color:var(--fg);margin-bottom:24px;">Session Vault Locked</h2>
-    <div style="display:flex;flex-direction:column;gap:8px;width:300px;">
-      <input type="password" id="lock-pass" placeholder="Enter vault password" style="padding:10px 16px;border-radius:6px;border:1px solid var(--bg3);background:var(--bg2);color:var(--fg);font-size:16px;">
-      <div id="lock-error" style="color:var(--red);display:none;font-size:13px;"></div>
-      <button id="lock-unlock-btn" style="padding:10px;border-radius:6px;background:var(--blue);color:white;border:none;font-size:16px;cursor:pointer;">Unlock</button>
-      <button id="lock-reset-btn" style="margin-top:8px;background:none;border:none;color:var(--fg2);font-size:13px;cursor:pointer;text-decoration:underline;">Reset vault (delete all saved sessions)</button>
+<!-- SAVE DIALOG -->
+<div id="save-dialog" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:10001;align-items:center;justify-content:center;">
+  <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;width:540px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 16px 48px rgba(0,0,0,.6);">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border);font-size:14px;font-weight:600;color:var(--fg);">
+      <span>Select Download Folder</span>
+      <span id="sd-close" style="cursor:pointer;color:var(--text3);font-size:18px;">&times;</span>
+    </div>
+    <div id="sd-path" style="padding:8px 16px;font-size:12px;color:var(--text2);background:var(--bg3);border-bottom:1px solid var(--border);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
+    <div id="sd-list" style="flex:1;overflow-y:auto;padding:4px 0;min-height:200px;"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;padding:10px 16px;border-top:1px solid var(--border);">
+      <button id="sd-cancel" style="padding:7px 16px;border-radius:6px;border:1px solid var(--border);background:var(--bg3);color:var(--text);font-size:13px;cursor:pointer;">Cancel</button>
+      <button id="sd-select" style="padding:7px 16px;border-radius:6px;border:none;background:var(--accent);color:#fff;font-size:13px;cursor:pointer;">Select Folder</button>
     </div>
   </div>
+</div>
+
+<!-- LOCK SCREEN -->
+<div id="lock-screen" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);z-index:10000;align-items:center;justify-content:center;flex-direction:column;">
+  <div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:48px;width:420px;display:flex;flex-direction:column;gap:24px;box-shadow:0 24px 80px rgba(0,0,0,.5);">
+    <div style="font-size:22px;font-weight:600;color:var(--fg);letter-spacing:-.01em;">Vault Locked</div>
+    <input type="password" id="lock-pass" placeholder="Master password" autocomplete="off" style="padding:14px 16px;border-radius:8px;border:1px solid var(--border);background:var(--bg3);color:var(--fg);font-size:16px;outline:none;">
+    <div id="lock-error" style="color:var(--red);display:none;font-size:13px;"></div>
+    <button id="lock-unlock-btn" style="padding:14px;border-radius:8px;background:var(--accent);color:#fff;border:none;font-size:15px;font-weight:500;cursor:pointer;">Unlock</button>
+    <button id="lock-reset-btn" style="background:none;border:none;color:var(--text3);font-size:13px;cursor:pointer;padding:0;text-align:center;">Reset vault</button>
+  </div>
+</div>
+
+<!-- MODAL -->
+<div id="modal-overlay" class="">
   <div class="modal" id="modal-content">
     <div class="modal-header">
       <h3 id="modal-title">Settings</h3>
@@ -1304,16 +1333,7 @@
             </div>
           </div>
 
-          <div class="settings-section">
-            <h4>Hashing Algorithm</h4>
-            <div class="setting-row">
-              <div class="setting-label">Password Hash<small>Algorithm for password hashing</small></div>
-              <select id="setting-hash-algo">
-                <option value="argon2" selected="">Argon2id</option>
-                <option value="blake3">Blake3</option>
-              </select>
-            </div>
-          </div>
+
 
           <div class="settings-section">
             <h4>Session Security</h4>
@@ -1577,20 +1597,6 @@ window.__rterm_onData = function(id, data) {
 
 // Load saved sessions from backend on startup
 async function initSessions() {
-  if (window.rterm?.loadSessions) {
-    try {
-      // Try loading with stored vault password (will fail if not unlocked yet)
-      const pass = window.__rterm_vault_pass || '';
-      const result = await window.rterm.loadSessions(pass);
-      if (result.success && result.result) {
-        result.result.forEach(s => {
-          savedSessions.push({...s, name: s.name || s.user + '@' + s.host});
-        });
-        savedSessionsDirty = true;
-        if (typeof renderSavedSessions === 'function') renderSavedSessions();
-      }
-    } catch (e) { /* vault locked - will prompt */ }
-  }
   setTimeout(() => { if (sessions.size === 0) newTerminal(); }, 500);
 }
 
@@ -1618,7 +1624,8 @@ async function saveSessionToBackend(name, type, config) {
         port: config.port,
         user: config.user,
         password: config.password,
-        key_path: config.key_path
+        key_path: config.key_path,
+        name: name
       }], window.__rterm_vault_pass);
     } catch (e) {}
   }
@@ -1910,11 +1917,10 @@ async function loadSftpDir(path) {
       if (f.dir) {
         div.onclick = () => loadSftpDir(fullPath);
       } else {
-        // Download button directly in file row
+        // Download button click - quick download to Downloads folder
         div.addEventListener('click', (e) => {
           if (e.target.closest('.saction')) {
             e.stopPropagation();
-            // Show progress bar
             let pbar = document.getElementById('dl-progress');
             if (!pbar) {
               pbar = document.createElement('div');
@@ -1926,6 +1932,37 @@ async function loadSftpDir(path) {
             window.rterm.sftpDownload(sftpSshId, fullPath, f.name);
           }
         });
+        // Right-click context menu
+        div.oncontextmenu = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const old = document.getElementById('sftp-ctx');
+          if (old) old.remove();
+          const menu = document.createElement('div');
+          menu.id = 'sftp-ctx';
+          menu.style.cssText = 'position:fixed;z-index:9999;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:4px;box-shadow:0 8px 24px rgba(0,0,0,.5);min-width:160px;font-size:12px;';
+          menu.innerHTML = '<div class="dropdown-item" id="sctx-dl">Download to...</div>';
+          document.body.appendChild(menu);
+          menu.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
+          menu.style.top = Math.min(e.clientY, window.innerHeight - 80) + 'px';
+          document.getElementById('sctx-dl').onclick = async () => {
+            menu.remove();
+            const saveDir = await showSaveDialog(f.name);
+            if (!saveDir) return;
+            let pbar = document.getElementById('dl-progress');
+            if (!pbar) {
+              pbar = document.createElement('div');
+              pbar.id = 'dl-progress';
+              pbar.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:var(--bg3);padding:12px 16px;z-index:9999;border-top:1px solid var(--border);font-size:13px;';
+              document.body.appendChild(pbar);
+            }
+            pbar.innerHTML = `<span>Downloading ${f.name} to ${saveDir}...</span>`;
+            window.rterm.sftpDownload(sftpSshId, fullPath, f.name, saveDir);
+          };
+          setTimeout(() => {
+            document.addEventListener('click', () => { const m = document.getElementById('sftp-ctx'); if (m) m.remove(); }, { once: true });
+          }, 10);
+        };
       }
       listEl.appendChild(div);
     }
@@ -1935,6 +1972,85 @@ async function loadSftpDir(path) {
 }
 
 document.getElementById('sftp-refresh').onclick = () => { sftpInitialized = false; if (sftpSshId) loadSftpDir('/'); };
+
+// ── Save Dialog (Folder Picker) ──
+let _sdResolve = null;
+let _sdPath = '~';
+let _sdFilename = '';
+
+function showSaveDialog(filename) {
+  return new Promise((resolve) => {
+    _sdResolve = resolve;
+    _sdFilename = filename;
+    document.getElementById('save-dialog').style.display = 'flex';
+    loadSaveDir(filename, _sdPath);
+  });
+}
+
+function loadSaveDir(filename, dir) {
+  const list = document.getElementById('sd-list');
+  const pathEl = document.getElementById('sd-path');
+  _sdPath = dir;
+  pathEl.textContent = dir === '~' ? '/home/' + (document.getElementById('ssh-user')?.value || 'user') : dir;
+  list.innerHTML = '<div style="padding:16px;color:var(--text3);text-align:center;font-size:13px;">Loading...</div>';
+  
+  window.rterm.localList(dir).then(result => {
+    if (!result || !result.success) {
+      list.innerHTML = '<div style="padding:16px;color:var(--red);text-align:center;font-size:13px;">' + (result?.error || 'Cannot read directory') + '</div>';
+      return;
+    }
+    const files = result.result || [];
+    list.innerHTML = '';
+    
+    // Parent dir
+    if (dir !== '/' && dir !== '~') {
+      const p = document.createElement('div');
+      p.className = 'sd-item';
+      p.innerHTML = '<span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path></svg></span><span>..</span>';
+      const parent = dir.split('/').filter(Boolean).slice(0, -1).join('/') || '/';
+      p.onclick = () => { _sdPath = parent; loadSaveDir(filename, parent || '/'); };
+      list.appendChild(p);
+    }
+    
+    let hasDirs = false;
+    for (const f of files) {
+      if (!f.dir) continue;
+      hasDirs = true;
+      const d = document.createElement('div');
+      d.className = 'sd-item';
+      d.innerHTML = '<span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path></svg></span><span>' + f.name + '</span>';
+      const full = (dir === '/' ? '/' : dir === '~' ? '~' : dir) + '/' + f.name;
+      d.onclick = () => { _sdPath = full; loadSaveDir(filename, full); };
+      d.ondblclick = () => {
+        _sdPath = full;
+        finishSaveDialog(filename);
+      };
+      list.appendChild(d);
+    }
+    if (!hasDirs && dir !== '/') {
+      list.innerHTML += '<div style="padding:16px;color:var(--text3);text-align:center;font-size:12px;">(empty directory)</div>';
+    }
+  });
+}
+
+function finishSaveDialog(filename) {
+  let path = _sdPath;
+  if (path === '~') {
+    path = window.__rterm_home || '/tmp';
+  }
+  document.getElementById('save-dialog').style.display = 'none';
+  if (_sdResolve) { _sdResolve(path); _sdResolve = null; }
+}
+
+document.getElementById('sd-close').onclick = () => {
+  document.getElementById('save-dialog').style.display = 'none';
+  if (_sdResolve) { _sdResolve(null); _sdResolve = null; }
+};
+document.getElementById('sd-cancel').onclick = () => {
+  document.getElementById('save-dialog').style.display = 'none';
+  if (_sdResolve) { _sdResolve(null); _sdResolve = null; }
+};
+document.getElementById('sd-select').onclick = () => finishSaveDialog(_sdFilename);
 
 // ── Saved Sessions ──
 function renderSavedSessions() {
@@ -3069,21 +3185,17 @@ const vaultPass = document.getElementById('setting-vault-pass');
 
 // Settings done - save vault if enabled
 document.getElementById('settings-done-btn').onclick = async () => {
-  const hashAlgo = parseInt(document.getElementById('setting-hash-algo')?.value === 'blake3' ? '1' : '0');
-  const vaultOn = vaultToggle?.classList.contains('on') ? '1' : '0';
+  const isOn = vaultToggle?.classList.contains('on');
+  await window.rterm.saveSetting('vault_enabled', isOn ? '1' : '0');
   
-  // Persist settings
-  await window.rterm.saveSetting('vault_enabled', vaultOn);
-  await window.rterm.saveSetting('vault_hash', String(hashAlgo));
-  
-  if (vaultToggle?.classList.contains('on') && vaultPass?.value) {
+  if (isOn && vaultPass?.value) {
     const pass = vaultPass.value;
     await window.rterm.saveSessions(savedSessions.map(s => ({
       host: s.host, port: s.port, user: s.user,
       password: s.password, key_path: s.key_path, name: s.name
-    })), pass, hashAlgo);
+    })), pass);
     window.__rterm_vault_pass = pass;
-  } else {
+  } else if (!isOn) {
     await window.rterm.deleteVault();
     window.__rterm_vault_pass = '';
   }
@@ -3121,26 +3233,10 @@ document.getElementById('lock-reset-btn').onclick = async () => {
   renderSavedSessions();
 };
 
-// Check vault on app start - show lock screen if vault exists
-(async () => {
-  if (window.rterm) {
-    // Load persisted settings
-    const vaultEnabled = await window.rterm.loadSetting('vault_enabled');
-    const vaultHash = await window.rterm.loadSetting('vault_hash');
-    if (vaultToggle && vaultEnabled?.result) {
-      if (vaultEnabled.result === '1') vaultToggle.classList.add('on');
-    }
-    if (vaultHash?.result && document.getElementById('setting-hash-algo')) {
-      document.getElementById('setting-hash-algo').value = vaultHash.result === '1' ? 'blake3' : 'argon2';
-    }
-    
-    const exists = await window.rterm.vaultExists();
-    if (exists && exists.result) {
-      document.getElementById('lock-screen').style.display = 'flex';
-      document.getElementById('lock-pass').focus();
-    }
-  }
-})();
+// Enter key on lock screen triggers unlock
+document.getElementById('lock-pass').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('lock-unlock-btn').click();
+});
 
 document.getElementById('setting-font').onchange = (e) => updateFontSize(e.target.value);
 document.getElementById('setting-cursor').onchange = (e) => updateCursorStyle(e.target.value);
@@ -3267,10 +3363,30 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key === '0') { e.preventDefault(); resetZoom(); }
 });
 
-const ro = new ResizeObserver(() => {
-  sessions.forEach(sess => sess.fitAddon?.fit());
-});
-ro.observe(document.getElementById('terminals'));
+// Debounced fitAll — rAF-coalesced
+let _fitRAF = null;
+function fitAll() {
+  if (_fitRAF) return;
+  _fitRAF = requestAnimationFrame(() => {
+    _fitRAF = null;
+    sessions.forEach((sess, id) => {
+      if (!sess.fitAddon) return;
+      try { sess.fitAddon.fit(); } catch (_) {}
+      if (sess.type === 'ssh' && sess.sshId != null && sess.term) {
+        const dims = sess.fitAddon.proposeDimensions();
+        if (dims) window.rterm?.sshResize(sess.sshId, dims.cols, dims.rows);
+      }
+    });
+  });
+}
+
+// ResizeObserver on #terminals — auto-fit when container changes size
+const _termObs = new ResizeObserver(fitAll);
+const _termEl = document.getElementById('terminals');
+if (_termEl) _termObs.observe(_termEl);
+
+// Window resize fallback
+window.addEventListener('resize', fitAll);
 
 document.querySelectorAll('#filer-list .filer-item, #sftp-list .filer-item').forEach(el => {
   el.addEventListener('click', function() {
@@ -3325,10 +3441,10 @@ window.rterm = {
       window.ipc.postMessage(JSON.stringify({method: "ssh_resize", args: {id: id, cols: cols, rows: rows}}));
     });
   },
-  saveSessions: function(sessions, password, algo) {
+  saveSessions: function(sessions, password) {
     return new Promise((resolve) => {
       window.__rterm_pending = resolve;
-      window.ipc.postMessage(JSON.stringify({method: "save_sessions", args: {sessions: sessions, password: password || '', algo: algo || 0}}));
+      window.ipc.postMessage(JSON.stringify({method: "save_sessions", args: {sessions: sessions, password: password || ''}}));
     });
   },
   loadSessions: function(password) {
@@ -3397,10 +3513,10 @@ window.rterm = {
       window.ipc.postMessage(JSON.stringify({method: "sftp_close_file", args: {handle: handle}}));
     });
   },
-  sftpDownload: function(id, path, filename) {
+  sftpDownload: function(id, path, filename, save_path) {
     return new Promise((resolve) => {
       window.__rterm_pending = resolve;
-      window.ipc.postMessage(JSON.stringify({method: "sftp_download", args: {id: id, path: path, filename: filename}}));
+      window.ipc.postMessage(JSON.stringify({method: "sftp_download", args: {id: id, path: path, filename: filename, save_path: save_path || ''}}));
     });
   },
   localExec: function(cmd, cols) {
@@ -3429,32 +3545,20 @@ window.rterm = {
   }
 };
 
-// Debounced fitAll — rAF-coalesced, only re-fits when container actually changes size
-let _fitRAF = null;
-function fitAll() {
-  if (_fitRAF) return;
-  _fitRAF = requestAnimationFrame(() => {
-    _fitRAF = null;
-    sessions.forEach((sess, id) => {
-      if (!sess.fitAddon) return;
-      try { sess.fitAddon.fit(); } catch (_) {}
-      if (sess.type === 'ssh' && sess.sshId != null && sess.term) {
-        const dims = sess.fitAddon.proposeDimensions();
-        if (dims) window.rterm?.sshResize(sess.sshId, dims.cols, dims.rows);
+// Check vault on app start - show lock screen only if vault is enabled AND vault file exists
+(async () => {
+  if (window.rterm) {
+    const vaultEnabled = await window.rterm.loadSetting('vault_enabled');
+    const vaultToggle = document.getElementById('setting-vault');
+    if (vaultToggle && vaultEnabled?.result === '1') {
+      vaultToggle.classList.add('on');
+      const exists = await window.rterm.vaultExists();
+      if (exists?.result) {
+        document.getElementById('lock-screen').style.display = 'flex';
+        document.getElementById('lock-pass').focus();
       }
-    });
-  });
-}
-
-// ResizeObserver on #terminals — auto-fit whenever the container changes size
-const _termObs = new ResizeObserver(fitAll);
-const _termEl = document.getElementById('terminals');
-if (_termEl) _termObs.observe(_termEl);
-
-// Window resize — the ResizeObserver handles this, but keep as fallback
-window.addEventListener('resize', fitAll);
-
-// Initial fit on startup  
-setTimeout(fitAll, 300);
+    }
+  }
+})();
 </script></body>
 </html>
