@@ -29,6 +29,8 @@ pub struct SshConfig {
     vault_pass: Option<String>,
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    compression: Option<bool>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -298,6 +300,15 @@ fn main() {
                                     Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); continue; }
                                 };
                                 use std::borrow::Cow;
+                                let mut compression_order = vec![russh::compression::NONE];
+                                if config.compression.unwrap_or(false) {
+                                    compression_order = vec![
+                                        russh::compression::ZLIB_LEGACY,
+                                        russh::compression::ZLIB,
+                                        russh::compression::NONE,
+                                    ];
+                                }
+
                                 let cfg = client::Config {
                                     window_size: 8388608,
                                     maximum_packet_size: 131072,
@@ -306,6 +317,7 @@ fn main() {
                                             russh::kex::CURVE25519_PRE_RFC_8731,
                                             russh::kex::EXTENSION_SUPPORT_AS_CLIENT,
                                         ]),
+                                        compression: Cow::Owned(compression_order),
                                         ..<_>::default()
                                     },
                                     ..<_>::default()
