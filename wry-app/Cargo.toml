@@ -14,13 +14,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 russh = { path = "../external/russh-main/russh", version = "0.60.1" }
 russh-sftp = { path = "../external/russh-sftp" }
-ssh-key = { package = "internal-russh-forked-ssh-key", version = "=0.6.18" }
+ssh-key = { package = "internal-russh-forked-ssh-key", version = "=0.6.18", features = ["ed25519", "rsa", "p256", "p384", "p521", "encryption"] }
 tokio = { version = "1", features = ["full"] }
 lazy_static = "1.4"
 base64 = "0.22"
 chacha20poly1305 = "0.10"
 blake3 = "1.5"
 argon2 = "0.5"
+rand = "0.10"
 
 
 [patch.crates-io]

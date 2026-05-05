@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
 use std::time::Duration;
-use russh::client::{self, Config, Handle};
-use russh::keys::PrivateKeyWithHashAlg;
+use russh::client::{self, Handle};
 use russh::{ChannelReadHalf, ChannelWriteHalf, ChannelMsg};
 use tokio::runtime;
 use tokio::time;
@@ -26,7 +24,20 @@ pub struct SshConfig {
     password: Option<String>,
     key_path: Option<String>,
     #[serde(default)]
+    key_name: Option<String>,
+    #[serde(default)]
+    vault_pass: Option<String>,
+    #[serde(default)]
     name: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct SshKey {
+    name: String,
+    private_key: String,
+    public_key: String,
+    #[serde(default)]
+    key_type: String,
 }
 
 struct SshHandler;
@@ -64,12 +75,13 @@ fn vault_exists() -> bool {
     get_config_dir().join("vault.dat").exists()
 }
 
-fn save_vault(sessions_data: &[SshConfig], password: &str) -> Result<(), String> {
+fn save_vault(sessions_data: &[SshConfig], keys_data: &[SshKey], password: &str) -> Result<(), String> {
     let config_dir = get_config_dir();
     std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
     let container = serde_json::json!({
         "v": 2,
-        "sessions": sessions_data
+        "sessions": sessions_data,
+        "keys": keys_data,
     });
     let json = serde_json::to_string(&container).map_err(|e| e.to_string())?;
     let key = derive_key(password);
@@ -86,7 +98,7 @@ fn save_vault(sessions_data: &[SshConfig], password: &str) -> Result<(), String>
     Ok(())
 }
 
-fn load_vault(password: &str) -> Result<Vec<SshConfig>, String> {
+fn load_vault(password: &str) -> Result<(Vec<SshConfig>, Vec<SshKey>), String> {
     let config_dir = get_config_dir();
     let data = std::fs::read(config_dir.join("vault.dat")).map_err(|e| e.to_string())?;
     if data.len() < 6 || &data[..4] != VAULT_MAGIC {
@@ -103,7 +115,10 @@ fn load_vault(password: &str) -> Result<Vec<SshConfig>, String> {
             let sessions = container.get("sessions")
                 .and_then(|s| serde_json::from_value(s.clone()).ok())
                 .unwrap_or_default();
-            Ok(sessions)
+            let keys = container.get("keys")
+                .and_then(|s| serde_json::from_value(s.clone()).ok())
+                .unwrap_or_default();
+            Ok((sessions, keys))
         }
         Err(_) => Err("wrong password".to_string()),
     }
@@ -129,6 +144,103 @@ fn load_setting(key: &str) -> Option<String> {
     let settings: serde_json::Value = std::fs::read_to_string(&path)
         .ok().and_then(|s| serde_json::from_str(&s).ok())?;
     settings.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+fn ssh_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home).join(".ssh")
+}
+
+fn generate_key(name: &str, algo: &str, passphrase: &str) -> Result<serde_json::Value, String> {
+    use ssh_key::PrivateKey;
+    let algorithm = match algo {
+        "ed25519" => ssh_key::Algorithm::Ed25519,
+        "rsa-2048" => ssh_key::Algorithm::Rsa { hash: None },
+        "rsa-4096" => ssh_key::Algorithm::Rsa { hash: None },
+        "ecdsa-p256" => ssh_key::Algorithm::Ecdsa { curve: ssh_key::EcdsaCurve::NistP256 },
+        "ecdsa-p384" => ssh_key::Algorithm::Ecdsa { curve: ssh_key::EcdsaCurve::NistP384 },
+        "ecdsa-p521" => ssh_key::Algorithm::Ecdsa { curve: ssh_key::EcdsaCurve::NistP521 },
+        _ => ssh_key::Algorithm::Ed25519,
+    };
+    let mut rng = rand::rng();
+    let key = PrivateKey::random(&mut rng, algorithm)
+        .map_err(|e| format!("key gen failed: {}", e))?;
+    let pubkey = key.public_key().to_openssh()
+        .map_err(|e| format!("pubkey failed: {}", e))?;
+    let priv_pem = key.to_openssh(ssh_key::LineEnding::LF)
+        .map_err(|e| format!("encode failed: {}", e))?;
+
+    let dir = ssh_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let priv_path = dir.join(name);
+    let pub_path = dir.join(format!("{}.pub", name));
+
+    std::fs::write(&priv_path, priv_pem.as_bytes()).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(&priv_path, std::fs::Permissions::from_mode(0o600)); }
+    std::fs::write(&pub_path, pubkey.as_bytes()).map_err(|e| e.to_string())?;
+
+    let fp = key.public_key().fingerprint(ssh_key::HashAlg::Sha256);
+    Ok(serde_json::json!({
+        "name": name,
+        "path": priv_path.to_string_lossy().to_string(),
+        "type": algo,
+        "public_key": pubkey,
+        "fingerprint": fp.to_string(),
+    }))
+}
+
+fn list_keys() -> Vec<serde_json::Value> {
+    let dir = ssh_dir();
+    let mut keys = Vec::new();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return keys,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.ends_with(".pub") || name.starts_with('.') || entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        // Only consider files that look like SSH private keys
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if !content.contains("BEGIN") || !content.contains("PRIVATE KEY") {
+            continue;
+        }
+        let pub_path = dir.join(format!("{}.pub", name));
+        let public_key = std::fs::read_to_string(&pub_path).ok().map(|s| s.trim().to_string()).unwrap_or_default();
+        let ktype = if content.contains("OPENSSH") || public_key.contains("ssh-ed25519") {
+            "ed25519"
+        } else if content.contains("RSA") || public_key.contains("ssh-rsa") {
+            "rsa"
+        } else if content.contains("EC") || public_key.contains("ecdsa") {
+            "ecdsa"
+        } else {
+            "unknown"
+        };
+        keys.push(serde_json::json!({
+            "name": name,
+            "path": path.to_string_lossy().to_string(),
+            "type": ktype,
+            "public_key": public_key,
+        }));
+    }
+    keys.sort_by(|a, b| a.get("name").and_then(|v| v.as_str()).unwrap_or("").cmp(b.get("name").and_then(|v| v.as_str()).unwrap_or("")));
+    keys
+}
+
+fn delete_key(path: &str) -> Result<(), String> {
+    let p = std::path::PathBuf::from(path);
+    let _ = std::fs::remove_file(&p);
+    // remove .pub too
+    if let Some(s) = p.to_str() {
+        let _ = std::fs::remove_file(format!("{}.pub", s));
+    }
+    Ok(())
 }
 
 fn main() {
@@ -161,6 +273,7 @@ fn main() {
 
     // Async SSH handler on main multi-threaded runtime
     let ipc_tx_for_ssh_clone = ipc_tx_for_ssh.clone();
+    let ipc_tx_for_handler = ipc_tx_for_ssh.clone();
     rt.spawn(async move {
         let mut sessions: HashMap<u32, Handle<SshHandler>> = HashMap::new();
         let mut read_halves: HashMap<u32, ChannelReadHalf> = HashMap::new();
@@ -184,16 +297,67 @@ fn main() {
                                     Ok(c) => c,
                                     Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); continue; }
                                 };
-                                let mut cfg = Config::default();
-                                cfg.window_size = 8388608;       // 8MB window for better throughput
-                                cfg.maximum_packet_size = 131072; // 128KB packets
+                                use std::borrow::Cow;
+                                let cfg = client::Config {
+                                    window_size: 8388608,
+                                    maximum_packet_size: 131072,
+                                    preferred: russh::Preferred {
+                                        kex: Cow::Owned(vec![
+                                            russh::kex::CURVE25519_PRE_RFC_8731,
+                                            russh::kex::EXTENSION_SUPPORT_AS_CLIENT,
+                                        ]),
+                                        ..<_>::default()
+                                    },
+                                    ..<_>::default()
+                                };
                                 let config_ssh = Arc::new(cfg);
+
+                                // Helper to authenticate with a key PEM string
+                                use russh::keys::decode_secret_key;
+                                async fn auth_with_pem(session: &mut russh::client::Handle<SshHandler>, user: &str, pem: &str) -> Result<russh::client::AuthResult, russh::Error> {
+                                    let key_pair = decode_secret_key(pem, None).map_err(|e| { eprintln!("Key decode error: {}", e); russh::Error::CouldNotReadKey })?;
+                                    let key_with_alg = russh::keys::PrivateKeyWithHashAlg::new(
+                                        Arc::new(key_pair),
+                                        None,
+                                    );
+                                    session.authenticate_publickey(user, key_with_alg).await
+                                }
+
                                 match client::connect(config_ssh.clone(), (config.host.as_str(), config.port), SshHandler).await {
                                     Ok(mut session) => {
-                                        let auth_result = if let Some(key_path) = &config.key_path {
-                                            // ... key auth ...
-                                            let _ = reply_tx.send(r#"{"success":false,"error":"Key auth not implemented in async"}"#.to_string());
-                                            continue;
+                                        let auth_result = if let (Some(key_name), Some(vp)) = (&config.key_name, &config.vault_pass) {
+                                            eprintln!("Attempting vault key auth: {} for user: {}", key_name, config.user);
+                                            match load_vault(vp) {
+                                                Ok((_, keys)) => {
+                                                    if let Some(key) = keys.iter().find(|k| k.name == *key_name) {
+                                                        auth_with_pem(&mut session, &config.user, &key.private_key).await
+                                                    } else {
+                                                        eprintln!("Key '{}' not found in vault", key_name);
+                                                        let _ = reply_tx.send(format!(r#"{{"success":false,"error":"Key '{}' not found in vault"}}"#, key_name));
+                                                        continue;
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("Vault decrypt failed: {}", e);
+                                                    let _ = reply_tx.send(format!(r#"{{"success":false,"error":"Vault error: {}"}}"#, e));
+                                                    continue;
+                                                }
+                                            }
+                                        } else if let Some(key_path) = &config.key_path {
+                                            eprintln!("Attempting disk key auth with: {:?}", key_path);
+                                            match russh::keys::load_secret_key(key_path, None) {
+                                                Ok(key_pair) => {
+                                                    let key_with_alg = russh::keys::PrivateKeyWithHashAlg::new(
+                                                        Arc::new(key_pair),
+                                                        None,
+                                                    );
+                                                    session.authenticate_publickey(&config.user, key_with_alg).await
+                                                }
+                                                Err(e) => {
+                                                    let _ = reply_tx.send(format!(r#"{{"success":false,"error":"Key load failed: {}"}}"#, e));
+                                                    continue;
+                                                }
+                                            }
                                         } else if let Some(password) = &config.password {
                                             session.authenticate_password(&config.user, password).await
                                         } else {
@@ -206,10 +370,19 @@ fn main() {
                                                 sessions.insert(id, session);
                                                 let _ = reply_tx.send(format!(r#"{{"success":true,"id":{}}}"#, id));
                                             }
-                                            _ => { let _ = reply_tx.send(r#"{"success":false,"error":"Auth failed"}"#.to_string()); }
+                                            Ok(russh::client::AuthResult::Failure { remaining_methods, partial_success }) => {
+                                                let msg = format!("Auth failed (methods: {:?}, partial: {})", remaining_methods, partial_success);
+                                                eprintln!("{}", msg);
+                                                let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, msg));
+                                            }
+                                            Err(e) => {
+                                                let msg = format!("Auth error: {}", e);
+                                                eprintln!("{}", msg);
+                                                let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, msg));
+                                            }
                                         }
                                     }
-                                    Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
+                                    Err(e) => { eprintln!("SSH connect error: {}", e); let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
                                 }
                             }
                             "shell" => {
@@ -505,8 +678,14 @@ fn main() {
                 None => return,
             };
 
+            let rid = parsed.get("_rid").cloned();
+
             let send_resp = |resp: &serde_json::Value| {
-                let resp_str = serde_json::to_string(resp).unwrap_or_default();
+                let mut resp_obj = resp.clone();
+                if let Some(ref rid_val) = rid {
+                    resp_obj["_rid"] = rid_val.clone();
+                }
+                let resp_str = serde_json::to_string(&resp_obj).unwrap_or_default();
                 let script = format!("window.__rterm_resp && window.__rterm_resp({})", resp_str);
                 if let Some(wv) = webview_for_ipc.lock().unwrap().as_ref() {
                     let _ = wv.evaluate_script(&script);
@@ -519,20 +698,36 @@ fn main() {
                     let config: SshConfig = match serde_json::from_value(args.clone()) { Ok(c) => c, Err(_) => return };
                     let (reply_tx, reply_rx) = mpsc::channel();
                     ssh_tx_clone.send((format!("connect:{}", serde_json::to_string(&config).unwrap()), reply_tx)).ok();
-                    match reply_rx.recv_timeout(Duration::from_secs(10)) {
-                        Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
-                        Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
-                    }
+                    let ipc1 = ipc_tx_for_handler.clone();
+                    let rid1 = rid.clone();
+                    std::thread::spawn(move || {
+                        let resp = match reply_rx.recv_timeout(Duration::from_secs(10)) {
+                            Ok(r) => r,
+                            Err(_) => r#"{"success":false,"error":"timeout"}"#.to_string(),
+                        };
+                        let resp_val: serde_json::Value = serde_json::from_str(&resp).unwrap_or_default();
+                        let mut resp_obj = resp_val;
+                        if let Some(ref r) = rid1 { resp_obj["_rid"] = r.clone(); }
+                        let _ = ipc1.send(IpcOutMsg { script: format!("window.__rterm_resp && window.__rterm_resp({})", serde_json::to_string(&resp_obj).unwrap_or_default()) });
+                    });
                 }
                 "ssh_shell" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let id = match args.get("id").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
                     let (reply_tx, reply_rx) = mpsc::channel();
                     ssh_tx_clone.send((format!("shell:{}", id), reply_tx)).ok();
-                    match reply_rx.recv_timeout(Duration::from_secs(5)) {
-                        Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
-                        Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
-                    }
+                    let ipc2 = ipc_tx_for_handler.clone();
+                    let rid2 = rid.clone();
+                    std::thread::spawn(move || {
+                        let resp = match reply_rx.recv_timeout(Duration::from_secs(5)) {
+                            Ok(r) => r,
+                            Err(_) => r#"{"success":false,"error":"timeout"}"#.to_string(),
+                        };
+                        let resp_val: serde_json::Value = serde_json::from_str(&resp).unwrap_or_default();
+                        let mut resp_obj = resp_val;
+                        if let Some(ref r) = rid2 { resp_obj["_rid"] = r.clone(); }
+                        let _ = ipc2.send(IpcOutMsg { script: format!("window.__rterm_resp && window.__rterm_resp({})", serde_json::to_string(&resp_obj).unwrap_or_default()) });
+                    });
                 }
                 "ssh_write" => {
                     let args = match parsed.get("args") {
@@ -762,7 +957,14 @@ fn main() {
                         Err(_) => { send_resp(&serde_json::json!({"success": false, "error": "invalid sessions"})); return }
                     };
                     let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
-                    match save_vault(&sessions, password) {
+                    // Preserve existing keys from vault (don't overwrite with empty array)
+                    let keys_from_args: Vec<SshKey> = serde_json::from_value(args.get("keys").cloned().unwrap_or_default()).unwrap_or_default();
+                    let keys = if keys_from_args.is_empty() {
+                        load_vault(password).ok().map(|(_, k)| k).unwrap_or_default()
+                    } else {
+                        keys_from_args
+                    };
+                    match save_vault(&sessions, &keys, password) {
                         Ok(_) => send_resp(&serde_json::json!({"success": true})),
                         Err(e) => send_resp(&serde_json::json!({"success": false, "error": e})),
                     }
@@ -771,7 +973,43 @@ fn main() {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
                     match load_vault(password) {
-                        Ok(sessions) => send_resp(&serde_json::json!({"success": true, "result": sessions})),
+                        Ok((sessions, keys)) => send_resp(&serde_json::json!({"success": true, "result": sessions, "keys": keys})),
+                        Err(e) => send_resp(&serde_json::json!({"success": false, "error": e})),
+                    }
+                }
+                "import_vault_key" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
+                    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("imported");
+                    match load_vault(password) {
+                        Ok((sessions, mut keys)) => {
+                            let new_key = SshKey {
+                                name: name.to_string(),
+                                private_key: args.get("private_key").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                public_key: args.get("public_key").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                key_type: args.get("key_type").and_then(|v| v.as_str()).unwrap_or("ed25519").to_string(),
+                            };
+                            keys.push(new_key);
+                            match save_vault(&sessions, &keys, password) {
+                                Ok(_) => send_resp(&serde_json::json!({"success": true})),
+                                Err(e) => send_resp(&serde_json::json!({"success": false, "error": e})),
+                            }
+                        }
+                        Err(e) => send_resp(&serde_json::json!({"success": false, "error": e})),
+                    }
+                }
+                "delete_vault_key" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
+                    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    match load_vault(password) {
+                        Ok((sessions, keys)) => {
+                            let keys: Vec<SshKey> = keys.into_iter().filter(|k| k.name != name).collect();
+                            match save_vault(&sessions, &keys, password) {
+                                Ok(_) => send_resp(&serde_json::json!({"success": true})),
+                                Err(e) => send_resp(&serde_json::json!({"success": false, "error": e})),
+                            }
+                        }
                         Err(e) => send_resp(&serde_json::json!({"success": false, "error": e})),
                     }
                 }
@@ -798,6 +1036,28 @@ fn main() {
                     let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
                     let value = load_setting(key);
                     send_resp(&serde_json::json!({"success": true, "result": value}));
+                }
+                "generate_key" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("id_ed25519");
+                    let algo = args.get("type").and_then(|v| v.as_str()).unwrap_or("ed25519");
+                    let passphrase = args.get("passphrase").and_then(|v| v.as_str()).unwrap_or("");
+                    match generate_key(name, algo, passphrase) {
+                        Ok(key_info) => send_resp(&serde_json::json!({"success": true, "result": key_info})),
+                        Err(e) => send_resp(&serde_json::json!({"success": false, "error": e})),
+                    }
+                }
+                "list_keys" => {
+                    let keys = list_keys();
+                    send_resp(&serde_json::json!({"success": true, "result": keys}));
+                }
+                "delete_key" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    match delete_key(path) {
+                        Ok(_) => send_resp(&serde_json::json!({"success": true})),
+                        Err(e) => send_resp(&serde_json::json!({"success": false, "error": e})),
+                    }
                 }
                 _ => send_resp(&serde_json::json!({"success": false, "error": "Unknown method"})),
             }
