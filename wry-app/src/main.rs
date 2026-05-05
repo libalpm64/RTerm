@@ -6,6 +6,7 @@ use russh::client::{self, Handle};
 use russh::{ChannelReadHalf, ChannelWriteHalf, ChannelMsg};
 use tokio::runtime;
 use tokio::time;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tao::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -31,6 +32,18 @@ pub struct SshConfig {
     name: Option<String>,
     #[serde(default)]
     compression: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, Clone)]
+pub struct TelnetConfig {
+    host: String,
+    port: u16,
+}
+
+#[derive(Debug, serde::Deserialize, Clone)]
+pub struct SerialConfig {
+    port: String,
+    baud: u32,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -280,6 +293,8 @@ fn main() {
         let mut sessions: HashMap<u32, Handle<SshHandler>> = HashMap::new();
         let mut read_halves: HashMap<u32, ChannelReadHalf> = HashMap::new();
         let mut write_halves: HashMap<u32, ChannelWriteHalf<_>> = HashMap::new();
+        let mut telnet_writers: HashMap<u32, tokio::net::tcp::OwnedWriteHalf> = HashMap::new();
+        let mut serial_writers: HashMap<u32, tokio::io::WriteHalf<tokio_serial::SerialStream>> = HashMap::new();
         let mut sftp_sessions: HashMap<u32, russh_sftp::client::SftpSession> = HashMap::new();
         let mut sftp_files: HashMap<u32, russh_sftp::client::fs::File> = HashMap::new();
         let mut sftp_file_counter: u32 = 0;
@@ -335,7 +350,8 @@ fn main() {
                                     session.authenticate_publickey(user, key_with_alg).await
                                 }
 
-                                match client::connect(config_ssh.clone(), (config.host.as_str(), config.port), SshHandler).await {
+                                let addr = format!("{}:{}", config.host.trim(), config.port);
+                                match client::connect(config_ssh.clone(), addr, SshHandler).await {
                                     Ok(mut session) => {
                                         let auth_result = if let (Some(key_name), Some(vp)) = (&config.key_name, &config.vault_pass) {
                                             eprintln!("Attempting vault key auth: {} for user: {}", key_name, config.user);
@@ -417,18 +433,86 @@ fn main() {
                                 let parts: Vec<&str> = data.splitn(2, ':').collect();
                                 if parts.len() == 2 {
                                     let id: u32 = match parts[0].parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid id"}"#.to_string()); continue; } };
+                                    let payload = parts[1].as_bytes();
                                     if let Some(ch) = write_halves.get_mut(&id) {
                                         let cursor = std::io::Cursor::new(parts[1].to_owned());
                                         match ch.data(cursor).await {
                                             Ok(_) => { let _ = reply_tx.send(r#"{"success":true}"#.to_string()); }
                                             Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
                                         }
-                                    } else { let _ = reply_tx.send(r#"{"success":false,"error":"Channel not found"}"#.to_string()); }
+                                    } else if let Some(tw) = telnet_writers.get_mut(&id) {
+                                        match tw.write_all(payload).await {
+                                            Ok(_) => { let _ = reply_tx.send(r#"{"success":true}"#.to_string()); }
+                                            Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
+                                        }
+                                    } else if let Some(sw) = serial_writers.get_mut(&id) {
+                                        match sw.write_all(payload).await {
+                                            Ok(_) => { let _ = reply_tx.send(r#"{"success":true}"#.to_string()); }
+                                            Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
+                                        }
+                                    } else { let _ = reply_tx.send(r#"{"success":false,"error":"Session not found"}"#.to_string()); }
                                 } else { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid format"}"#.to_string()); }
+                            }
+                            "telnet_connect" => {
+                                let config: TelnetConfig = match serde_json::from_str(data) {
+                                    Ok(c) => c,
+                                    Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); continue; }
+                                };
+                                let addr = format!("{}:{}", config.host.trim(), config.port);
+                                match tokio::net::TcpStream::connect(addr).await {
+                                    Ok(stream) => {
+                                        let id = SESSION_COUNTER.fetch_add(1, Ordering::SeqCst);
+                                        let (mut read_half, write_half) = stream.into_split();
+                                        telnet_writers.insert(id, write_half);
+                                        let ipc_clone = ipc_tx_for_ssh_clone.clone();
+                                        tokio::spawn(async move {
+                                            let mut buf = [0u8; 8192];
+                                            while let Ok(n) = read_half.read(&mut buf).await {
+                                                if n == 0 { break; }
+                                                let data_str = String::from_utf8_lossy(&buf[..n]);
+                                                let escaped = serde_json::to_string(&data_str.as_ref()).unwrap_or_default();
+                                                let _ = ipc_clone.send(IpcOutMsg {
+                                                    script: format!("window.__rterm_onData && window.__rterm_onData({}, {})", id, escaped),
+                                                });
+                                            }
+                                        });
+                                        let _ = reply_tx.send(format!(r#"{{"success":true,"id":{}}}"#, id));
+                                    }
+                                    Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
+                                }
+                            }
+                            "serial_connect" => {
+                                let config: SerialConfig = match serde_json::from_str(data) {
+                                    Ok(c) => c,
+                                    Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); continue; }
+                                };
+                                use tokio_serial::SerialPortBuilderExt;
+                                match tokio_serial::new(&config.port, config.baud).open_native_async() {
+                                    Ok(stream) => {
+                                        let id = SESSION_COUNTER.fetch_add(1, Ordering::SeqCst);
+                                        let (mut read_half, write_half) = tokio::io::split(stream);
+                                        serial_writers.insert(id, write_half);
+                                        let ipc_clone = ipc_tx_for_ssh_clone.clone();
+                                        tokio::spawn(async move {
+                                            let mut buf = [0u8; 8192];
+                                            while let Ok(n) = read_half.read(&mut buf).await {
+                                                if n == 0 { break; }
+                                                let data_str = String::from_utf8_lossy(&buf[..n]);
+                                                let escaped = serde_json::to_string(&data_str.as_ref()).unwrap_or_default();
+                                                let _ = ipc_clone.send(IpcOutMsg {
+                                                    script: format!("window.__rterm_onData && window.__rterm_onData({}, {})", id, escaped),
+                                                });
+                                            }
+                                        });
+                                        let _ = reply_tx.send(format!(r#"{{"success":true,"id":{}}}"#, id));
+                                    }
+                                    Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
+                                }
                             }
                             "disconnect" => {
                                 let id: u32 = match data.parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid id"}"#.to_string()); continue; } };
                                 sessions.remove(&id); read_halves.remove(&id); write_halves.remove(&id);
+                                telnet_writers.remove(&id); serial_writers.remove(&id);
                                 let _ = reply_tx.send(r#"{"success":true}"#.to_string());
                             }
                             "resize" => {
@@ -499,7 +583,7 @@ fn main() {
                                             }
                                             Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
                                         }
-                                    } else { let _ = reply_tx.send(r#"{"success":false,"error":"SFTP not open"}"#.to_string()); }
+                                    } else { let _ = reply_tx.send(r#"{"success":false,"error":"SFTP not open, clicking the refresh wheel typically fixes this issue."}"#.to_string()); }
                                 } else { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid format"}"#.to_string()); }
                             }
                             "sftp_open_file" => {
@@ -784,6 +868,38 @@ fn main() {
                         Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
                         Err(_) => send_resp(&serde_json::json!({"success": true})),
                     }
+                }
+                "telnet_connect" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let (reply_tx, reply_rx) = mpsc::channel();
+                    ssh_tx_clone.send((format!("telnet_connect:{}", serde_json::to_string(&args).unwrap()), reply_tx)).ok();
+                    let ipc = ipc_tx_for_handler.clone();
+                    let rid_clone = rid.clone();
+                    std::thread::spawn(move || {
+                        let resp = match reply_rx.recv_timeout(Duration::from_secs(5)) {
+                            Ok(r) => r,
+                            Err(_) => r#"{"success":false,"error":"timeout"}"#.to_string(),
+                        };
+                        let mut resp_val: serde_json::Value = serde_json::from_str(&resp).unwrap_or_default();
+                        if let Some(ref r) = rid_clone { resp_val["_rid"] = r.clone(); }
+                        let _ = ipc.send(IpcOutMsg { script: format!("window.__rterm_resp && window.__rterm_resp({})", serde_json::to_string(&resp_val).unwrap_or_default()) });
+                    });
+                }
+                "serial_connect" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let (reply_tx, reply_rx) = mpsc::channel();
+                    ssh_tx_clone.send((format!("serial_connect:{}", serde_json::to_string(&args).unwrap()), reply_tx)).ok();
+                    let ipc = ipc_tx_for_handler.clone();
+                    let rid_clone = rid.clone();
+                    std::thread::spawn(move || {
+                        let resp = match reply_rx.recv_timeout(Duration::from_secs(5)) {
+                            Ok(r) => r,
+                            Err(_) => r#"{"success":false,"error":"timeout"}"#.to_string(),
+                        };
+                        let mut resp_val: serde_json::Value = serde_json::from_str(&resp).unwrap_or_default();
+                        if let Some(ref r) = rid_clone { resp_val["_rid"] = r.clone(); }
+                        let _ = ipc.send(IpcOutMsg { script: format!("window.__rterm_resp && window.__rterm_resp({})", serde_json::to_string(&resp_val).unwrap_or_default()) });
+                    });
                 }
                 "sftp_open" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };

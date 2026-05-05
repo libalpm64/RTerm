@@ -445,14 +445,26 @@
     }
 
     .sftp-conn-status .dot {
-      width: 6px;
-      height: 6px;
+      width: 8px;
+      height: 8px;
       border-radius: 50%;
       background: var(--red);
+      transition: background 0.3s;
+    }
+
+    .sftp-conn-status.connecting .dot {
+      background: #ffa500;
+      animation: sftp-pulse 1s infinite;
     }
 
     .sftp-conn-status.connected .dot {
       background: var(--green);
+    }
+
+    @keyframes sftp-pulse {
+      0% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.8); }
+      100% { opacity: 1; transform: scale(1); }
     }
 
     .sftp-conn-status .label {
@@ -3056,7 +3068,7 @@
         document.getElementById('panel-' + panel).classList.add('active');
 
         // Init SFTP when tab clicked
-        if (panel === 'sftp') loadSftpDir('/');
+        if (panel === 'sftp') setTimeout(() => loadSftpDir('/'), 50);
       });
     });
 
@@ -3091,18 +3103,20 @@
       }
 
       sftpSshId = sess.sshId;
+      statusEl.classList.remove('connected');
+      statusEl.classList.add('connecting');
       statusEl.querySelector('.label').textContent = 'Connecting...';
-      const dot = statusEl.querySelector('.dot');
-      if (dot) dot.style.background = 'var(--yellow)';
 
       const ok = await initSftp(sftpSshId);
       if (!ok) {
+        statusEl.classList.remove('connecting');
         listEl.innerHTML = '<div style="padding:8px;color:var(--red)">SFTP initialization failed</div>';
         return;
       }
 
+      statusEl.classList.remove('connecting');
+      statusEl.classList.add('connected');
       statusEl.querySelector('.label').textContent = 'Connected';
-      if (dot) dot.style.background = 'var(--green)';
 
       pathEl.innerHTML = path.split('/').filter(Boolean).map(p => `<span style="color:var(--text3)">/</span><span>${p}</span>`).join('');
       if (path === '/') pathEl.innerHTML = '<span style="color:var(--text3)">/</span>';
@@ -3628,7 +3642,65 @@
         return;
       }
 
-      // Local / telnet / serial
+      if (type === 'telnet') {
+        const host = document.getElementById('telnet-host').value;
+        const port = parseInt(document.getElementById('telnet-port').value) || 23;
+        const id = 'session-' + Date.now();
+        sessions.set(id, { name: host, type: 'telnet', term: null, fitAddon: null, sshId: null });
+        activeId = id;
+        renderTabs();
+        createTerminalInstance(id);
+
+        setTimeout(async () => {
+          const res = await window.rterm.telnetConnect({ host, port });
+          if (res.success) {
+            const s = sessions.get(id);
+            if (s) {
+              s.sshId = res.id;
+              s.term.write('\r\nConnected to ' + host + '\r\n');
+              setTimeout(() => s.term.focus(), 100);
+            }
+          } else {
+            console.error('Telnet failed:', res.error);
+            const s = sessions.get(id);
+            if (s && s.term) s.term.write('\r\nConnection failed: ' + res.error + '\r\n');
+            setTimeout(() => closeTab(id), 3000);
+          }
+          connecting = false;
+        }, 100);
+        return;
+      }
+
+      if (type === 'serial') {
+        const port = document.getElementById('serial-port').value;
+        const baud = parseInt(document.getElementById('serial-baud').value) || 9600;
+        const id = 'session-' + Date.now();
+        sessions.set(id, { name: port, type: 'serial', term: null, fitAddon: null, sshId: null });
+        activeId = id;
+        renderTabs();
+        createTerminalInstance(id);
+
+        setTimeout(async () => {
+          const res = await window.rterm.serialConnect({ port, baud });
+          if (res.success) {
+            const s = sessions.get(id);
+            if (s) {
+              s.sshId = res.id;
+              s.term.write('\r\nOpened ' + port + ' @ ' + baud + '\r\n');
+              setTimeout(() => s.term.focus(), 100);
+            }
+          } else {
+            console.error('Serial failed:', res.error);
+            const s = sessions.get(id);
+            if (s && s.term) s.term.write('\r\nFailed to open port: ' + res.error + '\r\n');
+            setTimeout(() => closeTab(id), 3000);
+          }
+          connecting = false;
+        }, 100);
+        return;
+      }
+
+      // Local
       const id = 'session-' + Date.now();
       sessions.set(id, { name: type, type, term: null, fitAddon: null, sshId: null });
       activeId = id;
@@ -3683,23 +3755,34 @@
 
       term.onData(data => {
         const sess = sessions.get(id);
-        if (sess?.type === 'ssh') {
+        if (sess?.type === 'ssh' || sess?.type === 'telnet' || sess?.type === 'serial') {
           if (sess.sshId !== null && sess.sshId !== undefined && window.rterm) {
-            if (data === '\r') {
-              if (sess.cmdBuffer && sess.cmdBuffer.trim()) {
-                addHistoryItem(sess.cmdBuffer.trim());
+            if (sess.type === 'ssh') {
+              if (data === '\r') {
+                if (sess.cmdBuffer && sess.cmdBuffer.trim()) {
+                  addHistoryItem(sess.cmdBuffer.trim());
+                }
+                sess.cmdBuffer = '';
+                window.rterm.sshWrite(sess.sshId, '\n');
+              } else if (data === '\x7f') {
+                sess.cmdBuffer = sess.cmdBuffer.slice(0, -1);
+                window.rterm.sshWrite(sess.sshId, '\x7f');
+              } else if (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) <= 126) {
+                sess.cmdBuffer += data;
+                window.rterm.sshWrite(sess.sshId, data);
+              } else {
+                window.rterm.sshWrite(sess.sshId, data);
               }
-              sess.cmdBuffer = '';
-              window.rterm.sshWrite(sess.sshId, '\n');
-            } else if (data === '\x7f') {
-              sess.cmdBuffer = sess.cmdBuffer.slice(0, -1);
-              window.rterm.sshWrite(sess.sshId, '\x7f');
-            } else if (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) <= 126) {
-              sess.cmdBuffer += data;
-              window.rterm.sshWrite(sess.sshId, data);
             } else {
-              window.rterm.sshWrite(sess.sshId, data);
+              // Telnet/Serial raw passthrough
+              let sendData = data;
+              if (data === '\r' && sess.type === 'telnet') sendData = '\r\n';
+              window.rterm.sshWrite(sess.sshId, sendData).catch(err => {
+                console.error('Failed to write to ' + sess.type + ':', err);
+              });
             }
+          } else {
+            console.warn('Session ' + id + ' (' + sess?.type + ') has no sshId or bridge missing');
           }
         } else if (invoke) {
           invoke('write_to_session', { id: id, data }).catch(console.error);
@@ -3737,7 +3820,7 @@
 
       term.onResize(({ cols, rows }) => {
         const sess = sessions.get(id);
-        if (sess?.type === 'ssh' && sess?.sshId !== null && sess?.sshId !== undefined && window.rterm) {
+        if ((sess?.type === 'ssh' || sess?.type === 'telnet' || sess?.type === 'serial') && sess?.sshId !== null && sess?.sshId !== undefined && window.rterm) {
           window.rterm.sshResize(sess.sshId, cols, rows);
         }
       });
@@ -3745,7 +3828,7 @@
       term.onCursorMove(() => updateStatus(id));
 
       if (!invoke && !window.rterm) {
-        if (sess?.type === 'ssh') {
+        if (sess?.type === 'ssh' || sess?.type === 'telnet' || sess?.type === 'serial') {
           term.write('\x1b[1;32mConnected to SSH session\x1b[0m\r\n\x1b[1;34m$\x1b[0m ');
         } else {
           term.write('\x1b[1;32mWelcome to Rterm (Demo Mode)\x1b[0m\r\n$ ');
@@ -4809,6 +4892,8 @@
       listKeys: function () { return _ipc("list_keys", {}); },
       deleteKey: function (path) { return _ipc("delete_key", { path }); },
       getEnv: function (key) { return _ipc("get_env", { key }); },
+      telnetConnect: function (config) { return _ipc("telnet_connect", config); },
+      serialConnect: function (config) { return _ipc("serial_connect", config); },
     };
 
     // Check vault on app start - show lock screen only if vault is enabled AND vault file exists
