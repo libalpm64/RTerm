@@ -462,9 +462,20 @@
     }
 
     @keyframes sftp-pulse {
-      0% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.5; transform: scale(0.8); }
-      100% { opacity: 1; transform: scale(1); }
+      0% {
+        opacity: 1;
+        transform: scale(1);
+      }
+
+      50% {
+        opacity: 0.5;
+        transform: scale(0.8);
+      }
+
+      100% {
+        opacity: 1;
+        transform: scale(1);
+      }
     }
 
     .sftp-conn-status .label {
@@ -1732,6 +1743,11 @@
           <div class="panel-header">
             Remote Files
             <div class="panel-icons">
+              <span class="panel-icon" id="sftp-upload" title="Upload File">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                </svg>
+              </span>
               <span class="panel-icon" id="sftp-refresh">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M23 4v6h-6M1 20v-6h6"></path>
@@ -2294,7 +2310,8 @@
             <div class="settings-section">
               <h4>Highlighting</h4>
               <div class="setting-row">
-                <div class="setting-label">Smart Highlighting<small>Auto-highlight IPs, paths, and commands</small></div>
+                <div class="setting-label">Smart Highlighting<small>Auto-highlight IPs, paths, and commands</small>
+                </div>
                 <div class="toggle on" id="setting-semantic-hl"></div>
               </div>
               <div class="setting-row" style="flex-direction:column;align-items:stretch;gap:8px;">
@@ -3210,18 +3227,39 @@
       }
     }
 
-    document.getElementById('sftp-refresh').onclick = () => { sftpInitialized = false; if (sftpSshId) loadSftpDir('/'); };
+    document.getElementById('sftp-refresh').onclick = () => { sftpInitialized = false; if (sftpSshId) loadSftpDir(sftpPath || '/'); };
+    document.getElementById('sftp-upload').onclick = async () => {
+      if (!sftpSshId) return;
+      const localFile = await showSaveDialog('', 'file');
+      if (!localFile) return;
+      const filename = localFile.split('/').pop();
+      const remotePath = (sftpPath === '/' ? '/' : sftpPath + '/') + filename;
+      
+      let pbar = document.getElementById('dl-progress');
+      if (!pbar) {
+        pbar = document.createElement('div');
+        pbar.id = 'dl-progress';
+        pbar.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:var(--bg3);padding:12px 16px;z-index:9999;border-top:1px solid var(--border);font-size:13px;';
+        document.body.appendChild(pbar);
+      }
+      pbar.innerHTML = `<span>Uploading ${filename}...</span>`;
+      window.rterm.sftpUpload(sftpSshId, localFile, remotePath);
+    };
 
     // ── Save Dialog (Folder Picker) ──
     let _sdResolve = null;
     let _sdPath = '~';
     let _sdFilename = '';
+    let _sdMode = 'folder'; // folder or file
 
-    function showSaveDialog(filename) {
+    function showSaveDialog(filename, mode = 'folder') {
       return new Promise((resolve) => {
         _sdResolve = resolve;
         _sdFilename = filename;
+        _sdMode = mode;
         document.getElementById('save-dialog').style.display = 'flex';
+        document.getElementById('sd-title').textContent = mode === 'file' ? 'Select File to Upload' : 'Select Destination Folder';
+        document.getElementById('sd-select').textContent = mode === 'file' ? 'Select File' : 'Select Folder';
         loadSaveDir(filename, _sdPath);
       });
     }
@@ -3251,22 +3289,39 @@
           list.appendChild(p);
         }
 
-        let hasDirs = false;
+        let hasItems = false;
         for (const f of files) {
-          if (!f.dir) continue;
-          hasDirs = true;
+          if (!f.dir && _sdMode === 'folder') continue;
+          hasItems = true;
           const d = document.createElement('div');
           d.className = 'sd-item';
-          d.innerHTML = '<span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path></svg></span><span>' + f.name + '</span>';
+          const icon = f.dir 
+            ? '<svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path></svg>'
+            : '<svg viewBox="0 0 24 24" fill="none" stroke="var(--text2)" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>';
+          
+          d.innerHTML = `<span class="icon">${icon}</span><span>${f.name}</span>`;
           const full = (dir === '/' ? '/' : dir === '~' ? '~' : dir) + '/' + f.name;
-          d.onclick = () => { _sdPath = full; loadSaveDir(filename, full); };
-          d.ondblclick = () => {
-            _sdPath = full;
-            finishSaveDialog(filename);
-          };
+          
+          if (f.dir) {
+            d.onclick = () => { _sdPath = full; loadSaveDir(filename, full); };
+            d.ondblclick = () => {
+              _sdPath = full;
+              finishSaveDialog(filename);
+            };
+          } else {
+            d.onclick = () => {
+              _sdPath = full;
+              list.querySelectorAll('.sd-item').forEach(x => x.classList.remove('selected'));
+              d.classList.add('selected');
+            };
+            d.ondblclick = () => {
+              _sdPath = full;
+              finishSaveDialog(filename);
+            };
+          }
           list.appendChild(d);
         }
-        if (!hasDirs && dir !== '/') {
+        if (!hasItems && dir !== '/') {
           list.innerHTML += '<div style="padding:16px;color:var(--text3);text-align:center;font-size:12px;">(empty directory)</div>';
         }
       });
@@ -3831,7 +3886,7 @@
         if (sess?.type === 'ssh' || sess?.type === 'telnet' || sess?.type === 'serial') {
           term.write('\x1b[1;32mConnected to SSH session\x1b[0m\r\n\x1b[1;34m$\x1b[0m ');
         } else {
-          term.write('\x1b[1;32mWelcome to Rterm (Demo Mode)\x1b[0m\r\n$ ');
+          term.write('\x1b[1;32mWelcome to Rterm.\x1b[0m\r\n$ ');
         }
       } else if (sess?.type === 'local' || sess?.type === 'keys') {
         term.write('\x1b[1;32mLocal Terminal\x1b[0m\r\n$ ');
@@ -4782,7 +4837,8 @@
           document.getElementById('lctx-delete').onclick = async () => {
             menu.remove();
             if (!confirm('Delete "' + f.name + '"?')) return;
-            const path = localExpanded + '/' + f.name;
+            // Use current localPath which is the active directory
+            const path = (localPath === '/' ? '' : localPath) + '/' + f.name;
             const result = await window.rterm.localDelete(path, f.dir);
             if (result.success) { loadLocalDir(localPath); }
             else { alert('Delete failed: ' + (result.error || 'unknown')); }
@@ -4892,6 +4948,7 @@
       listKeys: function () { return _ipc("list_keys", {}); },
       deleteKey: function (path) { return _ipc("delete_key", { path }); },
       getEnv: function (key) { return _ipc("get_env", { key }); },
+      sftpUpload: function (id, localPath, remotePath) { return _ipc("sftp_upload", { id, local_path: localPath, remote_path: remotePath }); },
       telnetConnect: function (config) { return _ipc("telnet_connect", config); },
       serialConnect: function (config) { return _ipc("serial_connect", config); },
     };

@@ -295,7 +295,7 @@ fn main() {
         let mut write_halves: HashMap<u32, ChannelWriteHalf<_>> = HashMap::new();
         let mut telnet_writers: HashMap<u32, tokio::net::tcp::OwnedWriteHalf> = HashMap::new();
         let mut serial_writers: HashMap<u32, tokio::io::WriteHalf<tokio_serial::SerialStream>> = HashMap::new();
-        let mut sftp_sessions: HashMap<u32, russh_sftp::client::SftpSession> = HashMap::new();
+        let mut sftp_sessions: HashMap<u32, Arc<russh_sftp::client::SftpSession>> = HashMap::new();
         let mut sftp_files: HashMap<u32, russh_sftp::client::fs::File> = HashMap::new();
         let mut sftp_file_counter: u32 = 0;
 
@@ -566,7 +566,7 @@ fn main() {
                                         let sftp = russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|e| format!("sftp: {}", e))?;
                                         Ok::<_, String>(sftp)
                                     }.await {
-                                        Ok(s) => { sftp_sessions.insert(id, s); let _ = reply_tx.send(r#"{"success":true}"#.to_string()); }
+                                        Ok(s) => { sftp_sessions.insert(id, Arc::new(s)); let _ = reply_tx.send(r#"{"success":true}"#.to_string()); }
                                         Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
                                     }
                                 } else { let _ = reply_tx.send(r#"{"success":false,"error":"Session not found"}"#.to_string()); }
@@ -638,8 +638,9 @@ fn main() {
                                     // Parallel chunked download
                                     let ipc = ipc_tx_for_ssh_clone.clone();
                                     if let Some(sftp) = sftp_sessions.get(&id) {
+                                        let sftp_c = Arc::clone(sftp);
                                         // Open first handle to get file info
-                                        if let Ok(file) = sftp.open(&remote_path).await {
+                                        if let Ok(file) = sftp_c.open(&remote_path).await {
                                             let (raw, _) = file.raw();
                                             let raw_session = raw;
                                             let meta = file.metadata().await.ok();
@@ -731,6 +732,45 @@ fn main() {
                                                 });
                                             });
                                         }
+                                    }
+                                } else { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid format"}"#.to_string()); }
+                            }
+                            "sftp_upload" => {
+                                let parts: Vec<&str> = data.splitn(3, ':').collect();
+                                if parts.len() == 3 {
+                                    let id: u32 = match parts[0].parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid id"}"#.to_string()); continue; } };
+                                    let local_path = parts[1].to_string();
+                                    let remote_path = parts[2].to_string();
+                                    let _ = reply_tx.send(r#"{"success":true}"#.to_string());
+                                    
+                                    let ipc = ipc_tx_for_ssh_clone.clone();
+                                    if let Some(sftp) = sftp_sessions.get(&id) {
+                                        let sftp_c = Arc::clone(sftp);
+                                        tokio::spawn(async move {
+                                            use tokio::io::AsyncReadExt;
+                                            if let Ok(mut local_file) = tokio::fs::File::open(&local_path).await {
+                                                if let Ok(mut remote_file) = sftp_c.create(&remote_path).await {
+                                                    let mut uploaded = 0u64;
+                                                    let mut buf = vec![0u8; 262144];
+                                                    let start_time = std::time::Instant::now();
+                                                    while let Ok(n) = local_file.read(&mut buf).await {
+                                                        if n == 0 { break; }
+                                                        if remote_file.write_all(&buf[..n]).await.is_err() { break; }
+                                                        uploaded += n as u64;
+                                                        let speed = uploaded as f64 / start_time.elapsed().as_secs_f64().max(0.1) / (1024.0*1024.0);
+                                                        let mb = uploaded as f64 / (1024.0*1024.0);
+                                                        let _ = ipc.send(IpcOutMsg {
+                                                            script: format!("{{let p=document.getElementById('dl-progress');if(p)p.innerHTML='<span>Uploading {:.1}MB @ {:.1}MB/s</span>'}}", mb, speed),
+                                                        });
+                                                    }
+                                                    let _ = ipc.send(IpcOutMsg {
+                                                        script: format!("{{let p=document.getElementById('dl-progress');if(p){{p.innerHTML='<span style=\"color:var(--green)\">Uploaded {:.1}MB</span>';setTimeout(function(){{p.remove()}},3000)}}}}", uploaded as f64/(1024.0*1024.0)),
+                                                    });
+                                                    let remote_dir = std::path::Path::new(&remote_path).parent().and_then(|p| p.to_str()).unwrap_or("/");
+                                                    let _ = ipc.send(IpcOutMsg { script: format!("loadSftpDir('{}')", remote_dir) });
+                                                }
+                                            }
+                                        });
                                     }
                                 } else { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid format"}"#.to_string()); }
                             }
@@ -960,7 +1000,6 @@ fn main() {
                     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let filename = args.get("filename").and_then(|v| v.as_str()).unwrap_or("download").to_string();
                     
-                    // Use provided save_path or fallback to ~/Downloads
                     let save_dir = args.get("save_path").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| {
@@ -971,6 +1010,18 @@ fn main() {
                     let (reply_tx, reply_rx) = mpsc::channel();
                     ssh_tx_clone.send((format!("sftp_download:{}:{}:{}", id, path, save_path), reply_tx)).ok();
                     match reply_rx.recv_timeout(Duration::from_secs(300)) {
+                        Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
+                        Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
+                    }
+                }
+                "sftp_upload" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let id: u32 = match args.get("id").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
+                    let local_path = args.get("local_path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let remote_path = args.get("remote_path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let (reply_tx, reply_rx) = mpsc::channel();
+                    ssh_tx_clone.send((format!("sftp_upload:{}:{}:{}", id, local_path, remote_path), reply_tx)).ok();
+                    match reply_rx.recv_timeout(Duration::from_secs(5)) {
                         Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
                         Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
                     }
@@ -1031,10 +1082,12 @@ fn main() {
                     } else {
                         path.to_string()
                     };
+                    // Normalize path (remove double slashes)
+                    let normalized = expanded.replace("//", "/");
                     let result = if is_dir {
-                        std::fs::remove_dir_all(&expanded)
+                        std::fs::remove_dir_all(&normalized)
                     } else {
-                        std::fs::remove_file(&expanded)
+                        std::fs::remove_file(&normalized)
                     };
                     match result {
                         Ok(_) => send_resp(&serde_json::json!({"success": true})),
