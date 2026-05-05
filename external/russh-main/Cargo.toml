@@ -1,3 +1,9 @@
 [workspace]
 members = ["russh", "cryptovec", "russh-util"]
 resolver = "2"
+
+[patch.crates-io]
+ed25519-dalek = { path = "../curve25519-dalek/ed25519-dalek" }
+rsa = { path = "../RustCrypto/rsa" }
+pkcs8 = { path = "../RustCrypto/pkcs8" }
+pkcs5 = { path = "../RustCrypto/pkcs5" }
