@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "curve25519-dalek",
+    "curve25519-dalek-derive",
+    "ed25519-dalek",
+]
+resolver = "2"
+
+[profile.dev]
+opt-level = 2
+
+[patch.crates-io]
+curve25519-dalek-derive = { path = "./curve25519-dalek-derive" }
+curve25519-dalek = { path = "./curve25519-dalek" }
