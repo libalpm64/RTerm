@@ -1,4 +1,5 @@
 # Rterm
+<img width="1312" height="940" alt="image" src="https://github.com/user-attachments/assets/835a7ad0-e4f2-4ca1-a7c7-5f19666f16e2" />
 
 Rterm is a lightweight, experimental terminal emulator built with Rust, Wry, and xterm.js. I built this because Windterm kept crashing whenever I tried to load SSH keys, and I grew tired of open-source “DevOps” terminals being cluttered with AI bloat and TypeScript hell. It is fully open-source and focuses on features that actually work, even if nobody asked for them.
 
