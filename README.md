@@ -1,8 +1,9 @@
 # Rterm
-<img width="1312" height="940" alt="image" src="https://github.com/user-attachments/assets/835a7ad0-e4f2-4ca1-a7c7-5f19666f16e2" />
+Rterm is a lightweight, experimental terminal emulator built with Rust, Wry, and xterm.js. I built this because Windterm kept crashing whenever I tried to load SSH keys, and I grew tired of open-source “DevOps” terminals being cluttered with AI bloat and TypeScript hell.
 
-Rterm is a lightweight, experimental terminal emulator built with Rust, Wry, and xterm.js. I built this because Windterm kept crashing whenever I tried to load SSH keys, and I grew tired of open-source “DevOps” terminals being cluttered with AI bloat and TypeScript hell. It is fully open-source and focuses on features that actually work, even if nobody asked for them.
+<img width="800" height="600" alt="image" src="https://github.com/user-attachments/assets/835a7ad0-e4f2-4ca1-a7c7-5f19666f16e2" />
 
+## Features
 * SSH Supported
 * SSH Keys / SSH Agent
 * Telnet
@@ -22,12 +23,13 @@ Rterm is a lightweight, experimental terminal emulator built with Rust, Wry, and
 * Filter sessions
 * AST parsing (Bash, Linux, IPs, domains)
 
-Why Rterm?
-This project started after repeated crashes in Windterm when loading SSH keys. Instead of waiting for a billion years to fix it, you can fix any bug in literal minutes and add as many features as you want on top of it in like a day.
-RTerm was built in like a week using Deepseek, because I had some credits from them (the cost was $5 for everything in Rterm).
 
-I do not guarantee anything. This is a personal project. I just unprivated it because some people might actually use this.
+## Why Rterm?
+- Instead of waiting for a billion years for close source devops terminal to fix stuff, you can fix any bug in literal minutes and add as many features as you want on top of it in like a day.
+- I do not guarantee anything. This is a personal project. I just unprivated it because some people might actually use this.
+- RTerm was built in like a week using Deepseek, because I had some credits from them (the cost was $5 for everything in Rterm).
 
-Supported Platforms: macOS
 
+## Targets
+Supported Platforms: macOS. 
 Linux support coming soon. I’m too lazy to switch PCs.
