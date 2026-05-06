@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
@@ -12,7 +13,7 @@ use tao::{
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
-use wry::http::Request;
+use wry::http::{header::CONTENT_TYPE, Request, Response};
 use wry::WebViewBuilder;
 
 static SESSION_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -258,12 +259,43 @@ fn delete_key(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn main() {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+fn serve_file(root: &PathBuf, request: Request<Vec<u8>>) -> Result<Response<Vec<u8>>, String> {
+    let uri_path = request.uri().path().to_string();
+    let relative = if uri_path == "/" || uri_path == "/index.html" {
+        "index.html".to_string()
+    } else {
+        uri_path.trim_start_matches('/').to_string()
+    };
+    let file_path = root.join(&relative);
+    let content = std::fs::read(&file_path).map_err(|e| format!("read {:?}: {}", file_path, e))?;
+    let mimetype = if relative.ends_with(".js") {
+        "text/javascript"
+    } else if relative.ends_with(".css") {
+        "text/css"
+    } else if relative.ends_with(".html") {
+        "text/html"
+    } else if relative.ends_with(".png") {
+        "image/png"
+    } else if relative.ends_with(".svg") {
+        "image/svg+xml"
+    } else {
+        "application/octet-stream"
+    };
+    Response::builder()
+        .header(CONTENT_TYPE, mimetype)
+        .body(content)
+        .map_err(|e| format!("response builder: {}", e))
+}
 
-    let html = std::fs::read_to_string("index.html").unwrap_or_else(|_| {
-        std::fs::read_to_string("index.html").unwrap_or_else(|_| include_str!("../../index.html").to_string())
-    });
+fn main() {
+    // Determine project root (where index.html and js/ live)
+    let project_root = match std::env::current_dir() {
+        Ok(cwd) => std::fs::canonicalize(cwd.join("../")).unwrap_or_else(|_| PathBuf::from("../")),
+        Err(_) => PathBuf::from("../"),
+    };
+    eprintln!("Project root: {:?}", project_root);
+
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
     let (ssh_tx, ssh_rx) = mpsc::channel::<(String, mpsc::Sender<String>)>();
     let (ipc_tx, ipc_rx) = mpsc::channel::<IpcOutMsg>();
@@ -800,8 +832,23 @@ fn main() {
         }
     });
 
+    let root_for_protocol = project_root.clone();
     let webview_built = WebViewBuilder::new()
-        .with_html(&html)
+        .with_custom_protocol("rterm".into(), move |_webview_id, request| {
+            match serve_file(&root_for_protocol, request) {
+                Ok(resp) => resp.map(Into::into),
+                Err(e) => {
+                    eprintln!("Protocol error: {}", e);
+                    Response::builder()
+                        .header(CONTENT_TYPE, "text/plain")
+                        .status(404)
+                        .body(b"Not found".to_vec())
+                        .unwrap()
+                        .map(Into::into)
+                }
+            }
+        })
+        .with_url("rterm://localhost/index.html")
         .with_devtools(true)
         .with_ipc_handler(move |request: Request<String>| {
             let msg = request.body();
