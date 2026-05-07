@@ -4,24 +4,35 @@ Rterm is a lightweight, experimental terminal emulator built with Rust, Wry, and
 <img width="800" height="600" alt="image" src="https://github.com/user-attachments/assets/835a7ad0-e4f2-4ca1-a7c7-5f19666f16e2" />
 
 ## Features
-* SSH Supported
-* SSH Keys / SSH Agent
-* Telnet
-* SFTP
-* Serial (Untested)
-* Vault (SSH keys and passwords with ChaCha)
-* Fork of the Russh engine (Async SSH non-blocking)
-* Modularity (IPC handlers)
-* Lean (No NPM packages, No Typescript, no bs)
-* Fully open source
-* 50 MB Runtime (That’s Apple Webkit overhead)
-* Concurrent SFTP transfers
-* Customizable Line Rate
-* Local explorer
-* File Downloading
-* File uploading (Experimental)
-* Filter sessions
-* AST parsing (Bash, Linux, IPs, domains)
+* Local terminal sessions
+* SSH sessions (Russh-based async engine)
+* Telnet sessions
+* Serial sessions (experimental)
+* SFTP subsystem integration
+* Session list with filtering/search
+* Tab management
+* SSH key manager UI
+* Vault encryption for stored sessions/keys (ChaCha)
+* Automatic Lock screen
+* SSH agents
+* Directory browsing
+* Context menu actions: delete, move, rename, info, select mode
+* Bulk select mode with bulk delete/move
+* Remote directory browsing
+* Upload and download through SFTP, RSYNC (coming soon)
+* Context menu actions: download, move, rename, info, select mode
+* Bulk selection
+* Remote permission display in info dialogs
+* Concurrent/parallel SFTP download paths
+* Transfer progress overlays
+* xterm.js integration
+* Zoom in/out
+* Command history support
+* Syntax/AST-style highlighting for shell/network text patterns
+* Rust + Wry + xterm.js desktop stack
+* Lean frontend (vanilla JS, no TypeScript toolchain)
+* Explicit IPC method surface for frontend/backend features
+* Open source codebase with modular JS/Rust components
 
 
 ## Why Rterm?
