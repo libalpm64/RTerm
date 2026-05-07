@@ -15,64 +15,79 @@ import {
   fitAll, doConnect
 } from './terminal.js';
 import { renderSavedSessions, addSession, editSession, deleteSession, connectSession, initSavedSessions } from './sessions.js';
-import { loadSftpDir, setupSaveDialog } from './sftp.js';
+import { loadSftpDir, setupSaveDialog, showSaveDialog, getCurrentSftpPath, setSftpSelectMode } from './sftp.js';
 import { setupKeys } from './keys.js';
 import { loadLocalDir } from './filer.js';
+import { $, $$, byId, on, setDisplay, setText, showOnlyById } from './dom.js';
 
 export function closeMenusInternal() {
-  document.querySelectorAll('.dropdown').forEach(m => m.classList.remove('show'));
-  document.querySelectorAll('.menu-btn').forEach(b => b.classList.remove('active'));
+  $$('.dropdown').forEach(m => m.classList.remove('show'));
+  $$('.menu-btn').forEach(b => b.classList.remove('active'));
   setActiveMenu(null);
 }
 
 export function hideModalInternal() {
-  document.getElementById('modal-overlay').classList.remove('show');
+  byId('modal-overlay')?.classList.remove('show');
 }
 
 export function showModalInternal(type) {
   closeMenusInternal();
-  document.getElementById('modal-connect').style.display = type === 'connect' ? 'block' : 'none';
-  document.getElementById('modal-settings').style.display = type === 'settings' ? 'block' : 'none';
-  document.getElementById('modal-about').style.display = type === 'about' ? 'block' : 'none';
-  document.getElementById('modal-keys').style.display = type === 'keys' ? 'block' : 'none';
-  document.getElementById('modal-overlay').classList.add('show');
+  showOnlyById({
+    'modal-connect': type === 'connect',
+    'modal-settings': type === 'settings',
+    'modal-about': type === 'about',
+    'modal-keys': type === 'keys',
+  });
+  byId('modal-overlay')?.classList.add('show');
 
   if (type === 'connect') {
-    document.getElementById('modal-title').textContent = 'New Session';
+    setText(byId('modal-title'), 'New Session');
     resetConnectModal();
   } else if (type === 'settings') {
-    document.getElementById('modal-title').textContent = 'Settings';
+    setText(byId('modal-title'), 'Settings');
     initSettingsTabs();
   }
 }
 
 function resetConnectModal() {
   setEditingIndex(-1);
-  document.getElementById('modal-title').textContent = 'New Session';
-  document.getElementById('modal-connect-btn').textContent = 'Connect';
-  document.querySelectorAll('#modal-connect .modal-tab').forEach(t => t.classList.remove('active'));
-  document.querySelector('#modal-connect .modal-tab[data-type="local"]').classList.add('active');
-  document.getElementById('local-fields').style.display = '';
-  document.getElementById('ssh-fields').style.display = 'none';
-  document.getElementById('telnet-fields').style.display = 'none';
-  document.getElementById('serial-fields').style.display = 'none';
+  setText(byId('modal-title'), 'New Session');
+  setText(byId('modal-connect-btn'), 'Connect');
+  $$('#modal-connect .modal-tab').forEach(t => t.classList.remove('active'));
+  $('#modal-connect .modal-tab[data-type="local"]')?.classList.add('active');
+  setConnectionFields('local');
 
-  document.querySelectorAll('#modal-connect .toggle').forEach(t => t.classList.add('on'));
+  $$('#modal-connect .toggle').forEach(t => t.classList.add('on'));
 }
 
 export function initSettingsTabs() {
-  document.querySelectorAll('#modal-settings .modal-tab').forEach(t => t.classList.remove('active'));
-  document.querySelector('#modal-settings .modal-tab[data-settings="terminal"]').classList.add('active');
-  document.querySelectorAll('.settings-content').forEach(s => s.classList.remove('active'));
-  document.getElementById('settings-terminal').classList.add('active');
+  $$('#modal-settings .modal-tab').forEach(t => t.classList.remove('active'));
+  $('#modal-settings .modal-tab[data-settings="terminal"]')?.classList.add('active');
+  $$('.settings-content').forEach(s => s.classList.remove('active'));
+  byId('settings-terminal')?.classList.add('active');
+}
+
+function setConnectionFields(type) {
+  setDisplay(byId('local-fields'), type === 'local' ? 'block' : 'none');
+  setDisplay(byId('ssh-fields'), type === 'ssh' ? 'block' : 'none');
+  setDisplay(byId('telnet-fields'), type === 'telnet' ? 'block' : 'none');
+  setDisplay(byId('serial-fields'), type === 'serial' ? 'block' : 'none');
+}
+
+function setActiveWithin(items, activeItem) {
+  items.forEach(item => item.classList.toggle('active', item === activeItem));
+}
+
+function isSftpPanelActive() {
+  return document.querySelector('.sidebar-tab.active')?.dataset?.panel === 'sftp';
 }
 
 export function setupEventListeners() {
 
-  document.querySelectorAll('.menu-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
+  $$('.menu-btn').forEach(btn => {
+    on(btn, 'click', (e) => {
       e.stopPropagation();
-      const menu = btn.querySelector('.dropdown');
+      const menu = $('.dropdown', btn);
       if (activeMenu === menu) {
         closeMenusInternal();
       } else {
@@ -84,37 +99,34 @@ export function setupEventListeners() {
     });
   });
 
-  document.addEventListener('click', (e) => {
+  on(document, 'click', (e) => {
     if (!e.target.closest('.menu-btn') && !e.target.closest('.dropdown')) {
       closeMenusInternal();
     }
   });
 
-  document.getElementById('modal-close-btn').addEventListener('click', hideModalInternal);
-  document.getElementById('modal-overlay').addEventListener('click', (e) => {
-    if (e.target === document.getElementById('modal-overlay')) hideModalInternal();
+  on(byId('modal-close-btn'), 'click', hideModalInternal);
+  on(byId('modal-overlay'), 'click', (e) => {
+    if (e.target === byId('modal-overlay')) hideModalInternal();
   });
 
-  document.querySelectorAll('#modal-connect .modal-tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      document.querySelectorAll('#modal-connect .modal-tab').forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
+  const connectTabs = $$('#modal-connect .modal-tab');
+  connectTabs.forEach(tab => {
+    on(tab, 'click', () => {
+      setActiveWithin(connectTabs, tab);
       const type = tab.dataset.type;
-      document.getElementById('local-fields').style.display = type === 'local' ? 'block' : 'none';
-      document.getElementById('ssh-fields').style.display = type === 'ssh' ? 'block' : 'none';
-      document.getElementById('telnet-fields').style.display = type === 'telnet' ? 'block' : 'none';
-      document.getElementById('serial-fields').style.display = type === 'serial' ? 'block' : 'none';
+      setConnectionFields(type);
     });
   });
 
   // SSH Auth method toggle
-  document.getElementById('ssh-auth-method').addEventListener('change', async (e) => {
+  on(byId('ssh-auth-method'), 'change', async (e) => {
     const method = e.target.value;
-    document.getElementById('ssh-password-fields').style.display = method === 'password' ? '' : 'none';
-    const keyFields = document.getElementById('ssh-key-fields');
-    keyFields.style.display = method === 'key' ? '' : 'none';
+    setDisplay(byId('ssh-password-fields'), method === 'password' ? '' : 'none');
+    const keyFields = byId('ssh-key-fields');
+    setDisplay(keyFields, method === 'key' ? '' : 'none');
     if (method === 'key') {
-      const sel = document.getElementById('ssh-key-select');
+      const sel = byId('ssh-key-select');
       const prev = sel.value;
       sel.innerHTML = '<option value="">Select a key...</option>';
       const vaultKeys = window.__rterm_vault_keys || [];
@@ -142,19 +154,19 @@ export function setupEventListeners() {
     }
   });
 
-  document.querySelectorAll('#modal-settings .modal-tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      document.querySelectorAll('#modal-settings .modal-tab').forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
+  const settingsTabs = $$('#modal-settings .modal-tab');
+  settingsTabs.forEach(tab => {
+    on(tab, 'click', () => {
+      setActiveWithin(settingsTabs, tab);
       const section = tab.dataset.settings;
-      document.querySelectorAll('.settings-content').forEach(s => s.classList.remove('active'));
-      document.getElementById('settings-' + section).classList.add('active');
+      $$('.settings-content').forEach(s => s.classList.remove('active'));
+      byId('settings-' + section)?.classList.add('active');
     });
   });
 
   // Toggle switches
-  document.querySelectorAll('.toggle').forEach(toggle => {
-    toggle.addEventListener('click', () => toggle.classList.toggle('on'));
+  $$('.toggle').forEach(toggle => {
+    on(toggle, 'click', () => toggle.classList.toggle('on'));
   });
 
   // Generate SSH Key button (in connect modal)
@@ -172,9 +184,16 @@ export function setupEventListeners() {
       document.querySelectorAll('.sidebar-panel').forEach(p => p.classList.remove('active'));
       document.getElementById('panel-' + panel).classList.add('active');
 
-      if (panel === 'sftp') setTimeout(() => loadSftpDir('/'), 50);
+      if (panel === 'sftp') setTimeout(() => loadSftpDir(getCurrentSftpPath() || '/'), 50);
       if (panel === 'local') setTimeout(() => loadLocalDir('~'), 50);
     });
+  });
+
+  window.addEventListener('rterm:ssh-connected', () => {
+    if (isSftpPanelActive()) {
+      setSftpInitialized(false);
+      loadSftpDir(getCurrentSftpPath() || '/');
+    }
   });
 
   // SFTP menus
@@ -190,13 +209,26 @@ export function setupEventListeners() {
     const menu = document.createElement('div');
     menu.id = 'sftp-ctx';
     menu.style.cssText = 'position:fixed;z-index:9999;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:4px;box-shadow:0 8px 24px rgba(0,0,0,.5);min-width:160px;font-size:12px;';
-    menu.innerHTML = '<div class="dropdown-item" id="sctx-ul">Upload File</div>';
+    menu.innerHTML = '<div class="dropdown-item" id="sctx-ul">Upload File</div><div class="dropdown-item" id="sctx-sm">Select Mode</div>';
     document.body.appendChild(menu);
-    menu.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
-    menu.style.top = Math.min(e.clientY, window.innerHeight - 80) + 'px';
-    document.getElementById('sctx-ul').onclick = () => {
+    menu.style.left = Math.max(4, Math.min(e.clientX, window.innerWidth - 188)) + 'px';
+    menu.style.top = Math.max(4, Math.min(e.clientY, window.innerHeight - 88)) + 'px';
+    document.getElementById('sctx-ul').onclick = async () => {
       menu.remove();
-      alert('SFTP Upload: File picker integration pending');
+      const sess = Array.from(sessions.values()).find(s => s.type === 'ssh' && s.sshId !== null && s.sshId !== undefined);
+      if (!sess) { alert('No active SSH session'); return; }
+      const localFile = await showSaveDialog('', 'file');
+      if (!localFile) return;
+      const filename = localFile.split('/').pop() || 'upload.bin';
+      const remoteDir = getCurrentSftpPath() || '/';
+      const remotePath = (remoteDir === '/' ? '' : remoteDir) + '/' + filename;
+      const result = await window.rterm.sftpUpload(sess.sshId, localFile, remotePath);
+      if (!result?.success) alert('Upload failed: ' + (result?.error || 'unknown'));
+    };
+    document.getElementById('sctx-sm').onclick = () => {
+      menu.remove();
+      setSftpSelectMode(true);
+      loadSftpDir(getCurrentSftpPath() || '/');
     };
     setTimeout(() => {
       document.addEventListener('click', () => { const m = document.getElementById('sftp-ctx'); if (m) m.remove(); }, { once: true });
@@ -211,7 +243,27 @@ export function setupEventListeners() {
   document.getElementById('sftp-upload').onclick = async () => {
     const sess = Array.from(sessions.values()).find(s => s.type === 'ssh' && s.sshId !== null && s.sshId !== undefined);
     if (!sess) { alert('No active SSH session'); return; }
-    alert('SFTP Upload: File picker integration pending');
+    const localFile = await showSaveDialog('', 'file');
+    if (!localFile) return;
+
+    const filename = localFile.split('/').pop() || 'upload.bin';
+    const remoteDir = getCurrentSftpPath() || '/';
+    const remotePath = (remoteDir === '/' ? '' : remoteDir) + '/' + filename;
+
+    let pbar = document.getElementById('dl-progress');
+    if (!pbar) {
+      pbar = document.createElement('div');
+      pbar.id = 'dl-progress';
+      pbar.style.cssText = 'position:fixed;top:38px;right:12px;min-width:280px;max-width:480px;background:var(--bg3);padding:10px 12px;z-index:9999;border:1px solid var(--border2);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.4);font-size:12px;';
+      document.body.appendChild(pbar);
+    }
+    pbar.innerHTML = `<span>Starting upload of ${filename}...</span>`;
+
+    const result = await window.rterm.sftpUpload(sess.sshId, localFile, remotePath);
+    if (!result?.success) {
+      pbar.remove();
+      alert('Upload failed: ' + (result?.error || 'unknown'));
+    }
   };
 
   // Menubar Actions
@@ -249,10 +301,8 @@ export function setupEventListeners() {
     }
   };
 
-  document.getElementById('action-keys-agent').onclick = () => {
-    const agentToggle = document.getElementById('setting-ssh-agent');
-    if (agentToggle) agentToggle.classList.toggle('on');
-  };
+  const agentMenuItem = document.getElementById('action-keys-agent');
+  if (agentMenuItem) agentMenuItem.remove();
 
   // Context menus
   document.getElementById('ctx-copy').onclick = copySelection;

@@ -1123,20 +1123,76 @@ fn main() {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                     let is_dir = args.get("dir").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if path.trim().is_empty() {
+                        send_resp(&serde_json::json!({"success": false, "error": "empty path"}));
+                        return;
+                    }
                     let expanded = if path.starts_with("~") {
                         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
                         path.replacen('~', &home, 1)
                     } else {
                         path.to_string()
                     };
-                    // Normalize path (remove double slashes)
-                    let normalized = expanded.replace("//", "/");
-                    let result = if is_dir {
-                        std::fs::remove_dir_all(&normalized)
+
+                    // Resolve relative paths against CWD and normalize separators.
+                    let path_buf = if expanded.starts_with('/') {
+                        std::path::PathBuf::from(&expanded)
                     } else {
-                        std::fs::remove_file(&normalized)
+                        std::env::current_dir().unwrap_or_default().join(&expanded)
+                    };
+                    let normalized = std::path::PathBuf::from(
+                        path_buf.to_string_lossy().replace("//", "/")
+                    );
+
+                    let result = if is_dir {
+                        std::fs::remove_dir_all(&normalized).or_else(|e| {
+                            // On macOS, UI metadata may misclassify; fallback to file delete.
+                            if normalized.is_file() {
+                                std::fs::remove_file(&normalized)
+                            } else {
+                                Err(e)
+                            }
+                        })
+                    } else {
+                        std::fs::remove_file(&normalized).or_else(|e| {
+                            // Fallback for directories/symlinks reported inconsistently.
+                            if normalized.is_dir() {
+                                std::fs::remove_dir_all(&normalized)
+                            } else {
+                                Err(e)
+                            }
+                        })
                     };
                     match result {
+                        Ok(_) => send_resp(&serde_json::json!({"success": true})),
+                        Err(e) => send_resp(&serde_json::json!({
+                            "success": false,
+                            "error": format!("delete failed for {}: {}", normalized.to_string_lossy(), e)
+                        })),
+                    }
+                }
+                "local_move" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let from_path = args.get("from_path").and_then(|v| v.as_str()).unwrap_or("").trim();
+                    let to_path = args.get("to_path").and_then(|v| v.as_str()).unwrap_or("").trim();
+                    if from_path.is_empty() || to_path.is_empty() {
+                        send_resp(&serde_json::json!({"success": false, "error": "empty path"}));
+                        return;
+                    }
+                    let expand = |p: &str| -> std::path::PathBuf {
+                        let expanded = if p.starts_with("~") {
+                            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                            p.replacen('~', &home, 1)
+                        } else { p.to_string() };
+                        if expanded.starts_with('/') {
+                            std::path::PathBuf::from(expanded)
+                        } else {
+                            std::env::current_dir().unwrap_or_default().join(expanded)
+                        }
+                    };
+                    let from = expand(from_path);
+                    let to = expand(to_path);
+                    match std::fs::rename(&from, &to) {
                         Ok(_) => send_resp(&serde_json::json!({"success": true})),
                         Err(e) => send_resp(&serde_json::json!({"success": false, "error": e.to_string()})),
                     }

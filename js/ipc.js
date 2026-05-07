@@ -66,6 +66,7 @@ export function setupRtermApi() {
     localExec: function (cmd, cols) { return _ipc("local_exec", { command: cmd, cols: cols || 120 }); },
     localList: function (path) { return _ipc("local_list", { path: path || '.' }); },
     localDelete: function (path, dir) { return _ipc("local_delete", { path, dir: dir || false }); },
+    localMove: function (fromPath, toPath) { return _ipc("local_move", { from_path: fromPath, to_path: toPath }); },
     generateKey: function (name, type, passphrase) { return _ipc("generate_key", { name, type, passphrase: passphrase || '' }); },
     listKeys: function () { return _ipc("list_keys", {}); },
     deleteKey: function (path) { return _ipc("delete_key", { path }); },

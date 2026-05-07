@@ -10,6 +10,7 @@ import {
   setEditingIndex, setConnecting, setKeysTabOpen, setDraggedTabId
 } from './state.js';
 import { _ipc, invoke } from './ipc.js';
+import { byId } from './dom.js';
 
 export function showTerminalView() {
   document.getElementById('keys-panel').style.display = 'none';
@@ -286,7 +287,7 @@ export function toggleSidebar(side) {
 }
 
 export function zoomIn() {
-  setFontSize(Math.min(24, fontSize + 2));
+  setFontSize(Math.min(48, fontSize + 2));
   sessions.forEach((sess) => {
     if (sess.term) {
       sess.term.options.fontSize = fontSize;
@@ -319,7 +320,18 @@ export function resetZoom() {
 }
 
 export function copySelection() {
-  if (currentTerm) currentTerm.copySelection();
+  if (!currentTerm) return;
+  const sel = currentTerm.getSelection();
+  if (sel && sel.length > 0) {
+    currentTerm.copySelection();
+    return;
+  }
+  const full = currentTerm.buffer.active;
+  const lines = [];
+  for (let i = 0; i < full.length; i++) {
+    lines.push(full.getLine(i)?.translateToString(true) || '');
+  }
+  navigator.clipboard.writeText(lines.join('\n'));
 }
 
 export function pasteClipboard() {
@@ -367,17 +379,30 @@ export function addHistoryItem(cmd) {
 }
 
 export function renderHistory() {
-  const list = document.getElementById('history-list');
+  const list = byId('history-list');
   if (!list) return;
+  list.replaceChildren();
+
   if (commandHistory.length === 0) {
-    list.innerHTML = '<div class="sempty">No command history</div>';
+    const empty = document.createElement('div');
+    empty.className = 'sempty';
+    empty.textContent = 'No command history';
+    list.appendChild(empty);
     return;
   }
-  list.innerHTML = commandHistory.map(cmd => `
-    <div class="history-item" onclick="executeHistory('${cmd.replace(/'/g, "\\'")}')">
-      <span class="dot"></span>${cmd}
-    </div>
-  `).join('');
+
+  const fragment = document.createDocumentFragment();
+  commandHistory.forEach(cmd => {
+    const item = document.createElement('div');
+    item.className = 'history-item';
+    item.addEventListener('click', () => executeHistory(cmd));
+
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    item.append(dot, document.createTextNode(cmd));
+    fragment.appendChild(item);
+  });
+  list.appendChild(fragment);
 }
 
 export function executeHistory(cmd) {
@@ -386,13 +411,6 @@ export function executeHistory(cmd) {
     window.rterm.sshWrite(sess.sshId, cmd + '\n');
   }
 }
-
-window.executeHistory = function(cmd) {
-  const sess = sessions.get(activeId);
-  if (sess && sess.term && sess.type === 'ssh' && sess.sshId !== null) {
-    window.rterm.sshWrite(sess.sshId, cmd + '\n');
-  }
-};
 
 export async function newTerminal(type = 'local') {
   const id = 'session-' + Date.now();
@@ -692,6 +710,9 @@ export async function doConnect() {
             }
           }, 100);
         }
+        window.dispatchEvent(new CustomEvent('rterm:ssh-connected', {
+          detail: { sessionId: id, sshId }
+        }));
       } catch (e) {
         console.error('Connection error:', e);
         closeTab(id);

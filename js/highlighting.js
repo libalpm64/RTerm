@@ -7,6 +7,8 @@ const ANSI = {
   cyan: '\x1b[1;36m',
   magenta: '\x1b[1;35m',
   blue: '\x1b[1;34m',
+  orange: '\x1b[38;5;214m',
+  gray: '\x1b[38;5;244m',
   reset: '\x1b[0m',
 };
 
@@ -14,7 +16,7 @@ const STATIC_RULES = semanticHlEnabled ? [
   { re: /\b(sudo|rm|dd|mkfs|shutdown|reboot|halt|poweroff)\b/g, color: ANSI.red },
   { re: /\b(ls|cd|grep|awk|sed|cat|less|more|tail|head|find|ssh|scp|git|docker|npm|cargo|pip|python|gcc|make|apt|yum|dnf|systemctl|journalctl)\b/g, color: ANSI.yellow },
   { re: /\b(\d{1,3}(?:\.\d{1,3}){3})\b/g, color: ANSI.magenta },
-  { re: /(\/[a-zA-Z0-9._\-\/]+)/g, color: ANSI.green },
+  { re: /(\/[a-zA-Z0-9._\-\/]+)/g, color: ANSI.cyan },
   { re: /\b([drwx-]{10})\b/g, color: ANSI.cyan },
   { re: /(\$[a-zA-Z_][a-zA-Z0-9_]*)\b/g, color: ANSI.cyan },
 ] : [];
@@ -49,14 +51,18 @@ export function applyHighlighting(data) {
         const lower = match.toLowerCase();
 
         let color = ANSI.yellow;
-        if (/(error|fail|fault|critical)/.test(lower)) color = ANSI.red;
-        else if (/(success|ok|passed|done)/.test(lower)) color = ANSI.green;
-        else if (/(warn|wait|pending)/.test(lower)) color = ANSI.yellow;
-        else if (/(info|debug|trace)/.test(lower)) color = ANSI.blue;
+      if (/(error|fail|fault|critical|exception)/.test(lower)) color = ANSI.red;
+      else if (/(success|ok|passed|done)/.test(lower)) color = ANSI.cyan;
+      else if (/(warn|wait|pending)/.test(lower)) color = ANSI.yellow;
+      else if (/(info|debug|trace)/.test(lower)) color = ANSI.blue;
 
-        return `${color}${match}${ANSI.reset}`;
-      });
-    }
+      return `${color}${match}${ANSI.reset}`;
+    });
+  }
+
+  if (semanticHlEnabled) {
+    res = res.replace(/\b(error|failed|denied|fatal|invalid)\b/gi, `${ANSI.red}$1${ANSI.reset}`);
+  }
   }
 
   return res;

@@ -185,10 +185,15 @@
       box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
       z-index: 1000;
       display: none;
+      opacity: 0;
+      transform: translateY(4px);
+      transition: opacity .12s ease, transform .12s ease;
     }
 
     .dropdown.show {
       display: block;
+      opacity: 1;
+      transform: translateY(0);
     }
 
     .dropdown-item {
@@ -619,6 +624,7 @@
       font-size: 11px;
       color: var(--text2);
       flex-shrink: 0;
+      overflow: hidden;
     }
 
     .session-toolbar .sep {
@@ -1099,6 +1105,8 @@
       color: var(--text2);
       flex-shrink: 0;
       border-top: 1px solid var(--border);
+      overflow-x: auto;
+      white-space: nowrap;
     }
 
     .status-sep {
@@ -1287,6 +1295,7 @@
       background: var(--bg4);
     }
 
+    #save-dialog .sd-item.selected,
     #save-dialog .sd-item.active {
       background: var(--bg4);
       color: var(--accent);
@@ -1666,9 +1675,6 @@
     <div class="menu-btn" id="menu-keys-btn">SSH Keys
       <div class="dropdown" id="menu-keys">
         <div class="dropdown-item" id="action-keys-open">Open SSH Key Manager</div>
-        <div class="dropdown-divider"></div>
-        <div class="dropdown-item" id="action-keys-agent">SSH Agent <span class="agent-status"
-            style="margin-left:8px;color:var(--green)">Running</span></div>
       </div>
     </div>
     <div class="menu-btn" id="menu-help-btn">Help
@@ -1921,7 +1927,8 @@
                 </div>
                 <div>
                   <h2 style="font-size:16px;font-weight:600;color:var(--text);" id="selected-key-name">id_ed25519</h2>
-                  <p style="font-size:12px;color:var(--text3);" id="selected-key-path">~/.ssh/id_ed25519</p>
+                  <p style="font-size:12px;color:var(--text3);max-width:520px;white-space:normal;word-break:break-word;line-height:1.4;"
+                    id="selected-key-path">~/.ssh/id_ed25519</p>
                 </div>
               </div>
 
@@ -2027,7 +2034,7 @@
       style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;width:540px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 16px 48px rgba(0,0,0,.6);">
       <div
         style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border);font-size:14px;font-weight:600;color:var(--fg);">
-        <span>Select Download Folder</span>
+        <span id="sd-header-title">Select Download Folder</span>
         <span id="sd-close" style="cursor:pointer;color:var(--text3);font-size:18px;">&times;</span>
       </div>
       <div id="sd-path"
@@ -2568,8 +2575,8 @@
 
           <div style="padding-top:16px;border-top:1px solid var(--border);text-align:left;">
             <p style="color:var(--text3);font-size:12px;line-height:1.6;">
-              Built with: <span style="color:var(--text2);">Tauri</span>, <span style="color:var(--text2);">Rust</span>,
-              <span style="color:var(--text2);">xterm.js</span>, <span style="color:var(--text2);">ssh2</span><br>
+              Built with: <span style="color:var(--text2);">Wry</span>, <span style="color:var(--text2);">Rust</span>,
+              <span style="color:var(--text2);">Russh</span>, <span style="color:var(--text2);">xterm.js</span><br>
               License: <span style="color:var(--text2);">MIT</span> · Free and open source
             </p>
             <p style="color:var(--text3);font-size:12px;margin-top:12px;">If you paid for this, you were scammed. Great

@@ -41,18 +41,32 @@ export function showKeyDetails(key) {
   document.getElementById('selected-key-name').textContent = key.name;
   document.getElementById('selected-key-path').textContent = key.path;
   const pubEl = document.getElementById('selected-key-pub');
-  if (pubEl) pubEl.textContent = key.public_key || '(public key not found)';
+  const pub = (key.public_key || '').trim();
+  if (pubEl) pubEl.textContent = pub || '(public key not found)';
   const typeEl = document.getElementById('selected-key-type');
   if (typeEl) typeEl.textContent = key.type || 'unknown';
   const fpEl = document.getElementById('selected-key-fingerprint');
-  if (fpEl && key.fingerprint) fpEl.textContent = key.fingerprint;
+  if (fpEl) {
+    if (key.fingerprint) fpEl.textContent = key.fingerprint;
+    else if (pub) fpEl.textContent = 'Unavailable (no fingerprint metadata)';
+    else fpEl.textContent = 'Unavailable (public key missing)';
+  }
+
+  const detailsEl = document.getElementById('selected-key-path');
+  if (detailsEl) {
+    const source = key._vault ? 'vault' : 'filesystem';
+    detailsEl.textContent = `${key.path} | source=${source} | type=${key.type || 'unknown'}`;
+  }
 }
 
 export function setupKeys() {
   // Copy pubkey button
   document.getElementById('copy-pubkey-btn').onclick = () => {
     const el = document.getElementById('selected-key-pub');
-    if (el && el.textContent) navigator.clipboard.writeText(el.textContent);
+    if (!el) return;
+    const text = (el.textContent || '').trim();
+    if (!text || text === '(public key not found)') return;
+    navigator.clipboard.writeText(text);
   };
 
   // New key button
@@ -70,9 +84,13 @@ export function setupKeys() {
   // Copy public key
   document.getElementById('keys-copy-btn').onclick = () => {
     const pubEl = document.getElementById('selected-key-pub');
-    if (pubEl && pubEl.textContent && pubEl.textContent !== '(public key not found)') {
-      navigator.clipboard.writeText(pubEl.textContent);
+    const text = (pubEl?.textContent || '').trim();
+    if (text && text !== '(public key not found)') {
+      navigator.clipboard.writeText(text);
+      return;
     }
+    const selected = document.querySelector('.keys-list .key-item.selected');
+    if (selected?.dataset?.key) navigator.clipboard.writeText(selected.dataset.key);
   };
 
   // Delete key

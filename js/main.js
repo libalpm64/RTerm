@@ -1,19 +1,18 @@
 import {
-  sessions, activeId, fontSize, cursorStyle, cursorBlink, scrollback,
-  semanticHlEnabled, commandHistory, savedSessions, savedSessionsDirty,
+  sessions, activeId, commandHistory,
   setFontSize, setCursorStyle, setCursorBlink, setScrollback,
   setSemanticHlEnabled
 } from './state.js';
-import { _ipc, setupRtermApi } from './ipc.js';
+import { setupRtermApi } from './ipc.js';
 import { updateKeywords } from './highlighting.js';
 import {
-  newTerminal, renderTabs, updateStatus, updateTheme, renderHistory,
-  fitAll, showTerminalView
+  newTerminal, updateStatus, updateTheme, renderHistory, fitAll
 } from './terminal.js';
 import { renderSavedSessions, initSessions, initSavedSessions } from './sessions.js';
 import { setupSaveDialog } from './sftp.js';
 import { loadLocalDir } from './filer.js';
-import { setupEventListeners, closeMenusInternal, hideModalInternal, showModalInternal, initSettingsTabs } from './ui.js';
+import { setupEventListeners, initSettingsTabs } from './ui.js';
+import { byId, setDisplay, setToggle, setValue } from './dom.js';
 
 document.addEventListener('DOMContentLoaded', async () => {
   setupRtermApi();
@@ -29,15 +28,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (sessions.size === 0) {
     newTerminal();
   }
-  const _termEl = document.getElementById('terminals');
+  const _termEl = byId('terminals');
   if (_termEl) {
     const _termObs = new ResizeObserver(() => {
-      import('./terminal.js').then(mod => mod.fitAll());
+      fitAll();
     });
     _termObs.observe(_termEl);
   }
   window.addEventListener('resize', () => {
-    import('./terminal.js').then(mod => mod.fitAll());
+    fitAll();
   });
   if (window.rterm) {
     await loadBackendSettings();
@@ -46,109 +45,102 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 async function loadBackendSettings() {
   const vaultEnabled = await window.rterm.loadSetting('vault_enabled');
-  const vaultToggle = document.getElementById('setting-vault');
+  const vaultToggle = byId('setting-vault');
   if (vaultToggle && vaultEnabled?.result === '1') {
     vaultToggle.classList.add('on');
     const exists = await window.rterm.vaultExists();
     if (exists?.result) {
-      document.getElementById('lock-screen').style.display = 'flex';
-      document.getElementById('lock-pass').focus();
+      setDisplay(byId('lock-screen'), 'flex');
+      byId('lock-pass')?.focus();
     }
   }
 
   const fs = await window.rterm.loadSetting('font_size');
   if (fs?.result) {
     setFontSize(parseInt(fs.result));
-    document.getElementById('setting-font').value = parseInt(fs.result);
+    setValue(byId('setting-font'), parseInt(fs.result));
   }
 
   const cs = await window.rterm.loadSetting('cursor_style');
   if (cs?.result) {
     setCursorStyle(cs.result);
-    document.getElementById('setting-cursor').value = cs.result;
+    setValue(byId('setting-cursor'), cs.result);
   }
 
   const cb = await window.rterm.loadSetting('cursor_blink');
   if (cb?.result) {
     setCursorBlink(cb.result === '1');
-    if (cb.result === '1') document.getElementById('setting-cursor-blink').classList.add('on');
-    else document.getElementById('setting-cursor-blink').classList.remove('on');
+    setToggle(byId('setting-cursor-blink'), cb.result === '1');
   }
 
   const sb = await window.rterm.loadSetting('scrollback');
   if (sb?.result) {
     setScrollback(parseInt(sb.result));
-    document.getElementById('setting-scrollback').value = parseInt(sb.result);
+    setValue(byId('setting-scrollback'), parseInt(sb.result));
   }
 
   const theme = await window.rterm.loadSetting('theme');
   if (theme?.result) {
-    document.getElementById('setting-theme').value = theme.result;
+    setValue(byId('setting-theme'), theme.result);
     updateTheme(theme.result);
   }
 
   const bell = await window.rterm.loadSetting('bell_enabled');
   if (bell?.result) {
-    if (bell.result === '1') document.getElementById('setting-bell').classList.add('on');
-    else document.getElementById('setting-bell').classList.remove('on');
+    setToggle(byId('setting-bell'), bell.result === '1');
   }
 
   const copySelect = await window.rterm.loadSetting('copy_on_select');
   if (copySelect?.result) {
-    if (copySelect.result === '1') document.getElementById('setting-copy-select').classList.add('on');
-    else document.getElementById('setting-copy-select').classList.remove('on');
+    setToggle(byId('setting-copy-select'), copySelect.result === '1');
   }
 
   const sshPort = await window.rterm.loadSetting('ssh_default_port');
-  if (sshPort?.result) document.getElementById('setting-ssh-port').value = sshPort.result;
+  if (sshPort?.result) setValue(byId('setting-ssh-port'), sshPort.result);
 
   const keepalive = await window.rterm.loadSetting('ssh_keepalive');
-  if (keepalive?.result) document.getElementById('setting-keepalive').value = keepalive.result;
+  if (keepalive?.result) setValue(byId('setting-keepalive'), keepalive.result);
 
   const compression = await window.rterm.loadSetting('ssh_compression');
   if (compression?.result) {
-    if (compression.result === '1') document.getElementById('setting-compression').classList.add('on');
-    else document.getElementById('setting-compression').classList.remove('on');
+    setToggle(byId('setting-compression'), compression.result === '1');
   }
 
   const baud = await window.rterm.loadSetting('serial_default_baud');
-  if (baud?.result) document.getElementById('setting-serial-baud').value = baud.result;
+  if (baud?.result) setValue(byId('setting-serial-baud'), baud.result);
 
   const bits = await window.rterm.loadSetting('serial_default_bits');
-  if (bits?.result) document.getElementById('setting-serial-bits').value = bits.result;
+  if (bits?.result) setValue(byId('setting-serial-bits'), bits.result);
 
   const lockTimeout = await window.rterm.loadSetting('lock_timeout');
-  if (lockTimeout?.result) document.getElementById('setting-lock-timeout').value = lockTimeout.result;
+  if (lockTimeout?.result) setValue(byId('setting-lock-timeout'), lockTimeout.result);
 
   const confirmExit = await window.rterm.loadSetting('confirm_exit');
   if (confirmExit?.result) {
-    if (confirmExit.result === '1') document.getElementById('setting-confirm-exit').classList.add('on');
-    else document.getElementById('setting-confirm-exit').classList.remove('on');
+    setToggle(byId('setting-confirm-exit'), confirmExit.result === '1');
   }
 
   const clearClose = await window.rterm.loadSetting('clear_on_close');
   if (clearClose?.result) {
-    if (clearClose.result === '1') document.getElementById('setting-clear-close').classList.add('on');
-    else document.getElementById('setting-clear-close').classList.remove('on');
+    setToggle(byId('setting-clear-close'), clearClose.result === '1');
   }
 
   const sftpConcurrent = await window.rterm.loadSetting('sftp_concurrent');
-  if (sftpConcurrent?.result) document.getElementById('setting-sftp-concurrent').value = sftpConcurrent.result;
+  if (sftpConcurrent?.result) setValue(byId('setting-sftp-concurrent'), sftpConcurrent.result);
 
   const sftpSpeed = await window.rterm.loadSetting('sftp_max_speed');
-  if (sftpSpeed?.result) document.getElementById('setting-sftp-speed').value = sftpSpeed.result;
+  if (sftpSpeed?.result) setValue(byId('setting-sftp-speed'), sftpSpeed.result);
 
   const keywords = await window.rterm.loadSetting('highlight_keywords');
   if (keywords?.result) {
-    document.getElementById('setting-keywords').value = keywords.result;
+    setValue(byId('setting-keywords'), keywords.result);
     updateKeywords(keywords.result);
   }
 
   const semHl = await window.rterm.loadSetting('semantic_hl');
   if (semHl?.result) {
     setSemanticHlEnabled(semHl.result === '1');
-    if (semHl.result === '1') document.getElementById('setting-semantic-hl').classList.add('on');
-    else document.getElementById('setting-semantic-hl').classList.remove('on');
+    setToggle(byId('setting-semantic-hl'), semHl.result === '1');
   }
 
   const history = await window.rterm.loadSetting('command_history');
