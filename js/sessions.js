@@ -183,6 +183,9 @@ export function connectSession(idx) {
           window.rterm?.sshWrite(result.id, 'clear\r');
           term.focus();
         }, 200);
+        window.dispatchEvent(new CustomEvent('rterm:ssh-connected', {
+          detail: { sessionId: id, sshId: result.id }
+        }));
       } catch (e) {
         term.write('\x1b[1;31mError: ' + e + '\x1b[0m\r\n');
       }

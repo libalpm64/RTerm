@@ -34,6 +34,24 @@
       --blue: #569cd6;
     }
 
+    html,
+    body,
+    #app {
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    input,
+    textarea,
+    [contenteditable="true"],
+    .xterm,
+    .xterm *,
+    #keys-details,
+    #key-public {
+      -webkit-user-select: text;
+      user-select: text;
+    }
+
     .theme-dracula {
       --bg: #1e1f29;
       --bg2: #282a36;
@@ -397,6 +415,7 @@
       color: var(--text2);
       transition: background .1s;
       user-select: none;
+      min-width: 0;
     }
 
     .filer-item:hover {
@@ -425,6 +444,7 @@
 
     .filer-item .name {
       flex: 1;
+      min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -434,6 +454,7 @@
       color: var(--text3);
       font-size: 10px;
       margin-left: 8px;
+      flex-shrink: 0;
     }
 
     .sftp-conn {
@@ -1526,7 +1547,7 @@
 
     /* LOCK SCREEN */
     #lock-screen {
-      display: none;
+      display: flex;
       position: fixed;
       inset: 0;
       background: #0d0d0d;

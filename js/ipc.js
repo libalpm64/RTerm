@@ -63,6 +63,7 @@ export function setupRtermApi() {
     sftpRead: function (handle, size) { return _ipc("sftp_read", { handle, size: size || 65536 }); },
     sftpCloseFile: function (handle) { return _ipc("sftp_close_file", { handle }); },
     sftpDownload: function (id, path, filename, save_path) { return _ipc("sftp_download", { id, path, filename, save_path: save_path || '' }); },
+    sftpRename: function (id, oldPath, newPath) { return _ipc("sftp_rename", { id, old_path: oldPath, new_path: newPath }); },
     localExec: function (cmd, cols) { return _ipc("local_exec", { command: cmd, cols: cols || 120 }); },
     localList: function (path) { return _ipc("local_list", { path: path || '.' }); },
     localDelete: function (path, dir) { return _ipc("local_delete", { path, dir: dir || false }); },

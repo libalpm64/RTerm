@@ -610,7 +610,11 @@ fn main() {
                                     if let Some(sftp) = sftp_sessions.get(&id) {
                                         match sftp.read_dir(parts[1]).await {
                                             Ok(read_dir) => {
-                                                let files: Vec<_> = read_dir.map(|e| serde_json::json!({"name": e.file_name(), "dir": e.file_type().is_dir(), "size": e.metadata().len()})).collect();
+                                                let files: Vec<_> = read_dir.map(|e| serde_json::json!({
+                                                    "name": e.file_name(),
+                                                    "dir": e.file_type().is_dir(),
+                                                    "size": e.metadata().len()
+                                                })).collect();
                                                 let _ = reply_tx.send(serde_json::json!({"success": true, "result": files}).to_string());
                                             }
                                             Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
@@ -630,6 +634,26 @@ fn main() {
                                                 sftp_files.insert(fid, file);
                                                 let _ = reply_tx.send(serde_json::json!({"success": true, "handle": fid}).to_string());
                                             }
+                                            Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
+                                        }
+                                    } else { let _ = reply_tx.send(r#"{"success":false,"error":"SFTP not open"}"#.to_string()); }
+                                } else { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid format"}"#.to_string()); }
+                            }
+                            "sftp_rename_b64" => {
+                                let parts: Vec<&str> = data.splitn(3, ':').collect();
+                                if parts.len() == 3 {
+                                    let id: u32 = match parts[0].parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid id"}"#.to_string()); continue; } };
+                                    let old_path = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, parts[1]) {
+                                        Ok(v) => String::from_utf8_lossy(&v).to_string(),
+                                        Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"bad old path: {}"}}"#, e)); continue; }
+                                    };
+                                    let new_path = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, parts[2]) {
+                                        Ok(v) => String::from_utf8_lossy(&v).to_string(),
+                                        Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"bad new path: {}"}}"#, e)); continue; }
+                                    };
+                                    if let Some(sftp) = sftp_sessions.get(&id) {
+                                        match sftp.rename(old_path, new_path).await {
+                                            Ok(_) => { let _ = reply_tx.send(r#"{"success":true}"#.to_string()); }
                                             Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
                                         }
                                     } else { let _ = reply_tx.send(r#"{"success":false,"error":"SFTP not open"}"#.to_string()); }
@@ -1020,6 +1044,20 @@ fn main() {
                         Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
                     }
                 }
+                "sftp_rename" => {
+                    let args = match parsed.get("args") { Some(a) => a, None => return };
+                    let id = match args.get("id").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
+                    let old_path = args.get("old_path").and_then(|v| v.as_str()).unwrap_or("");
+                    let new_path = args.get("new_path").and_then(|v| v.as_str()).unwrap_or("");
+                    let old_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, old_path.as_bytes());
+                    let new_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, new_path.as_bytes());
+                    let (reply_tx, reply_rx) = mpsc::channel();
+                    ssh_tx_clone.send((format!("sftp_rename_b64:{}:{}:{}", id, old_b64, new_b64), reply_tx)).ok();
+                    match reply_rx.recv_timeout(Duration::from_secs(10)) {
+                        Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
+                        Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
+                    }
+                }
                 "sftp_read" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let handle = match args.get("handle").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
@@ -1106,8 +1144,16 @@ fn main() {
                             for entry in entries.flatten() {
                                 let name = entry.file_name().to_string_lossy().to_string();
                                 let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                                files.push(serde_json::json!({"name": name, "dir": is_dir, "size": size}));
+                                let meta = entry.metadata().ok();
+                                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                                #[cfg(unix)]
+                                let perm = {
+                                    use std::os::unix::fs::PermissionsExt;
+                                    meta.as_ref().map(|m| m.permissions().mode() & 0o777).unwrap_or(0)
+                                };
+                                #[cfg(not(unix))]
+                                let perm = 0u32;
+                                files.push(serde_json::json!({"name": name, "dir": is_dir, "size": size, "perm": perm}));
                             }
                             files.sort_by(|a, b| {
                                 let ad = a.get("dir").and_then(|v| v.as_bool()).unwrap_or(false);

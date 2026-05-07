@@ -5,6 +5,185 @@ import {
 
 let sftpSelectMode = false;
 const sftpSelected = new Map(); // path -> { dir, name }
+let sftpModalResolve = null;
+let sftpPickerResolve = null;
+let sftpPrevBodyOverflow = '';
+let sftpPrevHtmlOverflow = '';
+
+function setSftpPageScrollLock(locked) {
+  if (locked) {
+    sftpPrevBodyOverflow = document.body.style.overflow || '';
+    sftpPrevHtmlOverflow = document.documentElement.style.overflow || '';
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+  } else {
+    document.body.style.overflow = sftpPrevBodyOverflow;
+    document.documentElement.style.overflow = sftpPrevHtmlOverflow;
+  }
+}
+
+function ensureSftpActionModal() {
+  if (document.getElementById('sftp-action-modal')) return;
+  const modal = document.createElement('div');
+  modal.id = 'sftp-action-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(2px);display:none;align-items:center;justify-content:center;z-index:8000;';
+  modal.innerHTML = `<div style="width:560px;max-width:92vw;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;">
+    <div id="sftp-action-title" style="padding:12px 16px;border-bottom:1px solid var(--border);font-size:14px;font-weight:600;color:var(--text);">Action</div>
+    <div id="sftp-action-body" style="padding:12px 16px;color:var(--text2);font-size:12px;line-height:1.55;"></div>
+    <div id="sftp-action-input-wrap" style="display:none;padding:0 16px 12px 16px;"><input id="sftp-action-input" type="text" autocomplete="off" spellcheck="false" style="width:100%;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:8px;color:var(--text);font-size:12px;"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;padding:10px 16px;border-top:1px solid var(--border);"><button id="sftp-action-cancel" class="btn btn-cancel">Cancel</button><button id="sftp-action-ok" class="btn btn-primary">OK</button></div>
+  </div>`;
+  document.body.appendChild(modal);
+  const close = () => { modal.style.display = 'none'; if (sftpModalResolve) { sftpModalResolve(null); sftpModalResolve = null; } };
+  document.getElementById('sftp-action-cancel').onclick = close;
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+}
+
+function openSftpActionModal({ title, body, withInput = false, value = '', okText = 'OK', showCancel = true }) {
+  ensureSftpActionModal();
+  const modal = document.getElementById('sftp-action-modal');
+  const t = document.getElementById('sftp-action-title');
+  const b = document.getElementById('sftp-action-body');
+  const w = document.getElementById('sftp-action-input-wrap');
+  const i = document.getElementById('sftp-action-input');
+  const ok = document.getElementById('sftp-action-ok');
+  const cancel = document.getElementById('sftp-action-cancel');
+  t.textContent = title;
+  b.innerHTML = body;
+  w.style.display = withInput ? 'block' : 'none';
+  i.value = value || '';
+  ok.textContent = okText;
+  cancel.style.display = showCancel ? '' : 'none';
+  modal.style.display = 'flex';
+  if (withInput) setTimeout(() => i.focus(), 0);
+  if (withInput) {
+    b.querySelectorAll('.sftp-dir-pick').forEach((el) => {
+      el.addEventListener('click', () => {
+        i.value = el.getAttribute('data-dir') || getCurrentSftpPath() || '/';
+      });
+    });
+  }
+  return new Promise((resolve) => {
+    sftpModalResolve = resolve;
+    ok.onclick = () => {
+      const out = withInput ? i.value.trim() : true;
+      modal.style.display = 'none';
+      sftpModalResolve = null;
+      resolve(out);
+    };
+  });
+}
+
+async function fetchRemotePermString(fullPath) {
+  const sshId = sftpSshId ?? Array.from(sessions.values()).find(s => s.type === 'ssh' && s.sshId !== null && s.sshId !== undefined)?.sshId;
+  if (sshId === null || sshId === undefined) return 'unknown';
+  const cmd = `stat -c %A ${shellQuote(fullPath)} 2>/dev/null || stat -f %Sp ${shellQuote(fullPath)} 2>/dev/null || ls -ld ${shellQuote(fullPath)} 2>/dev/null | awk '{print $1}' || echo unknown`;
+  const res = await window.rterm.sshExec(sshId, cmd);
+  if (!res?.success) return 'unknown';
+  const tok = String(res.result || '').trim().split(/\s+/)[0] || 'unknown';
+  return tok.length >= 9 ? tok : 'unknown';
+}
+
+function permToRwx(perm) {
+  const n = Number(perm);
+  if (!Number.isFinite(n) || n === 0) return 'unknown';
+  const v = n & 0o777;
+  const tri = (x) => `${x & 4 ? 'r' : '-'}${x & 2 ? 'w' : '-'}${x & 1 ? 'x' : '-'}`;
+  return tri((v >> 6) & 7) + tri((v >> 3) & 7) + tri(v & 7);
+}
+
+function currentSftpSessionId() {
+  return sftpSshId ?? Array.from(sessions.values()).find(s => s.type === 'ssh' && s.sshId !== null && s.sshId !== undefined)?.sshId;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function buildMoveFolderList(files, currentPath) {
+  const dirs = (files || []).filter(x => x.dir).map(x => x.name).slice(0, 200);
+  const up = currentPath !== '/' ? `<div class="sftp-dir-pick" data-dir=".." style="padding:5px 8px;border-radius:4px;cursor:pointer;color:var(--text2);">..</div>` : '';
+  if (!dirs.length && !up) return '<div style="margin-top:8px;color:var(--text3)">(no subfolders)</div>';
+  return `<div style="margin-top:8px;max-height:220px;overflow:auto;border:1px solid var(--border2);border-radius:6px;padding:4px;background:var(--bg3);">${up}${dirs.map(d => {
+    const target = (currentPath === '/' ? '' : currentPath) + '/' + d;
+    return `<div class="sftp-dir-pick" data-dir="${escapeHtml(target)}" style="padding:5px 8px;border-radius:4px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text2);">${escapeHtml(d)}</div>`;
+  }).join('')}</div>`;
+}
+
+async function pickSftpTargetDir(initialPath, title, itemName) {
+  if (!document.getElementById('sftp-move-picker')) {
+    const m = document.createElement('div');
+    m.id = 'sftp-move-picker';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.62);backdrop-filter:blur(2px);display:none;align-items:center;justify-content:center;z-index:8100;';
+    m.innerHTML = `<div style="width:680px;max-width:94vw;height:520px;max-height:86vh;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;display:flex;flex-direction:column;overflow:hidden;">
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border);font-size:14px;font-weight:600;color:var(--text);" id="sftp-move-title"></div>
+      <div style="padding:8px 14px;color:var(--text3);font-family:monospace;font-size:11px;border-bottom:1px solid var(--border);" id="sftp-move-path"></div>
+      <div id="sftp-move-list" style="flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:8px 10px;scrollbar-width:none;"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;padding:10px 14px;border-top:1px solid var(--border);">
+        <div style="display:flex;gap:8px;">
+          <button id="sftp-move-cancel" class="btn btn-cancel">Cancel</button>
+          <button id="sftp-move-here" class="btn btn-primary">Move Here</button>
+        </div>
+      </div>
+    </div>`;
+    document.body.appendChild(m);
+    m.addEventListener('click', (e) => {
+      if (e.target === m && sftpPickerResolve) { sftpPickerResolve(null); sftpPickerResolve = null; m.style.display = 'none'; }
+    });
+  }
+  const modal = document.getElementById('sftp-move-picker');
+  const titleEl = document.getElementById('sftp-move-title');
+  const pathEl = document.getElementById('sftp-move-path');
+  const listEl = document.getElementById('sftp-move-list');
+  const cancelBtn = document.getElementById('sftp-move-cancel');
+  const hereBtn = document.getElementById('sftp-move-here');
+  let path = initialPath || '/';
+  let selectedDir = null;
+  const render = async () => {
+    titleEl.textContent = `${title}: ${itemName}`;
+    pathEl.textContent = path;
+    listEl.innerHTML = '<div style="padding:8px;color:var(--text3)">Loading...</div>';
+    const sshId = currentSftpSessionId();
+    if (sshId === null || sshId === undefined) { listEl.innerHTML = '<div style="padding:8px;color:var(--red)">No SFTP session</div>'; return; }
+    const res = await window.rterm.sftpList(sshId, path);
+    if (!res?.success) { listEl.innerHTML = `<div style="padding:8px;color:var(--red)">${escapeHtml(res?.error || 'list failed')}</div>`; return; }
+    const dirs = (res.result || []).filter(x => x.dir);
+    selectedDir = null;
+    listEl.innerHTML = '';
+    if (path !== '/') {
+      const up = document.createElement('div');
+      up.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer;color:var(--text2);';
+      up.innerHTML = `<span style="width:14px;height:14px;display:inline-flex;"><svg viewBox="0 0 24 24" fill="none" stroke="var(--text2)" stroke-width="1.6"><path d="M3 12h18"></path><path d="M9 6l-6 6 6 6"></path></svg></span><span>.../</span>`;
+      up.onclick = async () => { path = '/' + path.split('/').filter(Boolean).slice(0, -1).join('/'); if (path === '') path = '/'; await render(); };
+      listEl.appendChild(up);
+    }
+    if (!dirs.length && path === '/') { listEl.innerHTML = '<div style="padding:8px;color:var(--text3)">(empty)</div>'; return; }
+    for (const d of dirs) {
+      const full = (path === '/' ? '' : path) + '/' + d.name;
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer;color:var(--text2);';
+      row.innerHTML = `<span style="width:14px;height:14px;display:inline-flex;"><svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.6"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(d.name)}</span>`;
+      row.onmouseenter = () => { if (selectedDir !== full) row.style.background = 'var(--bg4)'; };
+      row.onmouseleave = () => { if (selectedDir !== full) row.style.background = 'transparent'; };
+      row.onclick = () => {
+        selectedDir = full;
+        Array.from(listEl.children).forEach(c => { c.style.background = 'transparent'; c.style.color = 'var(--text2)'; });
+        row.style.background = 'rgba(79,195,247,.18)';
+        row.style.color = 'var(--text)';
+      };
+      row.ondblclick = async () => { path = full; await render(); };
+      listEl.appendChild(row);
+    }
+  };
+  await render();
+  modal.style.display = 'flex';
+  setSftpPageScrollLock(true);
+  return await new Promise((resolve) => {
+    sftpPickerResolve = resolve;
+    cancelBtn.onclick = () => { modal.style.display = 'none'; setSftpPageScrollLock(false); sftpPickerResolve = null; resolve(null); };
+    hereBtn.onclick = () => { const out = selectedDir || path; modal.style.display = 'none'; setSftpPageScrollLock(false); sftpPickerResolve = null; resolve(out); };
+  });
+}
 
 export async function initSftp(id) {
   if (sftpInitialized) return true;
@@ -93,7 +272,7 @@ export async function loadSftpDir(path) {
         : '<svg viewBox="0 0 24 24" fill="none" stroke="var(--text2)" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>';
       const sizeStr = f.size ? (f.size > 1024 * 1024 * 1024 ? (f.size / 1024 / 1024 / 1024).toFixed(1) + 'G' : f.size > 1024 * 1024 ? (f.size / 1024 / 1024).toFixed(1) + 'M' : f.size > 1024 ? (f.size / 1024).toFixed(1) + 'K' : f.size + 'B') : '';
       const fullPath = (path === '/' ? '/' : path + '/') + f.name;
-      div.innerHTML = `<span class="icon">${icon}</span><span class="name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px">${f.name}</span>${sizeStr ? `<span style="margin-left:auto;padding-right:4px;color:var(--text3);font-size:11px">${sizeStr}</span>` : ''}`;
+      div.innerHTML = `<span class="icon">${icon}</span><span class="name">${f.name}</span>${sizeStr ? `<span class="size">${sizeStr}</span>` : ''}`;
       if (f.dir) {
         div.onclick = () => {
           if (sftpSelectMode) return toggleSftpSelect(div, fullPath, f);
@@ -107,18 +286,61 @@ export async function loadSftpDir(path) {
           const menu = document.createElement('div');
           menu.id = 'sftp-ctx';
           menu.style.cssText = 'position:fixed;z-index:9999;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:4px;box-shadow:0 8px 24px rgba(0,0,0,.5);min-width:160px;font-size:12px;';
-          menu.innerHTML = '<div class="dropdown-item" id="sctx-sm">Select Mode</div>';
+          menu.innerHTML = '<div class="dropdown-item" id="sctx-mv">Move...</div><div class="dropdown-item" id="sctx-rn">Rename...</div><div class="dropdown-item" id="sctx-info">Info</div><div class="dropdown-item" id="sctx-sm">Select Mode</div>';
           document.body.appendChild(menu);
+          menu.addEventListener('mousedown', (ev) => ev.stopPropagation());
+          menu.addEventListener('click', (ev) => ev.stopPropagation());
           menu.style.left = Math.max(4, Math.min(e.clientX, window.innerWidth - 188)) + 'px';
           menu.style.top = Math.max(4, Math.min(e.clientY, window.innerHeight - 88)) + 'px';
+          document.getElementById('sctx-mv').onclick = async () => {
+            menu.remove();
+            const targetDir = await pickSftpTargetDir(getCurrentSftpPath() || '/', 'Move Remote Item', f.name);
+            if (!targetDir) return;
+            const sshId = currentSftpSessionId();
+            if (sshId === null || sshId === undefined) return;
+            const toPath = (targetDir === '/' ? '' : targetDir) + '/' + f.name;
+            const mv = await window.rterm.sftpRename(sshId, fullPath, toPath);
+            if (!mv?.success) {
+              await openSftpActionModal({ title: 'Move Failed', body: String(mv?.error || 'unknown error'), okText: 'Close', showCancel: false });
+              return;
+            }
+            loadSftpDir(getCurrentSftpPath() || '/');
+          };
+          document.getElementById('sctx-rn').onclick = async () => {
+            menu.remove();
+            const newName = await openSftpActionModal({ title: 'Rename Remote Item', body: `Rename <b>${escapeHtml(f.name)}</b> to:`, withInput: true, value: f.name, okText: 'Rename' });
+            if (!newName || newName === f.name) return;
+            const baseDir = fullPath.split('/').slice(0, -1).join('/') || '/';
+            const toPath = (baseDir === '/' ? '' : baseDir) + '/' + newName;
+            const sshId = currentSftpSessionId();
+            if (sshId === null || sshId === undefined) return;
+            const mv = await window.rterm.sftpRename(sshId, fullPath, toPath);
+            if (!mv?.success) {
+              await openSftpActionModal({ title: 'Rename Failed', body: String(mv?.error || 'unknown error'), okText: 'Close', showCancel: false });
+              return;
+            }
+            loadSftpDir(getCurrentSftpPath() || '/');
+          };
+          document.getElementById('sctx-info').onclick = async () => {
+            menu.remove();
+            const perms = await fetchRemotePermString(fullPath);
+            openSftpActionModal({ title: 'Remote File Info', body: `Location: SFTP<br>Name: ${escapeHtml(f.name)}<br>Type: Folder<br>Permissions: ${escapeHtml(perms)}<br>Size: ${f.size || 0} bytes<br>Path: ${escapeHtml(fullPath)}`, okText: 'Close', showCancel: false });
+          };
           document.getElementById('sctx-sm').onclick = () => {
             menu.remove();
             setSftpSelectMode(true);
             renderSftpBulkBar();
           };
-          setTimeout(() => {
-            document.addEventListener('click', () => { const m = document.getElementById('sftp-ctx'); if (m) m.remove(); }, { once: true });
-          }, 10);
+          requestAnimationFrame(() => {
+            const closeMenu = (ev) => {
+              const m = document.getElementById('sftp-ctx');
+              if (!m) return;
+              if (m.contains(ev.target)) return;
+              m.remove();
+              document.removeEventListener('pointerdown', closeMenu, true);
+            };
+            document.addEventListener('pointerdown', closeMenu, true);
+          });
         };
       } else {
         div.addEventListener('click', (e) => {
@@ -134,8 +356,10 @@ export async function loadSftpDir(path) {
           const menu = document.createElement('div');
           menu.id = 'sftp-ctx';
           menu.style.cssText = 'position:fixed;z-index:9999;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:4px;box-shadow:0 8px 24px rgba(0,0,0,.5);min-width:160px;font-size:12px;';
-          menu.innerHTML = '<div class="dropdown-item" id="sctx-dl">Download to...</div><div class="dropdown-item" id="sctx-sm">Select Mode</div>';
+          menu.innerHTML = '<div class="dropdown-item" id="sctx-dl">Download to...</div><div class="dropdown-item" id="sctx-mv">Move...</div><div class="dropdown-item" id="sctx-rn">Rename...</div><div class="dropdown-item" id="sctx-info">Info</div><div class="dropdown-item" id="sctx-sm">Select Mode</div>';
           document.body.appendChild(menu);
+          menu.addEventListener('mousedown', (ev) => ev.stopPropagation());
+          menu.addEventListener('click', (ev) => ev.stopPropagation());
           menu.style.left = Math.max(4, Math.min(e.clientX, window.innerWidth - 188)) + 'px';
           menu.style.top = Math.max(4, Math.min(e.clientY, window.innerHeight - 88)) + 'px';
           document.getElementById('sctx-dl').onclick = async () => {
@@ -152,14 +376,55 @@ export async function loadSftpDir(path) {
             pbar.innerHTML = `<span>Downloading ${f.name} to ${saveDir}...</span>`;
             window.rterm.sftpDownload(sftpSshId, fullPath, f.name, saveDir);
           };
+          document.getElementById('sctx-mv').onclick = async () => {
+            menu.remove();
+            const targetDir = await pickSftpTargetDir(getCurrentSftpPath() || '/', 'Move Remote Item', f.name);
+            if (!targetDir) return;
+            const sshId = currentSftpSessionId();
+            if (sshId === null || sshId === undefined) return;
+            const toPath = (targetDir === '/' ? '' : targetDir) + '/' + f.name;
+            const mv = await window.rterm.sftpRename(sshId, fullPath, toPath);
+            if (!mv?.success) {
+              await openSftpActionModal({ title: 'Move Failed', body: String(mv?.error || 'unknown error'), okText: 'Close', showCancel: false });
+              return;
+            }
+            loadSftpDir(getCurrentSftpPath() || '/');
+          };
+          document.getElementById('sctx-rn').onclick = async () => {
+            menu.remove();
+            const newName = await openSftpActionModal({ title: 'Rename Remote Item', body: `Rename <b>${escapeHtml(f.name)}</b> to:`, withInput: true, value: f.name, okText: 'Rename' });
+            if (!newName || newName === f.name) return;
+            const baseDir = fullPath.split('/').slice(0, -1).join('/') || '/';
+            const toPath = (baseDir === '/' ? '' : baseDir) + '/' + newName;
+            const sshId = currentSftpSessionId();
+            if (sshId === null || sshId === undefined) return;
+            const mv = await window.rterm.sftpRename(sshId, fullPath, toPath);
+            if (!mv?.success) {
+              await openSftpActionModal({ title: 'Rename Failed', body: String(mv?.error || 'unknown error'), okText: 'Close', showCancel: false });
+              return;
+            }
+            loadSftpDir(getCurrentSftpPath() || '/');
+          };
+          document.getElementById('sctx-info').onclick = async () => {
+            menu.remove();
+            const perms = await fetchRemotePermString(fullPath);
+            openSftpActionModal({ title: 'Remote File Info', body: `Location: SFTP<br>Name: ${escapeHtml(f.name)}<br>Type: File<br>Permissions: ${escapeHtml(perms)}<br>Size: ${f.size || 0} bytes<br>Path: ${escapeHtml(fullPath)}`, okText: 'Close', showCancel: false });
+          };
           document.getElementById('sctx-sm').onclick = () => {
             menu.remove();
             setSftpSelectMode(true);
             renderSftpBulkBar();
           };
-          setTimeout(() => {
-            document.addEventListener('click', () => { const m = document.getElementById('sftp-ctx'); if (m) m.remove(); }, { once: true });
-          }, 10);
+          requestAnimationFrame(() => {
+            const closeMenu = (ev) => {
+              const m = document.getElementById('sftp-ctx');
+              if (!m) return;
+              if (m.contains(ev.target)) return;
+              m.remove();
+              document.removeEventListener('pointerdown', closeMenu, true);
+            };
+            document.addEventListener('pointerdown', closeMenu, true);
+          });
         };
       }
       if (sftpSelected.has(fullPath)) div.classList.add('selected');
@@ -351,13 +616,12 @@ function ensureSftpTopActions() {
     }
   };
   mv.onclick = async () => {
-    const targetDir = prompt('Move selected remote items to directory:', getCurrentSftpPath() || '/');
+    const targetDir = await openSftpActionModal({ title: 'Move Selected Items', body: `Move ${sftpSelected.size} selected item(s) to directory:`, withInput: true, value: getCurrentSftpPath() || '/', okText: 'Move' });
     if (!targetDir) return;
-    const sess = sessions.get(activeId);
-    if (!sess?.sshId) return;
+    const sshId = currentSftpSessionId();
+    if (sshId === null || sshId === undefined) return;
     for (const [p, meta] of Array.from(sftpSelected.entries())) {
-      const cmd = `mv ${shellQuote(p)} ${shellQuote((targetDir === '/' ? '' : targetDir) + '/' + meta.name)}`;
-      await window.rterm.sshExec(sess.sshId, cmd);
+      await window.rterm.sftpRename(sshId, p, (targetDir === '/' ? '' : targetDir) + '/' + meta.name);
     }
     sftpSelected.clear();
     renderSftpBulkBar();
@@ -409,4 +673,8 @@ export function setSftpSelectMode(enabled) {
 
 function shellQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+function shellDoubleQuote(s) {
+  return `"${String(s).replace(/(["\\$`])/g, '\\$1')}"`;
 }

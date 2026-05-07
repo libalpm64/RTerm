@@ -46,14 +46,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function loadBackendSettings() {
   const vaultEnabled = await window.rterm.loadSetting('vault_enabled');
   const vaultToggle = byId('setting-vault');
+  let shouldShowLock = false;
   if (vaultToggle && vaultEnabled?.result === '1') {
     vaultToggle.classList.add('on');
     const exists = await window.rterm.vaultExists();
     if (exists?.result) {
-      setDisplay(byId('lock-screen'), 'flex');
+      shouldShowLock = true;
       byId('lock-pass')?.focus();
     }
   }
+  setDisplay(byId('lock-screen'), shouldShowLock ? 'flex' : 'none');
 
   const fs = await window.rterm.loadSetting('font_size');
   if (fs?.result) {
