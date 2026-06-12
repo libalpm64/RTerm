@@ -288,10 +288,14 @@ fn serve_file(root: &PathBuf, request: Request<Vec<u8>>) -> Result<Response<Vec<
 }
 
 fn main() {
-    // Determine project root (where index.html and js/ live)
-    let project_root = match std::env::current_dir() {
-        Ok(cwd) => std::fs::canonicalize(cwd.join("../")).unwrap_or_else(|_| PathBuf::from("../")),
-        Err(_) => PathBuf::from("../"),
+    // resolve project root relative to the binary
+    let project_root = match std::env::current_exe() {
+        Ok(exe) => {
+            let mut p = std::fs::canonicalize(&exe).unwrap_or(exe);
+            p.pop(); p.pop(); p.pop(); p.pop();
+            p
+        }
+        Err(_) => std::env::current_dir().unwrap_or_default(),
     };
     eprintln!("Project root: {:?}", project_root);
 

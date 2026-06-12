@@ -464,6 +464,14 @@ export function createTerminalInstance(id, onReady) {
 
   term.open(termDiv);
 
+  // macos intercepts cmd+v, this stops xterm from eating it
+  term.attachCustomKeyEventHandler((e) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {
+      return false;
+    }
+    return true;
+  });
+
   requestAnimationFrame(() => fitAddon.fit());
 
   if (onReady) {

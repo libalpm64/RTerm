@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Rterm</title>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap');
+    <link rel="stylesheet" href="./vendor/fonts.css">
 
     *,
     *::before,
@@ -2750,9 +2750,9 @@
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.min.js"></script>
-  <link href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.min.css" rel="stylesheet">
+  <link href="./vendor/xterm.min.css" rel="stylesheet">
+  <script src="./vendor/xterm.min.js"></script>
+  <script src="./vendor/addon-fit.min.js"></script>
   <script type="module" src="js/main.js"></script>
 </body>
 
