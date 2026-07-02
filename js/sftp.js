@@ -185,10 +185,13 @@ async function pickSftpTargetDir(initialPath, title, itemName) {
   });
 }
 
+const sftpOpenedIds = new Set();
+
 export async function initSftp(id) {
-  if (sftpInitialized) return true;
+  if (sftpOpenedIds.has(id)) return true;
   const result = await window.rterm.sftpOpen(id);
   if (result.success) {
+    sftpOpenedIds.add(id);
     setSftpInitialized(true);
     return true;
   }
@@ -201,7 +204,7 @@ export async function loadSftpDir(path) {
   const listEl = document.getElementById('sftp-list');
   const pathEl = document.getElementById('sftp-path');
   const statusEl = document.getElementById('sftp-status');
-  if (!listEl || !statusEl) return;
+  if (!listEl || !statusEl || !pathEl) return;
 
   const activeSsh = activeId ? sessions.get(activeId) : null;
   const sess = (activeSsh?.type === 'ssh' && activeSsh.sshId !== null && activeSsh.sshId !== undefined)
@@ -228,7 +231,7 @@ export async function loadSftpDir(path) {
   statusEl.classList.add('connected');
   statusEl.querySelector('.label').textContent = 'Connected';
 
-  pathEl.innerHTML = path.split('/').filter(Boolean).map(p => `<span style="color:var(--text3)">/</span><span>${p}</span>`).join('');
+  pathEl.innerHTML = path.split('/').filter(Boolean).map(p => `<span style="color:var(--text3)">/</span><span>${escapeHtml(p)}</span>`).join('');
   if (path === '/') pathEl.innerHTML = '<span style="color:var(--text3)">/</span>';
 
   listEl.innerHTML = '<div style="padding:8px;color:var(--text3)">Loading...</div>';
@@ -272,7 +275,7 @@ export async function loadSftpDir(path) {
         : '<svg viewBox="0 0 24 24" fill="none" stroke="var(--text2)" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>';
       const sizeStr = f.size ? (f.size > 1024 * 1024 * 1024 ? (f.size / 1024 / 1024 / 1024).toFixed(1) + 'G' : f.size > 1024 * 1024 ? (f.size / 1024 / 1024).toFixed(1) + 'M' : f.size > 1024 ? (f.size / 1024).toFixed(1) + 'K' : f.size + 'B') : '';
       const fullPath = (path === '/' ? '/' : path + '/') + f.name;
-      div.innerHTML = `<span class="icon">${icon}</span><span class="name">${f.name}</span>${sizeStr ? `<span class="size">${sizeStr}</span>` : ''}`;
+      div.innerHTML = `<span class="icon">${icon}</span><span class="name">${escapeHtml(f.name)}</span>${sizeStr ? `<span class="size">${sizeStr}</span>` : ''}`;
       if (f.dir) {
         div.onclick = () => {
           if (sftpSelectMode) return toggleSftpSelect(div, fullPath, f);
@@ -366,14 +369,7 @@ export async function loadSftpDir(path) {
             menu.remove();
             const saveDir = await showSaveDialog(f.name);
             if (!saveDir) return;
-            let pbar = document.getElementById('dl-progress');
-            if (!pbar) {
-              pbar = document.createElement('div');
-              pbar.id = 'dl-progress';
-              pbar.style.cssText = 'position:fixed;top:38px;right:12px;min-width:280px;max-width:480px;background:var(--bg3);padding:10px 12px;z-index:9999;border:1px solid var(--border2);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.4);font-size:12px;';
-              document.body.appendChild(pbar);
-            }
-            pbar.innerHTML = `<span>Downloading ${f.name} to ${saveDir}...</span>`;
+            window.__rterm_dlProgress(`Downloading ${f.name} to ${saveDir}...`, 0);
             window.rterm.sftpDownload(sftpSshId, fullPath, f.name, saveDir);
           };
           document.getElementById('sctx-mv').onclick = async () => {
@@ -497,7 +493,7 @@ function loadSaveDir(filename, dir) {
       const icon = f.dir
         ? '<svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path></svg>'
         : '<svg viewBox="0 0 24 24" fill="none" stroke="var(--text2)" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>';
-      d.innerHTML = `<span class="icon">${icon}</span><span>${f.name}</span>`;
+      d.innerHTML = `<span class="icon">${icon}</span><span>${escapeHtml(f.name)}</span>`;
       const full = (dir === '/' ? '' : dir === '~' ? '~' : dir) + '/' + f.name;
       if (f.dir) {
         d.onclick = () => { _sdPath = full; loadSaveDir(filename, full); };
@@ -611,6 +607,7 @@ function ensureSftpTopActions() {
   icons.insertBefore(dl, mv);
   dl.onclick = async () => {
     const entries = Array.from(sftpSelected.entries()).filter(([, v]) => !v.dir);
+    if (entries.length) window.__rterm_dlProgress(`Downloading ${entries.length} file(s)...`, 0);
     for (const [p, meta] of entries) {
       window.rterm.sftpDownload(sftpSshId, p, meta.name);
     }

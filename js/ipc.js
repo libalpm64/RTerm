@@ -1,4 +1,5 @@
 import { sessions, activeKeywords, semanticHlEnabled, activeId } from './state.js';
+import { applyHighlighting } from './highlighting.js';
 
 if (typeof window.ipc === 'undefined') {
   try {
@@ -29,12 +30,9 @@ export function _ipc(method, args) {
 }
 
 window.__rterm_onData = function (id, data) {
-  for (const [key, sess] of sessions) {
+  for (const [, sess] of sessions) {
     if (sess.sshId === id && sess.term && data !== 'EOF') {
-      import('./highlighting.js').then(mod => {
-        const highlighted = mod.applyHighlighting(data);
-        sess.term.write(highlighted);
-      });
+      sess.term.write(applyHighlighting(data));
       break;
     }
   }
@@ -48,6 +46,7 @@ export function setupRtermApi() {
     sshShell: function (id) { return _ipc("ssh_shell", { id }); },
     sshWrite: function (id, data) { window.ipc.postMessage(JSON.stringify({ method: "ssh_write", args: { id, data } })); return Promise.resolve(); },
     sshResize: function (id, cols, rows) { return _ipc("ssh_resize", { id, cols, rows }); },
+    sshDisconnect: function (id) { return _ipc("ssh_disconnect", { id }); },
     saveSessions: function (sessions, password, keys) { return _ipc("save_sessions", { sessions: sessions || [], password: password || '', keys: keys || [] }); },
     loadSessions: function (password) { return _ipc("load_sessions", { password: password || '' }); },
     saveSetting: function (key, value) { return _ipc("save_setting", { key, value }); },

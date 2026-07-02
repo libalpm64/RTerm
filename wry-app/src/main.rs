@@ -4,9 +4,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use russh::client::{self, Handle};
-use russh::{ChannelReadHalf, ChannelWriteHalf, ChannelMsg};
-use tokio::runtime;
-use tokio::time;
+use russh::{ChannelWriteHalf, ChannelMsg};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tao::{
     event::{Event, WindowEvent},
@@ -78,7 +76,9 @@ fn derive_key(password: &str) -> [u8; 32] {
     let mut key = [0u8; 32];
     let hash = blake3::hash(b"rterm-vault-v2");
     let salt: &[u8; 16] = hash.as_bytes()[..16].try_into().unwrap();
-    let _ = argon2::Argon2::default().hash_password_into(password.as_bytes(), salt, &mut key);
+    argon2::Argon2::default()
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .expect("argon2 key derivation failed");
     key
 }
 
@@ -117,7 +117,7 @@ fn save_vault(sessions_data: &[SshConfig], keys_data: &[SshKey], password: &str)
 fn load_vault(password: &str) -> Result<(Vec<SshConfig>, Vec<SshKey>), String> {
     let config_dir = get_config_dir();
     let data = std::fs::read(config_dir.join("vault.dat")).map_err(|e| e.to_string())?;
-    if data.len() < 6 || &data[..4] != VAULT_MAGIC {
+    if data.len() < 46 || &data[..4] != VAULT_MAGIC {
         return Err("wrong password or corrupted vault".to_string());
     }
     let nonce = XNonce::from_slice(&data[6..30]);
@@ -183,7 +183,13 @@ fn generate_key(name: &str, algo: &str, passphrase: &str) -> Result<serde_json::
         .map_err(|e| format!("key gen failed: {}", e))?;
     let pubkey = key.public_key().to_openssh()
         .map_err(|e| format!("pubkey failed: {}", e))?;
-    let priv_pem = key.to_openssh(ssh_key::LineEnding::LF)
+    let encoded_key = if passphrase.is_empty() {
+        key.clone()
+    } else {
+        key.encrypt(&mut rng, passphrase)
+            .map_err(|e| format!("passphrase encrypt failed: {}", e))?
+    };
+    let priv_pem = encoded_key.to_openssh(ssh_key::LineEnding::LF)
         .map_err(|e| format!("encode failed: {}", e))?;
 
     let dir = ssh_dir();
@@ -219,7 +225,6 @@ fn list_keys() -> Vec<serde_json::Value> {
         if name.ends_with(".pub") || name.starts_with('.') || entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
-        // Only consider files that look like SSH private keys
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(_) => continue,
@@ -252,7 +257,6 @@ fn list_keys() -> Vec<serde_json::Value> {
 fn delete_key(path: &str) -> Result<(), String> {
     let p = std::path::PathBuf::from(path);
     let _ = std::fs::remove_file(&p);
-    // remove .pub too
     if let Some(s) = p.to_str() {
         let _ = std::fs::remove_file(format!("{}.pub", s));
     }
@@ -266,6 +270,9 @@ fn serve_file(root: &PathBuf, request: Request<Vec<u8>>) -> Result<Response<Vec<
     } else {
         uri_path.trim_start_matches('/').to_string()
     };
+    if relative.split('/').any(|c| c == "..") {
+        return Err("path traversal rejected".to_string());
+    }
     let file_path = root.join(&relative);
     let content = std::fs::read(&file_path).map_err(|e| format!("read {:?}: {}", file_path, e))?;
     let mimetype = if relative.ends_with(".js") {
@@ -288,7 +295,6 @@ fn serve_file(root: &PathBuf, request: Request<Vec<u8>>) -> Result<Response<Vec<
 }
 
 fn main() {
-    // resolve project root relative to the binary
     let project_root = match std::env::current_exe() {
         Ok(exe) => {
             let mut p = std::fs::canonicalize(&exe).unwrap_or(exe);
@@ -317,25 +323,20 @@ fn main() {
     let webview = Arc::new(Mutex::new(None::<wry::WebView>));
     let webview_for_ipc = webview.clone();
 
-    // Bridge: forward sync mpsc to async tokio mpsc
     let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel::<(String, mpsc::Sender<String>)>();
     let t = tokio_tx.clone();
     std::thread::spawn(move || { while let Ok(cmd) = ssh_rx.recv() { let _ = t.send(cmd); } });
 
-    // Async SSH handler on main multi-threaded runtime
     let ipc_tx_for_ssh_clone = ipc_tx_for_ssh.clone();
     let ipc_tx_for_handler = ipc_tx_for_ssh.clone();
     rt.spawn(async move {
         let mut sessions: HashMap<u32, Handle<SshHandler>> = HashMap::new();
-        let mut read_halves: HashMap<u32, ChannelReadHalf> = HashMap::new();
         let mut write_halves: HashMap<u32, ChannelWriteHalf<_>> = HashMap::new();
         let mut telnet_writers: HashMap<u32, tokio::net::tcp::OwnedWriteHalf> = HashMap::new();
         let mut serial_writers: HashMap<u32, tokio::io::WriteHalf<tokio_serial::SerialStream>> = HashMap::new();
         let mut sftp_sessions: HashMap<u32, Arc<russh_sftp::client::SftpSession>> = HashMap::new();
         let mut sftp_files: HashMap<u32, russh_sftp::client::fs::File> = HashMap::new();
         let mut sftp_file_counter: u32 = 0;
-
-        let mut tick = tokio::time::interval(Duration::from_millis(10));
 
         loop {
             tokio::select! {
@@ -375,7 +376,6 @@ fn main() {
                                 };
                                 let config_ssh = Arc::new(cfg);
 
-                                // Helper to authenticate with a key PEM string
                                 use russh::keys::decode_secret_key;
                                 async fn auth_with_pem(session: &mut russh::client::Handle<SshHandler>, user: &str, pem: &str) -> Result<russh::client::AuthResult, russh::Error> {
                                     let key_pair = decode_secret_key(pem, None).map_err(|e| { eprintln!("Key decode error: {}", e); russh::Error::CouldNotReadKey })?;
@@ -456,9 +456,31 @@ fn main() {
                                         Ok(channel) => {
                                             let _ = channel.request_pty(true, "xterm-256color", 80, 24, 0, 0, &[]).await;
                                             let _ = channel.request_shell(true).await;
-                                            let (read_half, write_half) = channel.split();
-                                            read_halves.insert(id, read_half);
+                                            let (mut read_half, write_half) = channel.split();
                                             write_halves.insert(id, write_half);
+                                            let ipc_clone = ipc_tx_for_ssh_clone.clone();
+                                            tokio::spawn(async move {
+                                                while let Some(msg) = read_half.wait().await {
+                                                    match msg {
+                                                        ChannelMsg::Data { data } => {
+                                                            let data_str = String::from_utf8_lossy(&data);
+                                                            let escaped = serde_json::to_string(&data_str.as_ref()).unwrap_or_default();
+                                                            let _ = ipc_clone.send(IpcOutMsg {
+                                                                script: format!("window.__rterm_onData && window.__rterm_onData({}, {})", id, escaped),
+                                                            });
+                                                        }
+                                                        ChannelMsg::ExtendedData { data, .. } => {
+                                                            let data_str = String::from_utf8_lossy(&data);
+                                                            let escaped = serde_json::to_string(&data_str.as_ref()).unwrap_or_default();
+                                                            let _ = ipc_clone.send(IpcOutMsg {
+                                                                script: format!("window.__rterm_onData && window.__rterm_onData({}, {})", id, escaped),
+                                                            });
+                                                        }
+                                                        ChannelMsg::Eof | ChannelMsg::Close => break,
+                                                        _ => {}
+                                                    }
+                                                }
+                                            });
                                             let _ = reply_tx.send(r#"{"success":true,"result":"shell_ready"}"#.to_string());
                                         }
                                         Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
@@ -547,8 +569,9 @@ fn main() {
                             }
                             "disconnect" => {
                                 let id: u32 = match data.parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid id"}"#.to_string()); continue; } };
-                                sessions.remove(&id); read_halves.remove(&id); write_halves.remove(&id);
+                                sessions.remove(&id); write_halves.remove(&id);
                                 telnet_writers.remove(&id); serial_writers.remove(&id);
+                                sftp_sessions.remove(&id);
                                 let _ = reply_tx.send(r#"{"success":true}"#.to_string());
                             }
                             "resize" => {
@@ -693,14 +716,16 @@ fn main() {
                                     let id: u32 = match parts[0].parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid id"}"#.to_string()); continue; } };
                                     let remote_path = parts[1].to_string();
                                     let save_path = parts[2].to_string();
-                                    // Respond immediately to unblock IPC
                                     let _ = reply_tx.send(r#"{"success":true}"#.to_string());
-                                    // Parallel chunked download
                                     let ipc = ipc_tx_for_ssh_clone.clone();
                                     if let Some(sftp) = sftp_sessions.get(&id) {
                                         let sftp_c = Arc::clone(sftp);
                                         // Open first handle to get file info
-                                        if let Ok(file) = sftp_c.open(&remote_path).await {
+                                        match sftp_c.open(&remote_path).await {
+                                        Err(e) => {
+                                            let _ = ipc.send(IpcOutMsg { script: format!("window.__rterm_dlProgress && window.__rterm_dlProgress({}, 100, {{error:true}})", serde_json::to_string(&format!("Download failed: {}", e)).unwrap_or_default()) });
+                                        }
+                                        Ok(file) => {
                                             let (raw, _) = file.raw();
                                             let raw_session = raw;
                                             let meta = file.metadata().await.ok();
@@ -710,7 +735,7 @@ fn main() {
                                                 use tokio::io::AsyncWriteExt;
                                                 
                                                 if file_size == 0 {
-                                                    let _ = ipc.send(IpcOutMsg { script: "console.log('DL: unknown file size, aborting')".to_string() });
+                                                    let _ = ipc.send(IpcOutMsg { script: "window.__rterm_dlProgress && window.__rterm_dlProgress('Download failed: unknown file size', 100, {error:true})".to_string() });
                                                     return;
                                                 }
                                                 
@@ -722,10 +747,13 @@ fn main() {
                                                 let start_time = std::time::Instant::now();
                                                 let progress = Arc::new(AtomicU64::new(0));
                                                 
-                                                // Spawn progress updater
+                                                let fname = std::path::Path::new(&remote_path)
+                                                    .file_name().map(|n| n.to_string_lossy().to_string())
+                                                    .unwrap_or_else(|| remote_path.clone());
                                                 let prog = progress.clone();
                                                 let ipc_p = ipc.clone();
                                                 let total_sz = file_size;
+                                                let fname_p = fname.clone();
                                                 let progress_task = tokio::spawn(async move {
                                                     loop {
                                                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -733,8 +761,11 @@ fn main() {
                                                         if done >= total_sz { break; }
                                                         let speed = done as f64 / start_time.elapsed().as_secs_f64().max(0.1) / (1024.0*1024.0);
                                                         let mb = done as f64 / (1024.0*1024.0);
+                                                        let total_mb = total_sz as f64 / (1024.0*1024.0);
+                                                        let pct = done as f64 * 100.0 / total_sz as f64;
+                                                        let text = serde_json::to_string(&format!("{}: {:.1}MB / {:.1}MB @ {:.1}MB/s", fname_p, mb, total_mb, speed)).unwrap_or_default();
                                                         let _ = ipc_p.send(IpcOutMsg {
-                                                            script: format!("{{let p=document.getElementById('dl-progress');if(p)p.innerHTML='<span>Downloaded {:.1}MB @ {:.1}MB/s</span>'}}", mb, speed),
+                                                            script: format!("window.__rterm_dlProgress && window.__rterm_dlProgress({}, {:.1})", text, pct),
                                                         });
                                                     }
                                                 });
@@ -772,14 +803,14 @@ fn main() {
                                                 }
                                                 
                                                 for h in part_handles { let _ = h.await; }
-                                                let _ = progress_task.await;
+                                                progress_task.abort();
                                                 
                                                 // Merge parts
                                                 if let Ok(mut out) = tokio::fs::File::create(&save_path).await {
                                                     for pi in 0..num_parts {
                                                         let pp = save_path.clone() + ".part" + &pi.to_string();
-                                                        if let Ok(data) = tokio::fs::read(&pp).await {
-                                                            let _ = out.write_all(&data).await;
+                                                        if let Ok(mut part) = tokio::fs::File::open(&pp).await {
+                                                            let _ = tokio::io::copy(&mut part, &mut out).await;
                                                         }
                                                         let _ = tokio::fs::remove_file(&pp).await;
                                                     }
@@ -787,10 +818,15 @@ fn main() {
                                                 
                                                 let elapsed = start_time.elapsed().as_secs_f64();
                                                 let speed = file_size as f64 / elapsed.max(0.1) / (1024.0*1024.0);
-                                                let _ = ipc.send(IpcOutMsg {
-                                                    script: format!("{{let p=document.getElementById('dl-progress');if(p){{p.innerHTML='<span style=\"color:var(--green)\">Saved {:.1}MB ({:.1}MB/s)</span>';setTimeout(function(){{p.remove()}},5000)}}}}", file_size as f64/(1024.0*1024.0), speed),
-                                                });
+                                                let downloaded = progress.load(Ordering::Relaxed);
+                                                let script = if downloaded >= file_size {
+                                                    format!("window.__rterm_dlProgress && window.__rterm_dlProgress({}, 100, {{done:true}})", serde_json::to_string(&format!("Saved {}: {:.1}MB ({:.1}MB/s)", fname, file_size as f64/(1024.0*1024.0), speed)).unwrap_or_default())
+                                                } else {
+                                                    format!("window.__rterm_dlProgress && window.__rterm_dlProgress({}, {:.1}, {{error:true}})", serde_json::to_string(&format!("Download incomplete {}: {:.1}MB of {:.1}MB", fname, downloaded as f64/(1024.0*1024.0), file_size as f64/(1024.0*1024.0))).unwrap_or_default(), downloaded as f64 * 100.0 / file_size as f64)
+                                                };
+                                                let _ = ipc.send(IpcOutMsg { script });
                                             });
+                                        }
                                         }
                                     }
                                 } else { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid format"}"#.to_string()); }
@@ -808,26 +844,41 @@ fn main() {
                                         let sftp_c = Arc::clone(sftp);
                                         tokio::spawn(async move {
                                             use tokio::io::AsyncReadExt;
-                                            if let Ok(mut local_file) = tokio::fs::File::open(&local_path).await {
-                                                if let Ok(mut remote_file) = sftp_c.create(&remote_path).await {
-                                                    let mut uploaded = 0u64;
-                                                    let mut buf = vec![0u8; 262144];
-                                                    let start_time = std::time::Instant::now();
-                                                    while let Ok(n) = local_file.read(&mut buf).await {
-                                                        if n == 0 { break; }
-                                                        if remote_file.write_all(&buf[..n]).await.is_err() { break; }
-                                                        uploaded += n as u64;
-                                                        let speed = uploaded as f64 / start_time.elapsed().as_secs_f64().max(0.1) / (1024.0*1024.0);
-                                                        let mb = uploaded as f64 / (1024.0*1024.0);
-                                                        let _ = ipc.send(IpcOutMsg {
-                                                            script: format!("{{let p=document.getElementById('dl-progress');if(p)p.innerHTML='<span>Uploading {:.1}MB @ {:.1}MB/s</span>'}}", mb, speed),
-                                                        });
+                                            let dl_err = |ipc: &mpsc::Sender<IpcOutMsg>, msg: String| {
+                                                let _ = ipc.send(IpcOutMsg { script: format!("window.__rterm_dlProgress && window.__rterm_dlProgress({}, 100, {{error:true}})", serde_json::to_string(&msg).unwrap_or_default()) });
+                                            };
+                                            let total = tokio::fs::metadata(&local_path).await.map(|m| m.len()).unwrap_or(0);
+                                            match tokio::fs::File::open(&local_path).await {
+                                                Err(e) => dl_err(&ipc, format!("Upload failed: {}", e)),
+                                                Ok(mut local_file) => match sftp_c.create(&remote_path).await {
+                                                    Err(e) => dl_err(&ipc, format!("Upload failed: {}", e)),
+                                                    Ok(mut remote_file) => {
+                                                        let mut uploaded = 0u64;
+                                                        let mut failed = false;
+                                                        let mut buf = vec![0u8; 262144];
+                                                        let start_time = std::time::Instant::now();
+                                                        while let Ok(n) = local_file.read(&mut buf).await {
+                                                            if n == 0 { break; }
+                                                            if remote_file.write_all(&buf[..n]).await.is_err() { failed = true; break; }
+                                                            uploaded += n as u64;
+                                                            let speed = uploaded as f64 / start_time.elapsed().as_secs_f64().max(0.1) / (1024.0*1024.0);
+                                                            let mb = uploaded as f64 / (1024.0*1024.0);
+                                                            let pct = if total > 0 { uploaded as f64 * 100.0 / total as f64 } else { 0.0 };
+                                                            let _ = ipc.send(IpcOutMsg {
+                                                                script: format!("window.__rterm_dlProgress && window.__rterm_dlProgress('Uploading {:.1}MB / {:.1}MB @ {:.1}MB/s', {:.1})", mb, total as f64/(1024.0*1024.0), speed, pct),
+                                                            });
+                                                        }
+                                                        if failed || (total > 0 && uploaded < total) {
+                                                            dl_err(&ipc, format!("Upload incomplete: {:.1}MB of {:.1}MB", uploaded as f64/(1024.0*1024.0), total as f64/(1024.0*1024.0)));
+                                                        } else {
+                                                            let _ = ipc.send(IpcOutMsg {
+                                                                script: format!("window.__rterm_dlProgress && window.__rterm_dlProgress('Uploaded {:.1}MB', 100, {{done:true}})", uploaded as f64/(1024.0*1024.0)),
+                                                            });
+                                                        }
+                                                        let remote_dir = std::path::Path::new(&remote_path).parent().and_then(|p| p.to_str()).unwrap_or("/");
+                                                        let dir_json = serde_json::to_string(remote_dir).unwrap_or_else(|_| "\"/\"".to_string());
+                                                        let _ = ipc.send(IpcOutMsg { script: format!("loadSftpDir({})", dir_json) });
                                                     }
-                                                    let _ = ipc.send(IpcOutMsg {
-                                                        script: format!("{{let p=document.getElementById('dl-progress');if(p){{p.innerHTML='<span style=\"color:var(--green)\">Uploaded {:.1}MB</span>';setTimeout(function(){{p.remove()}},3000)}}}}", uploaded as f64/(1024.0*1024.0)),
-                                                    });
-                                                    let remote_dir = std::path::Path::new(&remote_path).parent().and_then(|p| p.to_str()).unwrap_or("/");
-                                                    let _ = ipc.send(IpcOutMsg { script: format!("loadSftpDir('{}')", remote_dir) });
                                                 }
                                             }
                                         });
@@ -838,27 +889,12 @@ fn main() {
                         }
                     }
                 }
-                _ = tick.tick() => {
-                    let ipc_clone = ipc_tx_for_ssh_clone.clone();
-                    let mut to_remove = Vec::new();
-                    for (&id, read_half) in read_halves.iter_mut() {
-                        match tokio::time::timeout(Duration::from_millis(1), read_half.wait()).await {
-                            Ok(Some(ChannelMsg::Data { data })) => {
-                                let data_str = String::from_utf8_lossy(&data);
-                                let escaped = serde_json::to_string(&data_str.as_ref()).unwrap_or_default();
-                                let _ = ipc_clone.send(IpcOutMsg {
-                                    script: format!("window.__rterm_onData && window.__rterm_onData({}, {})", id, escaped),
-                                });
-                            }
-                            Ok(Some(ChannelMsg::Eof)) | Ok(None) => { to_remove.push(id); }
-                            _ => {}
-                        }
-                    }
-                    for id in to_remove { read_halves.remove(&id); }
-                }
             }
         }
     });
+
+    let (noreply_tx, noreply_rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || { while noreply_rx.recv().is_ok() {} });
 
     let root_for_protocol = project_root.clone();
     let webview_built = WebViewBuilder::new()
@@ -951,16 +987,8 @@ fn main() {
                     };
                     let data = args.get("data").and_then(|v| v.as_str()).unwrap_or("");
                     let data_owned = data.to_string();
-                    let (reply_tx, reply_rx) = mpsc::channel();
                     let cmd = format!("write:{}:{}", id, data_owned);
-                    if ssh_tx_clone.send((cmd, reply_tx)).is_err() {
-                        send_resp(&serde_json::json!({"success": false, "error": "send failed"}));
-                        return;
-                    }
-                    match reply_rx.recv_timeout(Duration::from_secs(1)) {
-                        Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
-                        Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
-                    }
+                    let _ = ssh_tx_clone.send((cmd, noreply_tx.clone()));
                 }
                 "ssh_resize" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };

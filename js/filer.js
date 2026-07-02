@@ -275,7 +275,7 @@ export async function loadLocalDir(dir) {
       ? '<svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path></svg>'
       : '<svg viewBox="0 0 24 24" fill="none" stroke="var(--text2)" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>';
     const sizeStr = f.size ? (f.size > 1024 * 1024 * 1024 ? (f.size / 1024 / 1024 / 1024).toFixed(1) + 'G' : f.size > 1024 * 1024 ? (f.size / 1024 / 1024).toFixed(1) + 'M' : f.size > 1024 ? (f.size / 1024).toFixed(1) + 'K' : f.size + 'B') : '';
-    div.innerHTML = `<span class="icon">${icon}</span><span class="name">${f.name}</span>${sizeStr ? `<span class="size">${sizeStr}</span>` : ''}`;
+    div.innerHTML = `<span class="icon">${icon}</span><span class="name">${escapeHtml(f.name)}</span>${sizeStr ? `<span class="size">${sizeStr}</span>` : ''}`;
     const base = localExpanded === '/' ? '' : localExpanded;
     const fullPath = base + '/' + f.name;
     const key = fullPath;
@@ -350,7 +350,7 @@ export async function loadLocalDir(dir) {
         menu.remove();
         const newName = await openLocalActionModal({
           title: 'Rename Item',
-          body: `Rename <b>${f.name}</b> to:`,
+          body: `Rename <b>${escapeHtml(f.name)}</b> to:`,
           inputValue: f.name,
           withInput: true,
           okText: 'Rename'
@@ -371,11 +371,11 @@ export async function loadLocalDir(dir) {
         openLocalActionModal({
           title: 'File Info',
           body:
-            `Name: ${f.name}<br>` +
+            `Name: ${escapeHtml(f.name)}<br>` +
             `Type: ${f.dir ? 'Folder' : 'File'}<br>` +
             `Permissions: ${permToRwx(f.perm)}<br>` +
             `Size: ${f.size || 0} bytes<br>` +
-            `Path: ${fullPath}`,
+            `Path: ${escapeHtml(fullPath)}`,
           withInput: false,
           okText: 'Close',
           showCancel: false

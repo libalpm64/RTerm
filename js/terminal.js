@@ -100,6 +100,10 @@ export function renderTabs() {
 export function closeTab(id) {
   const sess = sessions.get(id);
 
+  if (sess && sess.sshId !== null && sess.sshId !== undefined) {
+    window.rterm?.sshDisconnect?.(sess.sshId);
+  }
+
   if (sess?.type === 'keys') {
     setKeysTabOpen(false);
   } else {
@@ -478,7 +482,7 @@ export function createTerminalInstance(id, onReady) {
     onReady(term, sess);
   }
 
-  if (!sess.cmdBuffer) sess.cmdBuffer = '';
+  if (sess.type === 'ssh' && !sess.cmdBuffer) sess.cmdBuffer = '';
 
   term.onData(data => {
     const sess = sessions.get(id);
@@ -548,7 +552,14 @@ export function createTerminalInstance(id, onReady) {
     }
   });
 
-  term.onCursorMove(() => updateStatus(id));
+  let statusRAF = null;
+  term.onCursorMove(() => {
+    if (statusRAF) return;
+    statusRAF = requestAnimationFrame(() => {
+      statusRAF = null;
+      updateStatus(id);
+    });
+  });
 
   if (!invoke && !window.rterm) {
     if (sess?.type === 'ssh' || sess?.type === 'telnet' || sess?.type === 'serial') {

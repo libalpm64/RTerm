@@ -20,6 +20,43 @@ import { setupKeys } from './keys.js';
 import { loadLocalDir } from './filer.js';
 import { $, $$, byId, on, setDisplay, setText, showOnlyById } from './dom.js';
 
+function ensureDlBar() {
+  let bar = document.getElementById('dl-progress');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'dl-progress';
+    bar.style.cssText = 'position:fixed;bottom:30px;left:12px;min-width:280px;max-width:420px;background:var(--bg3);padding:10px 12px;z-index:9999;border:1px solid var(--border2);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.4);font-size:12px;display:none;';
+    bar.innerHTML =
+      '<div class="dl-label" style="margin-bottom:6px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>' +
+      '<div class="dl-track" style="height:4px;border-radius:2px;background:var(--bg2);overflow:hidden;"><div class="dl-fill" style="height:100%;width:0%;background:var(--accent);border-radius:2px;transition:width .25s;"></div></div>';
+    document.body.appendChild(bar);
+  }
+  return bar;
+}
+
+let _dlHideTimer = null;
+window.__rterm_dlProgress = function (text, pct, opts) {
+  const bar = ensureDlBar();
+  const label = bar.querySelector('.dl-label');
+  const fill = bar.querySelector('.dl-fill');
+  if (_dlHideTimer) { clearTimeout(_dlHideTimer); _dlHideTimer = null; }
+  bar.style.display = 'block';
+  label.textContent = text || '';
+  if (typeof pct === 'number' && isFinite(pct)) {
+    fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+  }
+  const o = opts || {};
+  const color = o.error ? 'var(--red)' : o.done ? 'var(--green)' : 'var(--accent)';
+  fill.style.background = color;
+  label.style.color = o.error ? 'var(--red)' : o.done ? 'var(--green)' : 'var(--text)';
+  if (o.done || o.error) {
+    _dlHideTimer = setTimeout(() => {
+      bar.style.display = 'none';
+      fill.style.width = '0%';
+    }, o.error ? 6000 : 4000);
+  }
+};
+
 export function closeMenusInternal() {
   $$('.dropdown').forEach(m => m.classList.remove('show'));
   $$('.menu-btn').forEach(b => b.classList.remove('active'));
@@ -250,19 +287,11 @@ export function setupEventListeners() {
     const remoteDir = getCurrentSftpPath() || '/';
     const remotePath = (remoteDir === '/' ? '' : remoteDir) + '/' + filename;
 
-    let pbar = document.getElementById('dl-progress');
-    if (!pbar) {
-      pbar = document.createElement('div');
-      pbar.id = 'dl-progress';
-      pbar.style.cssText = 'position:fixed;top:38px;right:12px;min-width:280px;max-width:480px;background:var(--bg3);padding:10px 12px;z-index:9999;border:1px solid var(--border2);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.4);font-size:12px;';
-      document.body.appendChild(pbar);
-    }
-    pbar.innerHTML = `<span>Starting upload of ${filename}...</span>`;
+    window.__rterm_dlProgress(`Starting upload of ${filename}...`, 0);
 
     const result = await window.rterm.sftpUpload(sess.sshId, localFile, remotePath);
     if (!result?.success) {
-      pbar.remove();
-      alert('Upload failed: ' + (result?.error || 'unknown'));
+      window.__rterm_dlProgress('Upload failed: ' + (result?.error || 'unknown'), 100, { error: true });
     }
   };
 
