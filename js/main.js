@@ -1,5 +1,6 @@
 import {
-  sessions, activeId, commandHistory,
+  sessions, activeId, commandHistory, scrollback,
+  MAX_COMMAND_HISTORY, MAX_HISTORY_ENTRY_LENGTH,
   setFontSize, setCursorStyle, setCursorBlink, setScrollback,
   setSemanticHlEnabled
 } from './state.js';
@@ -28,6 +29,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (sessions.size === 0) {
     newTerminal();
   }
+  renderHistory();
   const _termEl = byId('terminals');
   if (_termEl) {
     const _termObs = new ResizeObserver(() => {
@@ -78,7 +80,7 @@ async function loadBackendSettings() {
   const sb = await window.rterm.loadSetting('scrollback');
   if (sb?.result) {
     setScrollback(parseInt(sb.result));
-    setValue(byId('setting-scrollback'), parseInt(sb.result));
+    setValue(byId('setting-scrollback'), scrollback);
   }
 
   const theme = await window.rterm.loadSetting('theme');
@@ -150,9 +152,15 @@ async function loadBackendSettings() {
     try {
       const h = JSON.parse(history.result);
       if (Array.isArray(h)) {
-        commandHistory.push(...h);
-        renderHistory();
+        const bounded = h
+          .filter(cmd => typeof cmd === 'string' && cmd.length > 0)
+          .slice(0, MAX_COMMAND_HISTORY)
+          .map(cmd => cmd.length > MAX_HISTORY_ENTRY_LENGTH
+            ? cmd.slice(0, MAX_HISTORY_ENTRY_LENGTH)
+            : cmd);
+        commandHistory.push(...bounded);
       }
     } catch (e) { }
   }
+  renderHistory();
 }

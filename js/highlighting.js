@@ -30,7 +30,10 @@ function applyStaticRules(str) {
 
 export function applyHighlighting(data) {
   if (!data || typeof data !== 'string') return data;
-  if (data.length > 20000) return data;
+
+  // Keep ANSI redraw packets raw
+  if (data.includes('\x1b') || data.length > 8192) return data;
+  if (!semanticHlEnabled && activeKeywords.length === 0) return data;
 
   let res = data;
 

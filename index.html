@@ -404,6 +404,30 @@
       border-radius: 3px;
     }
 
+    /* Keep modal and transfer scrollbars in the dark theme */
+    #sd-list,
+    #dl-progress .dl-list {
+      scrollbar-width: thin;
+      scrollbar-color: var(--bg4) var(--bg2);
+      color-scheme: dark;
+    }
+
+    #sd-list::-webkit-scrollbar,
+    #dl-progress .dl-list::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    #sd-list::-webkit-scrollbar-track,
+    #dl-progress .dl-list::-webkit-scrollbar-track {
+      background: var(--bg2);
+    }
+
+    #sd-list::-webkit-scrollbar-thumb,
+    #dl-progress .dl-list::-webkit-scrollbar-thumb {
+      background: var(--bg4);
+      border-radius: 3px;
+    }
+
     .filer-item {
       display: flex;
       align-items: center;
@@ -734,11 +758,6 @@
 
     .xterm-viewport::-webkit-scrollbar {
       display: none !important;
-    }
-
-    .xterm-screen {
-      width: 100% !important;
-      height: 100% !important;
     }
 
     .xterm-helper-textarea {
@@ -1701,6 +1720,7 @@
     <div class="menu-btn" id="menu-help-btn">Help
       <div class="dropdown" id="menu-help">
         <div class="dropdown-item" id="action-about">About Rterm</div>
+        <div class="dropdown-item" id="action-devtools">Open DevTools</div>
         <div class="dropdown-item" id="action-docs">Documentation</div>
         <div class="dropdown-item" id="action-issue">Report Issue</div>
       </div>
@@ -2032,9 +2052,6 @@
           </div>
         </div>
         <div class="history-list" id="history-list">
-          <div class="history-item"><span class="dot"></span>ls -la</div>
-          <div class="history-item"><span class="dot"></span>cd ~/Projects</div>
-          <div class="history-item"><span class="dot"></span>git status</div>
         </div>
       </div>
     </div>
@@ -2306,8 +2323,8 @@
             <div class="settings-section">
               <h4>Behavior</h4>
               <div class="setting-row">
-                <div class="setting-label">Scrollback<small>Lines in scrollback buffer (0 for unlimited)</small></div>
-                <input type="number" id="setting-scrollback" value="10000">
+                <div class="setting-label">Scrollback<small>Lines in scrollback buffer (0 uses the safe maximum)</small></div>
+                <input type="number" id="setting-scrollback" value="2000">
               </div>
               <div class="setting-row">
                 <div class="setting-label">Bell<small>Play sound on terminal bell</small></div>

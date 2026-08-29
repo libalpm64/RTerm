@@ -13,28 +13,68 @@ if (typeof window.ipc === 'undefined') {
 
 window.__rterm_pending = {};
 window.__rterm_rid = 0;
+const MAX_PENDING_IPC = 256;
+let _ipcPendingCount = 0;
+let _sftpDownloadSeq = 0;
+const _terminalWriteQueue = new Map();
+let _terminalFlushQueued = false;
 window.__rterm_resp = function (data) {
   const rid = data && data._rid;
-  if (rid != null && window.__rterm_pending[rid]) {
-    window.__rterm_pending[rid](data);
+  const pending = rid != null ? window.__rterm_pending[rid] : null;
+  if (pending) {
+    clearTimeout(pending.timer);
+    _ipcPendingCount = Math.max(0, _ipcPendingCount - 1);
+    pending.resolve(data);
     delete window.__rterm_pending[rid];
   }
 };
 
 export function _ipc(method, args) {
+  if (_ipcPendingCount >= MAX_PENDING_IPC) {
+    return Promise.resolve({ success: false, error: 'IPC request queue is busy' });
+  }
   return new Promise((resolve) => {
     const rid = ++window.__rterm_rid;
-    window.__rterm_pending[rid] = resolve;
+    const pending = {
+      resolve,
+      timer: setTimeout(() => {
+        if (window.__rterm_pending[rid] !== pending) return;
+        delete window.__rterm_pending[rid];
+        _ipcPendingCount = Math.max(0, _ipcPendingCount - 1);
+        resolve({ success: false, error: 'IPC request timed out' });
+      }, 30000),
+    };
+    window.__rterm_pending[rid] = pending;
+    _ipcPendingCount += 1;
     window.ipc.postMessage(JSON.stringify({ _rid: rid, method, args: args || {} }));
   });
 }
 
-window.__rterm_onData = function (id, data) {
-  for (const [, sess] of sessions) {
-    if (sess.sshId === id && sess.term && data !== 'EOF') {
-      sess.term.write(applyHighlighting(data));
-      break;
+function flushTerminalWrites() {
+  _terminalFlushQueued = false;
+  for (const [id, chunks] of _terminalWriteQueue) {
+    _terminalWriteQueue.delete(id);
+    const data = chunks.length === 1 ? chunks[0] : chunks.join('');
+    for (const [, sess] of sessions) {
+      if (sess.sshId === id && sess.term) {
+        sess.term.write(applyHighlighting(data));
+        break;
+      }
     }
+  }
+}
+
+window.__rterm_onData = function (id, data) {
+  if (data === 'EOF') return;
+  let chunks = _terminalWriteQueue.get(id);
+  if (!chunks) {
+    chunks = [];
+    _terminalWriteQueue.set(id, chunks);
+  }
+  chunks.push(data);
+  if (!_terminalFlushQueued) {
+    _terminalFlushQueued = true;
+    queueMicrotask(flushTerminalWrites);
   }
 };
 
@@ -61,7 +101,16 @@ export function setupRtermApi() {
     sftpOpenFile: function (id, path) { return _ipc("sftp_open_file", { id, path }); },
     sftpRead: function (handle, size) { return _ipc("sftp_read", { handle, size: size || 65536 }); },
     sftpCloseFile: function (handle) { return _ipc("sftp_close_file", { handle }); },
-    sftpDownload: function (id, path, filename, save_path) { return _ipc("sftp_download", { id, path, filename, save_path: save_path || '' }); },
+    sftpDownload: function (id, path, filename, save_path, transferId) {
+      const transfer_id = transferId || `download-${Date.now().toString(36)}-${++_sftpDownloadSeq}`;
+      window.__rterm_transferProgress?.(transfer_id, `Queued ${filename || 'download'}`, 0);
+      return _ipc("sftp_download", { id, path, filename, save_path: save_path || '', transfer_id }).then((result) => {
+        if (!result?.success) {
+          window.__rterm_transferProgress?.(transfer_id, result?.error || 'Download failed', 100, { error: true });
+        }
+        return { ...result, transfer_id };
+      });
+    },
     sftpRename: function (id, oldPath, newPath) { return _ipc("sftp_rename", { id, old_path: oldPath, new_path: newPath }); },
     localExec: function (cmd, cols) { return _ipc("local_exec", { command: cmd, cols: cols || 120 }); },
     localList: function (path) { return _ipc("local_list", { path: path || '.' }); },
@@ -71,6 +120,8 @@ export function setupRtermApi() {
     listKeys: function () { return _ipc("list_keys", {}); },
     deleteKey: function (path) { return _ipc("delete_key", { path }); },
     getEnv: function (key) { return _ipc("get_env", { key }); },
+    webviewMemory: function () { return _ipc("webview_memory", {}); },
+    openDevtools: function () { return _ipc("open_devtools", {}); },
     sftpUpload: function (id, localPath, remotePath) { return _ipc("sftp_upload", { id, local_path: localPath, remote_path: remotePath }); },
     telnetConnect: function (config) { return _ipc("telnet_connect", config); },
     serialConnect: function (config) { return _ipc("serial_connect", config); },

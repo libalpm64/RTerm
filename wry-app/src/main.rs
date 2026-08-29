@@ -1,18 +1,23 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
+use bytes::Bytes;
 use russh::client::{self, Handle};
-use russh::{ChannelWriteHalf, ChannelMsg};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use russh::ChannelMsg;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tao::{
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::{ControlFlow, EventLoop, EventLoopProxy},
     window::WindowBuilder,
 };
 use wry::http::{header::CONTENT_TYPE, Request, Response};
 use wry::WebViewBuilder;
+#[cfg(windows)]
+use wry::{MemoryUsageLevel, WebViewExtWindows};
 
 static SESSION_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -58,12 +63,159 @@ struct SshHandler;
 
 impl client::Handler for SshHandler {
     type Error = russh::Error;
-    async fn check_server_key(&mut self, _server_public_key: &ssh_key::PublicKey) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        _server_public_key: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
         Ok(true)
     }
 }
 
-struct IpcOutMsg { script: String }
+enum IpcOutMsg {
+    Script(String),
+    TerminalData { id: u32, data: Bytes },
+}
+
+/// Append JSON string directly to IPC batch
+fn append_json_string(out: &mut String, value: &str) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    out.push('"');
+    let mut segment_start = 0;
+    for (index, ch) in value.char_indices() {
+        let escape = match ch {
+            '"' => Some("\\\""),
+            '\\' => Some("\\\\"),
+            '\n' => Some("\\n"),
+            '\r' => Some("\\r"),
+            '\t' => Some("\\t"),
+            '\u{08}' => Some("\\b"),
+            '\u{0c}' => Some("\\f"),
+            c if c <= '\u{1f}' => {
+                out.push_str(&value[segment_start..index]);
+                out.push_str("\\u00");
+                let code = c as u8;
+                out.push(HEX[(code >> 4) as usize] as char);
+                out.push(HEX[(code & 0x0f) as usize] as char);
+                segment_start = index + c.len_utf8();
+                None
+            }
+            _ => None,
+        };
+        if let Some(escape) = escape {
+            out.push_str(&value[segment_start..index]);
+            out.push_str(escape);
+            segment_start = index + ch.len_utf8();
+        }
+    }
+    out.push_str(&value[segment_start..]);
+    out.push('"');
+}
+
+impl IpcOutMsg {
+    fn estimated_len(&self) -> usize {
+        match self {
+            Self::Script(script) => script.len() + 1,
+            // Reserve space for escaped terminal data
+            Self::TerminalData { data, .. } => data.len().saturating_mul(6).saturating_add(96),
+        }
+    }
+
+    fn append_to(self, batch: &mut String) {
+        match self {
+            Self::Script(script) => {
+                batch.push_str(&script);
+                batch.push(';');
+            }
+            Self::TerminalData { id, data } => {
+                batch.push_str("window.__rterm_onData && window.__rterm_onData(");
+                batch.push_str(&id.to_string());
+                batch.push(',');
+                let data_str = String::from_utf8_lossy(&data);
+                append_json_string(batch, data_str.as_ref());
+                batch.push_str(");");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod ipc_encoding_tests {
+    use super::append_json_string;
+
+    #[test]
+    fn append_json_string_matches_serde_json() {
+        let values = [
+            "plain text",
+            "quotes \" and slash \\",
+            "line\nfeed\ttab\rreturn",
+            "unicode: café 日本",
+            "control: \u{00}\u{01}\u{1f}",
+        ];
+        for value in values {
+            let mut actual = String::new();
+            append_json_string(&mut actual, value);
+            assert_eq!(actual, serde_json::to_string(value).unwrap());
+        }
+    }
+}
+
+fn transfer_progress_message(id: &str, text: &str, pct: f64, done: bool, error: bool) -> IpcOutMsg {
+    let id_json = serde_json::to_string(id).unwrap_or_else(|_| "\"download\"".to_string());
+    let text_json = serde_json::to_string(text).unwrap_or_else(|_| "\"Transfer failed\"".to_string());
+    let options = if error { "{error:true}" } else if done { "{done:true}" } else { "{}" };
+    IpcOutMsg::Script(format!(
+        "window.__rterm_transferProgress && window.__rterm_transferProgress({}, {}, {:.1}, {})",
+        id_json, text_json, pct, options
+    ))
+}
+
+enum SshChannelCommand {
+    Data(Vec<u8>),
+    Resize(u32, u32),
+}
+
+type SshWriter = tokio::sync::mpsc::Sender<SshChannelCommand>;
+type SharedSshWriters = Arc<Mutex<HashMap<u32, SshWriter>>>;
+
+/// Wake UI event loop when transport data arrives
+#[derive(Clone)]
+struct IpcBus {
+    tx: mpsc::SyncSender<IpcOutMsg>,
+    wake: EventLoopProxy<()>,
+    wake_pending: Arc<AtomicBool>,
+}
+
+type BackendCommand = (String, mpsc::Sender<String>);
+
+struct ActiveTransferGuard(Arc<AtomicU32>);
+
+impl Drop for ActiveTransferGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Bound backend command queue and fail busy requests
+fn queue_backend_command(
+    tx: &tokio::sync::mpsc::Sender<BackendCommand>,
+    command: String,
+    reply_tx: mpsc::Sender<String>,
+) {
+    if tx.try_send((command, reply_tx.clone())).is_err() {
+        let _ = reply_tx.send(r#"{"success":false,"error":"backend busy"}"#.to_string());
+    }
+}
+
+impl IpcBus {
+    fn send(&self, message: IpcOutMsg) {
+        if self.tx.send(message).is_ok()
+            && !self.wake_pending.swap(true, Ordering::AcqRel)
+        {
+            let _ = self.wake.send_event(());
+        }
+    }
+}
 
 use chacha20poly1305::XChaCha20Poly1305;
 use chacha20poly1305::XNonce;
@@ -71,6 +223,8 @@ use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
 
 const VAULT_MAGIC: &[u8; 4] = b"RTVL";
 const VAULT_VERSION: u16 = 2;
+const MAX_ACTIVE_SFTP_TRANSFERS: u32 = 8;
+const MAX_EXEC_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
 fn derive_key(password: &str) -> [u8; 32] {
     let mut key = [0u8; 32];
@@ -82,9 +236,392 @@ fn derive_key(password: &str) -> [u8; 32] {
     key
 }
 
+/// Resolve user home on all supported platforms
+fn home_dir() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            return std::path::PathBuf::from(profile);
+        }
+        if let (Some(drive), Some(path)) = (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH")) {
+            let mut home = std::path::PathBuf::from(drive);
+            home.push(path);
+            return home;
+        }
+    }
+
+    #[cfg(not(windows))]
+    if let Some(home) = std::env::var_os("HOME") {
+        return std::path::PathBuf::from(home);
+    }
+
+    // HOME can still be supplied by shells such as Git Bash on Windows
+    if let Some(home) = std::env::var_os("HOME") {
+        return std::path::PathBuf::from(home);
+    }
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+fn expand_local_path(path: &str) -> std::path::PathBuf {
+    let path = path.trim();
+    if path == "~" {
+        return home_dir();
+    }
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+        return home_dir().join(rest);
+    }
+    std::path::PathBuf::from(path)
+}
+
+fn default_download_dir() -> std::path::PathBuf {
+    home_dir().join("Downloads")
+}
+
+#[cfg(windows)]
+fn spawn_local_shell(command: &str, cols: u16) -> Result<std::process::Child, String> {
+    use std::process::{Child, Command, Stdio};
+
+    fn spawn(
+        program: &std::path::Path,
+        args: &[&str],
+        cols: u16,
+    ) -> std::io::Result<Child> {
+        let mut shell = Command::new(program);
+        shell
+            .args(args)
+            .env("COLUMNS", cols.to_string())
+            .env("LINES", "40")
+            .env("TERM", "xterm-256color")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            shell.creation_flags(0x08000000);
+        }
+        shell.spawn()
+    }
+
+    let powershell_command = format!("& {{ {} }} *>&1", command);
+    let powershell_args = [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        powershell_command.as_str(),
+    ];
+    let mut powershell_candidates = Vec::with_capacity(2);
+    if let Some(windir) = std::env::var_os("WINDIR") {
+        powershell_candidates.push(
+            std::path::PathBuf::from(windir)
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe"),
+        );
+    }
+    powershell_candidates.push(std::path::PathBuf::from("powershell.exe"));
+    let mut powershell_errors = Vec::new();
+    for candidate in powershell_candidates {
+        match spawn(&candidate, &powershell_args, cols) {
+            Ok(child) => return Ok(child),
+            Err(error) => powershell_errors.push(format!("{}: {}", candidate.display(), error)),
+        }
+    }
+
+    let pwsh_path = std::path::Path::new("pwsh.exe");
+    let pwsh_error = match spawn(pwsh_path, &powershell_args, cols) {
+        Ok(child) => return Ok(child),
+        Err(error) => error,
+    };
+
+    let cmd_path = std::env::var_os("ComSpec")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("WINDIR").map(|windir| {
+                std::path::PathBuf::from(windir)
+                    .join("System32")
+                    .join("cmd.exe")
+            })
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("cmd.exe"));
+    let cmd_command = format!("{} 2>&1", command);
+    let cmd_args = ["/D", "/S", "/C", cmd_command.as_str()];
+    spawn(&cmd_path, &cmd_args, cols).map_err(|cmd_error| {
+        format!(
+            "PowerShell unavailable: {}; pwsh unavailable: {}; cmd failed: {}",
+            powershell_errors.join("; "),
+            pwsh_error,
+            cmd_error
+        )
+    })
+}
+
+#[cfg(not(windows))]
+fn spawn_local_shell(command: &str, cols: u16) -> Result<std::process::Child, String> {
+    use std::process::{Command, Stdio};
+
+    Command::new("script")
+        .arg("-q")
+        .arg("/dev/null")
+        .arg("sh")
+        .arg("-c")
+        .arg(command)
+        .env("COLUMNS", cols.to_string())
+        .env("LINES", "40")
+        .env("TERM", "xterm-256color")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())
+}
+
+fn run_local_command(command: &str, cols: u16) -> Result<String, String> {
+    use std::io::Read;
+
+    let mut child = spawn_local_shell(command, cols)?;
+
+    let mut stdout = child.stdout.take().ok_or_else(|| "local command stdout unavailable".to_string())?;
+    let reader = std::thread::spawn(move || {
+        let mut output = Vec::with_capacity(64 * 1024);
+        let mut limited = (&mut stdout).take((MAX_EXEC_OUTPUT_BYTES + 1) as u64);
+        let _ = limited.read_to_end(&mut output);
+        output
+    });
+    let mut output = reader.join().map_err(|_| "local command reader failed".to_string())?;
+    let truncated = output.len() > MAX_EXEC_OUTPUT_BYTES;
+    if truncated {
+        let _ = child.kill();
+        output.truncate(MAX_EXEC_OUTPUT_BYTES);
+    }
+    let _ = child.wait();
+
+    let out = String::from_utf8_lossy(&output);
+    let clean = out.trim_start_matches(|c| c == '\r' || c == '\n');
+    if truncated {
+        Ok(format!("{}\n[output truncated at 8 MiB]", clean))
+    } else {
+        Ok(clean.to_string())
+    }
+}
+
+#[cfg(windows)]
+#[derive(serde::Serialize)]
+struct WebViewProcessMemory {
+    pid: u32,
+    parent_pid: u32,
+    kind: &'static str,
+    working_set_bytes: u64,
+    private_bytes: u64,
+}
+
+#[cfg(windows)]
+fn webview2_process_memory() -> serde_json::Value {
+    use std::mem::size_of;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    };
+
+    let host_pid = std::process::id();
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return serde_json::json!({
+            "success": false,
+            "error": "could not enumerate Windows processes"
+        });
+    }
+
+    let mut entries = Vec::new();
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while has_entry {
+        let name_len = entry
+            .szExeFile
+            .iter()
+            .position(|value| *value == 0)
+            .unwrap_or(entry.szExeFile.len());
+        entries.push((
+            entry.th32ProcessID,
+            entry.th32ParentProcessID,
+            String::from_utf16_lossy(&entry.szExeFile[..name_len]),
+        ));
+        has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
+
+    let parents: HashMap<u32, u32> = entries
+        .iter()
+        .map(|(pid, parent_pid, _)| (*pid, *parent_pid))
+        .collect();
+    let is_descendant = |pid: u32| {
+        let mut current = pid;
+        for _ in 0..64 {
+            if current == host_pid {
+                return true;
+            }
+            let Some(parent_pid) = parents.get(&current) else {
+                return false;
+            };
+            if *parent_pid == current {
+                return false;
+            }
+            current = *parent_pid;
+        }
+        false
+    };
+
+    let mut processes = Vec::new();
+    for (pid, parent_pid, name) in entries {
+        if !name.eq_ignore_ascii_case("msedgewebview2.exe") || !is_descendant(pid) {
+            continue;
+        }
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+                0,
+                pid,
+            )
+        };
+        if handle.is_null() {
+            continue;
+        }
+
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+            cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            ..Default::default()
+        };
+        let read_ok = unsafe {
+            GetProcessMemoryInfo(
+                handle,
+                &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS,
+                size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            )
+        } != 0;
+        unsafe { CloseHandle(handle) };
+        if read_ok {
+            processes.push(WebViewProcessMemory {
+                pid,
+                parent_pid,
+                kind: if parent_pid == host_pid { "browser" } else { "child" },
+                working_set_bytes: counters.WorkingSetSize as u64,
+                private_bytes: counters.PrivateUsage as u64,
+            });
+        }
+    }
+    processes.sort_by_key(|process| std::cmp::Reverse(process.private_bytes));
+    let total_private_bytes = processes
+        .iter()
+        .map(|process| process.private_bytes)
+        .sum::<u64>();
+    let total_working_set_bytes = processes
+        .iter()
+        .map(|process| process.working_set_bytes)
+        .sum::<u64>();
+    serde_json::json!({
+        "success": true,
+        "supported": true,
+        "host_pid": host_pid,
+        "total_private_bytes": total_private_bytes,
+        "total_working_set_bytes": total_working_set_bytes,
+        "processes": processes,
+    })
+}
+
+#[cfg(not(windows))]
+fn webview2_process_memory() -> serde_json::Value {
+    serde_json::json!({
+        "success": true,
+        "supported": false,
+        "processes": [],
+    })
+}
+
+fn encode_command_field(value: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(value.as_bytes())
+}
+
+fn decode_command_field(value: &str, label: &str) -> Result<String, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|e| format!("invalid {}: {}", label, e))?;
+    String::from_utf8(bytes).map_err(|e| format!("invalid {} utf-8: {}", label, e))
+}
+
+fn legacy_config_dirs() -> Vec<std::path::PathBuf> {
+    // Migrate config from legacy working directory locations
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        let mut dir = exe.parent().map(std::path::Path::to_path_buf);
+        for _ in 0..5 {
+            let Some(current) = dir else { break };
+            candidates.push(current.join("rterm"));
+            dir = current.parent().map(std::path::Path::to_path_buf);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("rterm"));
+    }
+    // Include Git Bash and Unix style Windows paths
+    candidates.push(home_dir().join(".config").join("rterm"));
+    candidates
+}
+
+fn migrate_legacy_config(config_dir: &std::path::Path) {
+    let marker = config_dir.join(".legacy-migrated");
+    if marker.exists() {
+        return;
+    }
+    let names = ["vault.dat", "settings.json"];
+    let candidates = legacy_config_dirs();
+    for name in names {
+        let destination = config_dir.join(name);
+        if destination.exists() {
+            continue;
+        }
+        for candidate in &candidates {
+            let source = candidate.join(name);
+            if source == destination || !source.is_file() {
+                continue;
+            }
+            if std::fs::create_dir_all(config_dir).is_ok() && std::fs::copy(&source, &destination).is_ok() {
+                break;
+            }
+        }
+    }
+    // Mark migration complete to prevent rediscovery
+    let _ = std::fs::create_dir_all(config_dir);
+    let _ = std::fs::write(marker, b"1");
+}
+
 fn get_config_dir() -> std::path::PathBuf {
-    std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config").join("rterm"))
-        .unwrap_or_else(|_| std::path::PathBuf::from("rterm"))
+    let config_dir = if cfg!(windows) {
+        std::env::var_os("APPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home_dir().join("AppData").join("Roaming"))
+            .join("rterm")
+    } else if cfg!(target_os = "macos") {
+        home_dir().join("Library").join("Application Support").join("rterm")
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home_dir().join(".config"))
+            .join("rterm")
+    };
+    migrate_legacy_config(&config_dir);
+    config_dir
 }
 
 fn vault_exists() -> bool {
@@ -163,8 +700,7 @@ fn load_setting(key: &str) -> Option<String> {
 }
 
 fn ssh_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home).join(".ssh")
+    home_dir().join(".ssh")
 }
 
 fn generate_key(name: &str, algo: &str, passphrase: &str) -> Result<serde_json::Value, String> {
@@ -270,6 +806,16 @@ fn serve_file(root: &PathBuf, request: Request<Vec<u8>>) -> Result<Response<Vec<
     } else {
         uri_path.trim_start_matches('/').to_string()
     };
+
+    // Return an empty response for optional favicon requests
+    if relative.eq_ignore_ascii_case("favicon.ico") {
+        return Response::builder()
+            .status(204)
+            .header(CONTENT_TYPE, "image/x-icon")
+            .body(Vec::new())
+            .map_err(|e| format!("response builder: {}", e));
+    }
+
     if relative.split('/').any(|c| c == "..") {
         return Err("path traversal rejected".to_string());
     }
@@ -294,24 +840,44 @@ fn serve_file(root: &PathBuf, request: Request<Vec<u8>>) -> Result<Response<Vec<
         .map_err(|e| format!("response builder: {}", e))
 }
 
+fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let value = path.to_string_lossy();
+        if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{}", rest));
+        }
+        if let Some(rest) = value.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path
+}
+
 fn main() {
     let project_root = match std::env::current_exe() {
         Ok(exe) => {
             let mut p = std::fs::canonicalize(&exe).unwrap_or(exe);
             p.pop(); p.pop(); p.pop(); p.pop();
-            p
+            strip_windows_verbatim_prefix(p)
         }
         Err(_) => std::env::current_dir().unwrap_or_default(),
     };
-    eprintln!("Project root: {:?}", project_root);
+    eprintln!("Project root: {}", project_root.display());
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
-    let (ssh_tx, ssh_rx) = mpsc::channel::<(String, mpsc::Sender<String>)>();
-    let (ipc_tx, ipc_rx) = mpsc::channel::<IpcOutMsg>();
-    let ipc_tx_for_ssh = ipc_tx.clone();
+    // Bound queued WebView scripts during output bursts
+    let (ipc_tx, ipc_rx) = mpsc::sync_channel::<IpcOutMsg>(128);
+    let active_sftp_transfers = Arc::new(AtomicU32::new(0));
+    let active_sftp_transfers_for_runtime = active_sftp_transfers.clone();
 
     let event_loop = EventLoop::new();
+    let ipc_bus = IpcBus {
+        tx: ipc_tx,
+        wake: event_loop.create_proxy(),
+        wake_pending: Arc::new(AtomicBool::new(false)),
+    };
     let window = WindowBuilder::new()
         .with_title("Rterm")
         .with_inner_size(tao::dpi::LogicalSize::new(1200.0, 800.0))
@@ -319,24 +885,28 @@ fn main() {
         .build(&event_loop)
         .expect("Failed to create window");
 
-    let ssh_tx_clone = ssh_tx.clone();
     let webview = Arc::new(Mutex::new(None::<wry::WebView>));
     let webview_for_ipc = webview.clone();
 
-    let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel::<(String, mpsc::Sender<String>)>();
-    let t = tokio_tx.clone();
-    std::thread::spawn(move || { while let Ok(cmd) = ssh_rx.recv() { let _ = t.send(cmd); } });
+    let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<BackendCommand>(256);
+    // Send WebView commands directly to Tokio
+    let ssh_tx_clone = tokio_tx.clone();
+    let ssh_writers: SharedSshWriters = Arc::new(Mutex::new(HashMap::new()));
+    let ssh_writers_for_runtime = ssh_writers.clone();
+    let ssh_writers_for_handler = ssh_writers.clone();
 
-    let ipc_tx_for_ssh_clone = ipc_tx_for_ssh.clone();
-    let ipc_tx_for_handler = ipc_tx_for_ssh.clone();
+    let ipc_tx_for_ssh_clone = ipc_bus.clone();
+    let ipc_tx_for_handler = ipc_bus.clone();
     rt.spawn(async move {
         let mut sessions: HashMap<u32, Handle<SshHandler>> = HashMap::new();
-        let mut write_halves: HashMap<u32, ChannelWriteHalf<_>> = HashMap::new();
+        let ssh_writers = ssh_writers_for_runtime;
         let mut telnet_writers: HashMap<u32, tokio::net::tcp::OwnedWriteHalf> = HashMap::new();
         let mut serial_writers: HashMap<u32, tokio::io::WriteHalf<tokio_serial::SerialStream>> = HashMap::new();
         let mut sftp_sessions: HashMap<u32, Arc<russh_sftp::client::SftpSession>> = HashMap::new();
         let mut sftp_files: HashMap<u32, russh_sftp::client::fs::File> = HashMap::new();
+        let mut sftp_file_sessions: HashMap<u32, u32> = HashMap::new();
         let mut sftp_file_counter: u32 = 0;
+        let active_sftp_transfers = active_sftp_transfers_for_runtime;
 
         loop {
             tokio::select! {
@@ -364,6 +934,8 @@ fn main() {
                                 let cfg = client::Config {
                                     window_size: 8388608,
                                     maximum_packet_size: 131072,
+                                    // Disable Nagle for interactive input packets
+                                    nodelay: true,
                                     preferred: russh::Preferred {
                                         kex: Cow::Owned(vec![
                                             russh::kex::CURVE25519_PRE_RFC_8731,
@@ -457,23 +1029,38 @@ fn main() {
                                             let _ = channel.request_pty(true, "xterm-256color", 80, 24, 0, 0, &[]).await;
                                             let _ = channel.request_shell(true).await;
                                             let (mut read_half, write_half) = channel.split();
-                                            write_halves.insert(id, write_half);
+                                            let (write_tx, mut write_rx) = tokio::sync::mpsc::channel(128);
+                                            ssh_writers.lock().unwrap().insert(id, write_tx);
+                                            tokio::spawn(async move {
+                                                while let Some(command) = write_rx.recv().await {
+                                                    match command {
+                                                        SshChannelCommand::Data(data) => {
+                                                            if write_half.data_bytes(data).await.is_err() {
+                                                                break;
+                                                            }
+                                                        }
+                                                        SshChannelCommand::Resize(cols, rows) => {
+                                                            if write_half.window_change(cols, rows, 0, 0).await.is_err() {
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            });
                                             let ipc_clone = ipc_tx_for_ssh_clone.clone();
                                             tokio::spawn(async move {
                                                 while let Some(msg) = read_half.wait().await {
                                                     match msg {
                                                         ChannelMsg::Data { data } => {
-                                                            let data_str = String::from_utf8_lossy(&data);
-                                                            let escaped = serde_json::to_string(&data_str.as_ref()).unwrap_or_default();
-                                                            let _ = ipc_clone.send(IpcOutMsg {
-                                                                script: format!("window.__rterm_onData && window.__rterm_onData({}, {})", id, escaped),
+                                                            let _ = ipc_clone.send(IpcOutMsg::TerminalData {
+                                                                id,
+                                                                data,
                                                             });
                                                         }
                                                         ChannelMsg::ExtendedData { data, .. } => {
-                                                            let data_str = String::from_utf8_lossy(&data);
-                                                            let escaped = serde_json::to_string(&data_str.as_ref()).unwrap_or_default();
-                                                            let _ = ipc_clone.send(IpcOutMsg {
-                                                                script: format!("window.__rterm_onData && window.__rterm_onData({}, {})", id, escaped),
+                                                            let _ = ipc_clone.send(IpcOutMsg::TerminalData {
+                                                                id,
+                                                                data,
                                                             });
                                                         }
                                                         ChannelMsg::Eof | ChannelMsg::Close => break,
@@ -492,12 +1079,13 @@ fn main() {
                                 if parts.len() == 2 {
                                     let id: u32 = match parts[0].parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid id"}"#.to_string()); continue; } };
                                     let payload = parts[1].as_bytes();
-                                    if let Some(ch) = write_halves.get_mut(&id) {
-                                        let cursor = std::io::Cursor::new(parts[1].to_owned());
-                                        match ch.data(cursor).await {
-                                            Ok(_) => { let _ = reply_tx.send(r#"{"success":true}"#.to_string()); }
-                                            Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
-                                        }
+                                    if let Some(tx) = ssh_writers.lock().unwrap().get(&id).cloned() {
+                                        let result = tx.try_send(SshChannelCommand::Data(payload.to_vec()));
+                                        let _ = reply_tx.send(if result.is_ok() {
+                                            r#"{"success":true}"#.to_string()
+                                        } else {
+                                            r#"{"success":false,"error":"SSH writer closed"}"#.to_string()
+                                        });
                                     } else if let Some(tw) = telnet_writers.get_mut(&id) {
                                         match tw.write_all(payload).await {
                                             Ok(_) => { let _ = reply_tx.send(r#"{"success":true}"#.to_string()); }
@@ -527,10 +1115,9 @@ fn main() {
                                             let mut buf = [0u8; 8192];
                                             while let Ok(n) = read_half.read(&mut buf).await {
                                                 if n == 0 { break; }
-                                                let data_str = String::from_utf8_lossy(&buf[..n]);
-                                                let escaped = serde_json::to_string(&data_str.as_ref()).unwrap_or_default();
-                                                let _ = ipc_clone.send(IpcOutMsg {
-                                                    script: format!("window.__rterm_onData && window.__rterm_onData({}, {})", id, escaped),
+                                                let _ = ipc_clone.send(IpcOutMsg::TerminalData {
+                                                    id,
+                                                    data: Bytes::copy_from_slice(&buf[..n]),
                                                 });
                                             }
                                         });
@@ -555,10 +1142,9 @@ fn main() {
                                             let mut buf = [0u8; 8192];
                                             while let Ok(n) = read_half.read(&mut buf).await {
                                                 if n == 0 { break; }
-                                                let data_str = String::from_utf8_lossy(&buf[..n]);
-                                                let escaped = serde_json::to_string(&data_str.as_ref()).unwrap_or_default();
-                                                let _ = ipc_clone.send(IpcOutMsg {
-                                                    script: format!("window.__rterm_onData && window.__rterm_onData({}, {})", id, escaped),
+                                                let _ = ipc_clone.send(IpcOutMsg::TerminalData {
+                                                    id,
+                                                    data: Bytes::copy_from_slice(&buf[..n]),
                                                 });
                                             }
                                         });
@@ -569,9 +1155,17 @@ fn main() {
                             }
                             "disconnect" => {
                                 let id: u32 = match data.parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid id"}"#.to_string()); continue; } };
-                                sessions.remove(&id); write_halves.remove(&id);
+                                sessions.remove(&id); ssh_writers.lock().unwrap().remove(&id);
                                 telnet_writers.remove(&id); serial_writers.remove(&id);
                                 sftp_sessions.remove(&id);
+                                let stale_file_ids: Vec<u32> = sftp_file_sessions
+                                    .iter()
+                                    .filter_map(|(fid, session_id)| (*session_id == id).then_some(*fid))
+                                    .collect();
+                                for fid in stale_file_ids {
+                                    sftp_file_sessions.remove(&fid);
+                                    sftp_files.remove(&fid);
+                                }
                                 let _ = reply_tx.send(r#"{"success":true}"#.to_string());
                             }
                             "resize" => {
@@ -580,8 +1174,8 @@ fn main() {
                                     let id: u32 = match parts[0].parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid id"}"#.to_string()); continue; } };
                                     let cols: u32 = match parts[1].parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid cols"}"#.to_string()); continue; } };
                                     let rows: u32 = match parts[2].parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid rows"}"#.to_string()); continue; } };
-                                    if let Some(ch) = write_halves.get_mut(&id) {
-                                        let _ = ch.window_change(cols, rows, 0, 0).await;
+                                    if let Some(tx) = ssh_writers.lock().unwrap().get(&id).cloned() {
+                                        let _ = tx.try_send(SshChannelCommand::Resize(cols, rows));
                                     }
                                     let _ = reply_tx.send(r#"{"success":true}"#.to_string());
                                 } else { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid format"}"#.to_string()); }
@@ -595,12 +1189,21 @@ fn main() {
                                             let channel = session.channel_open_session().await.map_err(|e| format!("channel: {}", e))?;
                                             channel.exec(true, parts[1]).await.map_err(|e| format!("exec: {}", e))?;
                                             let (mut read_half, _) = channel.split();
-                                            let mut output = vec![];
+                                            let mut output = Vec::with_capacity(64 * 1024);
+                                            let mut truncated = false;
                                             loop {
                                                 tokio::select! {
                                                     msg = read_half.wait() => {
                                                         match msg {
-                                                            Some(ChannelMsg::Data { data }) => output.extend_from_slice(&data),
+                                                            Some(ChannelMsg::Data { data }) => {
+                                                                let remaining = MAX_EXEC_OUTPUT_BYTES.saturating_sub(output.len());
+                                                                if data.len() > remaining {
+                                                                    output.extend_from_slice(&data[..remaining]);
+                                                                    truncated = true;
+                                                                    break;
+                                                                }
+                                                                output.extend_from_slice(&data);
+                                                            }
                                                             Some(ChannelMsg::Eof) | None => break,
                                                             _ => {}
                                                         }
@@ -608,7 +1211,11 @@ fn main() {
                                                     _ = tokio::time::sleep(Duration::from_secs(5)) => break,
                                                 }
                                             }
-                                            Ok::<_, String>(String::from_utf8_lossy(&output).to_string())
+                                            let mut result = String::from_utf8_lossy(&output).to_string();
+                                            if truncated {
+                                                result.push_str("\n[output truncated at 8 MiB]");
+                                            }
+                                            Ok::<_, String>(result)
                                         }.await {
                                             Ok(out) => { let _ = reply_tx.send(serde_json::json!({"success": true, "result": out}).to_string()); }
                                             Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
@@ -659,6 +1266,7 @@ fn main() {
                                                 let fid = sftp_file_counter;
                                                 sftp_file_counter += 1;
                                                 sftp_files.insert(fid, file);
+                                                sftp_file_sessions.insert(fid, id);
                                                 let _ = reply_tx.send(serde_json::json!({"success": true, "handle": fid}).to_string());
                                             }
                                             Err(e) => { let _ = reply_tx.send(format!(r#"{{"success":false,"error":"{}"}}"#, e)); }
@@ -708,52 +1316,90 @@ fn main() {
                             "sftp_close_file" => {
                                 let fid: u32 = match data.parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid handle"}"#.to_string()); continue; } };
                                 sftp_files.remove(&fid);
+                                sftp_file_sessions.remove(&fid);
                                 let _ = reply_tx.send(r#"{"success":true}"#.to_string());
                             }
                             "sftp_download" => {
-                                let parts: Vec<&str> = data.splitn(3, ':').collect();
-                                if parts.len() == 3 {
+                                // Encode path fields so colons do not break framing
+                                let parts: Vec<&str> = data.splitn(4, ':').collect();
+                                if parts.len() == 4 {
                                     let id: u32 = match parts[0].parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid id"}"#.to_string()); continue; } };
-                                    let remote_path = parts[1].to_string();
-                                    let save_path = parts[2].to_string();
-                                    let _ = reply_tx.send(r#"{"success":true}"#.to_string());
+                                    let transfer_id = match decode_command_field(parts[1], "transfer id") {
+                                        Ok(v) => v,
+                                        Err(e) => { let _ = reply_tx.send(serde_json::json!({"success": false, "error": e}).to_string()); continue; }
+                                    };
+                                    let remote_path = match decode_command_field(parts[2], "remote path") {
+                                        Ok(v) => v,
+                                        Err(e) => { let _ = reply_tx.send(serde_json::json!({"success": false, "error": e}).to_string()); continue; }
+                                    };
+                                    let save_path = match decode_command_field(parts[3], "local path") {
+                                        Ok(v) => v,
+                                        Err(e) => { let _ = reply_tx.send(serde_json::json!({"success": false, "error": e}).to_string()); continue; }
+                                    };
                                     let ipc = ipc_tx_for_ssh_clone.clone();
                                     if let Some(sftp) = sftp_sessions.get(&id) {
-                                        let sftp_c = Arc::clone(sftp);
-                                        // Open first handle to get file info
-                                        match sftp_c.open(&remote_path).await {
-                                        Err(e) => {
-                                            let _ = ipc.send(IpcOutMsg { script: format!("window.__rterm_dlProgress && window.__rterm_dlProgress({}, 100, {{error:true}})", serde_json::to_string(&format!("Download failed: {}", e)).unwrap_or_default()) });
+                                        if active_sftp_transfers
+                                            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                                                (count < MAX_ACTIVE_SFTP_TRANSFERS).then_some(count + 1)
+                                            })
+                                            .is_err()
+                                        {
+                                            let _ = reply_tx.send(r#"{"success":false,"error":"too many active SFTP transfers"}"#.to_string());
+                                            continue;
                                         }
-                                        Ok(file) => {
-                                            let (raw, _) = file.raw();
-                                            let raw_session = raw;
-                                            let meta = file.metadata().await.ok();
-                                            let file_size = meta.map(|m| m.len()).unwrap_or(0);
-                                            
-                                            tokio::spawn(async move {
-                                                use tokio::io::AsyncWriteExt;
-                                                
-                                                if file_size == 0 {
-                                                    let _ = ipc.send(IpcOutMsg { script: "window.__rterm_dlProgress && window.__rterm_dlProgress('Download failed: unknown file size', 100, {error:true})".to_string() });
-                                                    return;
-                                                }
-                                                
-                                                use std::sync::atomic::{AtomicU64, Ordering};
-                                                use std::sync::Arc;
-                                                
-                                                let num_parts = 6usize;
-                                                let part_size = (file_size as usize + num_parts - 1) / num_parts;
-                                                let start_time = std::time::Instant::now();
-                                                let progress = Arc::new(AtomicU64::new(0));
-                                                
+                                        let _ = reply_tx.send(r#"{"success":true}"#.to_string());
+                                        let sftp_c = Arc::clone(sftp);
+                                        let active_guard = ActiveTransferGuard(active_sftp_transfers.clone());
+                                        // Spawn transfers without blocking the command loop
+                                        tokio::spawn(async move {
+                                            let _active_guard = active_guard;
+                                            // Read metadata before ranged transfer
+                                            match sftp_c.metadata(&remote_path).await {
+                                            Err(e) => {
+                                                let _ = ipc.send(transfer_progress_message(&transfer_id, &format!("Download failed: {}", e), 100.0, false, true));
+                                            }
+                                            Ok(meta) => {
+                                                let file_size = meta.len();
                                                 let fname = std::path::Path::new(&remote_path)
                                                     .file_name().map(|n| n.to_string_lossy().to_string())
                                                     .unwrap_or_else(|| remote_path.clone());
+
+                                                if file_size == 0 {
+                                                    let path = std::path::Path::new(&save_path);
+                                                    let result = if let Some(parent) = path.parent() {
+                                                        tokio::fs::create_dir_all(parent).await.ok();
+                                                        tokio::fs::File::create(path).await.map(|_| ())
+                                                    } else {
+                                                        tokio::fs::File::create(path).await.map(|_| ())
+                                                    };
+                                                    match result {
+                                                        Ok(_) => { let _ = ipc.send(transfer_progress_message(&transfer_id, &format!("Saved {} (empty file)", fname), 100.0, true, false)); }
+                                                        Err(e) => { let _ = ipc.send(transfer_progress_message(&transfer_id, &format!("Download failed: {}", e), 100.0, false, true)); }
+                                                    }
+                                                    return;
+                                                }
+
+                                                let save_file = std::path::Path::new(&save_path);
+                                                if let Some(parent) = save_file.parent() {
+                                                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                                                        let _ = ipc.send(transfer_progress_message(&transfer_id, &format!("Download failed: {}", e), 100.0, false, true));
+                                                        return;
+                                                    }
+                                                }
+
+                                                use std::sync::atomic::{AtomicU64, Ordering};
+                                                use std::sync::Arc;
+
+                                                let num_parts = 6usize;
+                                                let part_size = (file_size + num_parts as u64 - 1) / num_parts as u64;
+                                                let start_time = std::time::Instant::now();
+                                                let progress = Arc::new(AtomicU64::new(0));
+
                                                 let prog = progress.clone();
                                                 let ipc_p = ipc.clone();
                                                 let total_sz = file_size;
                                                 let fname_p = fname.clone();
+                                                let transfer_id_p = transfer_id.clone();
                                                 let progress_task = tokio::spawn(async move {
                                                     loop {
                                                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -763,71 +1409,122 @@ fn main() {
                                                         let mb = done as f64 / (1024.0*1024.0);
                                                         let total_mb = total_sz as f64 / (1024.0*1024.0);
                                                         let pct = done as f64 * 100.0 / total_sz as f64;
-                                                        let text = serde_json::to_string(&format!("{}: {:.1}MB / {:.1}MB @ {:.1}MB/s", fname_p, mb, total_mb, speed)).unwrap_or_default();
-                                                        let _ = ipc_p.send(IpcOutMsg {
-                                                            script: format!("window.__rterm_dlProgress && window.__rterm_dlProgress({}, {:.1})", text, pct),
-                                                        });
+                                                        let text = format!("{}: {:.1}MB / {:.1}MB @ {:.1}MB/s", fname_p, mb, total_mb, speed);
+                                                        let _ = ipc_p.send(transfer_progress_message(&transfer_id_p, &text, pct, false, false));
                                                     }
                                                 });
-                                                
+
                                                 let mut part_handles = Vec::new();
                                                 for pi in 0..num_parts {
-                                                    let rs = raw_session.clone();
+                                                    let sftp_part = Arc::clone(&sftp_c);
                                                     let p = remote_path.clone();
-                                                    let sp = save_path.clone() + ".part" + &pi.to_string();
-                                                    let begin = pi * part_size;
-                                                    let end = ((pi + 1) * part_size).min(file_size as usize);
+                                                    let sp = format!("{}.part{}", save_path, pi);
+                                                    let begin = pi as u64 * part_size;
+                                                    let end = ((pi as u64 + 1) * part_size).min(file_size);
                                                     let prog = progress.clone();
-                                                    
+
                                                     part_handles.push(tokio::spawn(async move {
-                                                        if begin >= end { return; }
-                                                        if let Ok(h) = rs.open(&p, russh_sftp::protocol::OpenFlags::READ, Default::default()).await {
-                                                            let handle_str = h.handle;
-                                                            let mut pos = begin as u64;
-                                                            if let Ok(mut out) = tokio::fs::File::create(&sp).await {
-                                                                while pos < end as u64 {
-                                                                    let remaining = (end as u64 - pos).min(262144);
-                                                                    match rs.read(&handle_str, pos, remaining as u32).await {
-                                                                        Ok(data) if data.data.is_empty() => break,
-                                                                        Ok(data) => {
-                                                                            if out.write_all(&data.data).await.is_err() { break; }
-                                                                            pos += data.data.len() as u64;
-                                                                            prog.fetch_add(data.data.len() as u64, Ordering::Relaxed);
-                                                                        }
-                                                                        Err(_) => break,
-                                                                    }
+                                                        let mut out = tokio::fs::File::create(&sp)
+                                                            .await
+                                                            .map_err(|e| format!("create part {}: {}", pi, e))?;
+                                                        if begin >= end {
+                                                            return Ok::<(), String>(());
+                                                        }
+
+                                                        let mut remote_file = sftp_part
+                                                            .open(&p)
+                                                            .await
+                                                            .map_err(|e| format!("open part {}: {}", pi, e))?;
+                                                        remote_file
+                                                            .seek(std::io::SeekFrom::Start(begin))
+                                                            .await
+                                                            .map_err(|e| format!("seek part {}: {}", pi, e))?;
+
+                                                        let mut buf = vec![0u8; 262144];
+                                                        let mut pos = begin;
+                                                        while pos < end {
+                                                            let limit = ((end - pos) as usize).min(buf.len());
+                                                            let n = remote_file
+                                                                .read(&mut buf[..limit])
+                                                                .await
+                                                                .map_err(|e| format!("read part {}: {}", pi, e))?;
+                                                            if n == 0 {
+                                                                return Err(format!("read part {}: unexpected end of file", pi));
+                                                            }
+                                                            out.write_all(&buf[..n])
+                                                                .await
+                                                                .map_err(|e| format!("write part {}: {}", pi, e))?;
+                                                            pos += n as u64;
+                                                            prog.fetch_add(n as u64, Ordering::Relaxed);
+                                                        }
+                                                        Ok::<(), String>(())
+                                                    }));
+                                                }
+
+                                                let mut part_error = None;
+                                                for h in part_handles {
+                                                    match h.await {
+                                                        Ok(Ok(())) => {}
+                                                        Ok(Err(e)) => {
+                                                            part_error.get_or_insert(e);
+                                                        }
+                                                        Err(e) => { part_error.get_or_insert(format!("download task failed: {}", e)); }
+                                                    };
+                                                }
+                                                progress_task.abort();
+
+                                                if let Some(error) = part_error {
+                                                    for pi in 0..num_parts {
+                                                        let _ = tokio::fs::remove_file(format!("{}.part{}", save_path, pi)).await;
+                                                    }
+                                                    let _ = ipc.send(transfer_progress_message(&transfer_id, &format!("Download failed: {}", error), 100.0, false, true));
+                                                    return;
+                                                }
+
+                                                // Merge parts
+                                                let merge_result = match tokio::fs::File::create(&save_path).await {
+                                                    Err(e) => Err(format!("create destination: {}", e)),
+                                                    Ok(mut out) => {
+                                                        let mut result = Ok(());
+                                                    for pi in 0..num_parts {
+                                                        let pp = format!("{}.part{}", save_path, pi);
+                                                        match tokio::fs::File::open(&pp).await {
+                                                            Err(e) => {
+                                                                result = Err(format!("open downloaded part {}: {}", pi, e));
+                                                                break;
+                                                            }
+                                                            Ok(mut part) => {
+                                                                if let Err(e) = tokio::io::copy(&mut part, &mut out).await {
+                                                                    result = Err(format!("merge downloaded part {}: {}", pi, e));
+                                                                    break;
                                                                 }
                                                             }
                                                         }
-                                                    }));
-                                                }
-                                                
-                                                for h in part_handles { let _ = h.await; }
-                                                progress_task.abort();
-                                                
-                                                // Merge parts
-                                                if let Ok(mut out) = tokio::fs::File::create(&save_path).await {
-                                                    for pi in 0..num_parts {
-                                                        let pp = save_path.clone() + ".part" + &pi.to_string();
-                                                        if let Ok(mut part) = tokio::fs::File::open(&pp).await {
-                                                            let _ = tokio::io::copy(&mut part, &mut out).await;
-                                                        }
-                                                        let _ = tokio::fs::remove_file(&pp).await;
                                                     }
+                                                    result
                                                 }
-                                                
+                                                };
+                                                for pi in 0..num_parts {
+                                                    let _ = tokio::fs::remove_file(format!("{}.part{}", save_path, pi)).await;
+                                                }
+                                                if let Err(error) = merge_result {
+                                                    let _ = ipc.send(transfer_progress_message(&transfer_id, &format!("Download failed: {}", error), 100.0, false, true));
+                                                    return;
+                                                }
+
                                                 let elapsed = start_time.elapsed().as_secs_f64();
                                                 let speed = file_size as f64 / elapsed.max(0.1) / (1024.0*1024.0);
                                                 let downloaded = progress.load(Ordering::Relaxed);
-                                                let script = if downloaded >= file_size {
-                                                    format!("window.__rterm_dlProgress && window.__rterm_dlProgress({}, 100, {{done:true}})", serde_json::to_string(&format!("Saved {}: {:.1}MB ({:.1}MB/s)", fname, file_size as f64/(1024.0*1024.0), speed)).unwrap_or_default())
+                                                if downloaded >= file_size {
+                                                    let _ = ipc.send(transfer_progress_message(&transfer_id, &format!("Saved {}: {:.1}MB ({:.1}MB/s)", fname, file_size as f64/(1024.0*1024.0), speed), 100.0, true, false));
                                                 } else {
-                                                    format!("window.__rterm_dlProgress && window.__rterm_dlProgress({}, {:.1}, {{error:true}})", serde_json::to_string(&format!("Download incomplete {}: {:.1}MB of {:.1}MB", fname, downloaded as f64/(1024.0*1024.0), file_size as f64/(1024.0*1024.0))).unwrap_or_default(), downloaded as f64 * 100.0 / file_size as f64)
-                                                };
-                                                let _ = ipc.send(IpcOutMsg { script });
-                                            });
-                                        }
-                                        }
+                                                    let _ = ipc.send(transfer_progress_message(&transfer_id, &format!("Download incomplete {}: {:.1}MB of {:.1}MB", fname, downloaded as f64/(1024.0*1024.0), file_size as f64/(1024.0*1024.0)), downloaded as f64 * 100.0 / file_size as f64, false, true));
+                                                }
+                                            }
+                                            }
+                                        });
+                                    } else {
+                                        let _ = reply_tx.send(r#"{"success":false,"error":"SFTP not open"}"#.to_string());
                                     }
                                 } else { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid format"}"#.to_string()); }
                             }
@@ -835,8 +1532,14 @@ fn main() {
                                 let parts: Vec<&str> = data.splitn(3, ':').collect();
                                 if parts.len() == 3 {
                                     let id: u32 = match parts[0].parse() { Ok(i) => i, Err(_) => { let _ = reply_tx.send(r#"{"success":false,"error":"Invalid id"}"#.to_string()); continue; } };
-                                    let local_path = parts[1].to_string();
-                                    let remote_path = parts[2].to_string();
+                                    let local_path = match decode_command_field(parts[1], "local path") {
+                                        Ok(v) => v,
+                                        Err(e) => { let _ = reply_tx.send(serde_json::json!({"success": false, "error": e}).to_string()); continue; }
+                                    };
+                                    let remote_path = match decode_command_field(parts[2], "remote path") {
+                                        Ok(v) => v,
+                                        Err(e) => { let _ = reply_tx.send(serde_json::json!({"success": false, "error": e}).to_string()); continue; }
+                                    };
                                     let _ = reply_tx.send(r#"{"success":true}"#.to_string());
                                     
                                     let ipc = ipc_tx_for_ssh_clone.clone();
@@ -844,8 +1547,8 @@ fn main() {
                                         let sftp_c = Arc::clone(sftp);
                                         tokio::spawn(async move {
                                             use tokio::io::AsyncReadExt;
-                                            let dl_err = |ipc: &mpsc::Sender<IpcOutMsg>, msg: String| {
-                                                let _ = ipc.send(IpcOutMsg { script: format!("window.__rterm_dlProgress && window.__rterm_dlProgress({}, 100, {{error:true}})", serde_json::to_string(&msg).unwrap_or_default()) });
+                                            let dl_err = |ipc: &IpcBus, msg: String| {
+                                                ipc.send(IpcOutMsg::Script(format!("window.__rterm_dlProgress && window.__rterm_dlProgress({}, 100, {{error:true}})", serde_json::to_string(&msg).unwrap_or_default())));
                                             };
                                             let total = tokio::fs::metadata(&local_path).await.map(|m| m.len()).unwrap_or(0);
                                             match tokio::fs::File::open(&local_path).await {
@@ -857,27 +1560,28 @@ fn main() {
                                                         let mut failed = false;
                                                         let mut buf = vec![0u8; 262144];
                                                         let start_time = std::time::Instant::now();
+                                                        // Throttle upload progress scripts
+                                                        let mut last_progress = start_time - Duration::from_secs(1);
                                                         while let Ok(n) = local_file.read(&mut buf).await {
                                                             if n == 0 { break; }
                                                             if remote_file.write_all(&buf[..n]).await.is_err() { failed = true; break; }
                                                             uploaded += n as u64;
-                                                            let speed = uploaded as f64 / start_time.elapsed().as_secs_f64().max(0.1) / (1024.0*1024.0);
-                                                            let mb = uploaded as f64 / (1024.0*1024.0);
-                                                            let pct = if total > 0 { uploaded as f64 * 100.0 / total as f64 } else { 0.0 };
-                                                            let _ = ipc.send(IpcOutMsg {
-                                                                script: format!("window.__rterm_dlProgress && window.__rterm_dlProgress('Uploading {:.1}MB / {:.1}MB @ {:.1}MB/s', {:.1})", mb, total as f64/(1024.0*1024.0), speed, pct),
-                                                            });
+                                                            if last_progress.elapsed() >= Duration::from_millis(100) || (total > 0 && uploaded >= total) {
+                                                                last_progress = std::time::Instant::now();
+                                                                let speed = uploaded as f64 / start_time.elapsed().as_secs_f64().max(0.1) / (1024.0*1024.0);
+                                                                let mb = uploaded as f64 / (1024.0*1024.0);
+                                                                let pct = if total > 0 { uploaded as f64 * 100.0 / total as f64 } else { 0.0 };
+                                                                let _ = ipc.send(IpcOutMsg::Script(format!("window.__rterm_dlProgress && window.__rterm_dlProgress('Uploading {:.1}MB / {:.1}MB @ {:.1}MB/s', {:.1})", mb, total as f64/(1024.0*1024.0), speed, pct)));
+                                                            }
                                                         }
                                                         if failed || (total > 0 && uploaded < total) {
                                                             dl_err(&ipc, format!("Upload incomplete: {:.1}MB of {:.1}MB", uploaded as f64/(1024.0*1024.0), total as f64/(1024.0*1024.0)));
                                                         } else {
-                                                            let _ = ipc.send(IpcOutMsg {
-                                                                script: format!("window.__rterm_dlProgress && window.__rterm_dlProgress('Uploaded {:.1}MB', 100, {{done:true}})", uploaded as f64/(1024.0*1024.0)),
-                                                            });
+                                                            let _ = ipc.send(IpcOutMsg::Script(format!("window.__rterm_dlProgress && window.__rterm_dlProgress('Uploaded {:.1}MB', 100, {{done:true}})", uploaded as f64/(1024.0*1024.0))));
                                                         }
                                                         let remote_dir = std::path::Path::new(&remote_path).parent().and_then(|p| p.to_str()).unwrap_or("/");
                                                         let dir_json = serde_json::to_string(remote_dir).unwrap_or_else(|_| "\"/\"".to_string());
-                                                        let _ = ipc.send(IpcOutMsg { script: format!("loadSftpDir({})", dir_json) });
+                                                        let _ = ipc.send(IpcOutMsg::Script(format!("loadSftpDir({})", dir_json)));
                                                     }
                                                 }
                                             }
@@ -944,7 +1648,7 @@ fn main() {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let config: SshConfig = match serde_json::from_value(args.clone()) { Ok(c) => c, Err(_) => return };
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("connect:{}", serde_json::to_string(&config).unwrap()), reply_tx)).ok();
+                    queue_backend_command(&ssh_tx_clone, format!("connect:{}", serde_json::to_string(&config).unwrap()), reply_tx);
                     let ipc1 = ipc_tx_for_handler.clone();
                     let rid1 = rid.clone();
                     std::thread::spawn(move || {
@@ -955,14 +1659,14 @@ fn main() {
                         let resp_val: serde_json::Value = serde_json::from_str(&resp).unwrap_or_default();
                         let mut resp_obj = resp_val;
                         if let Some(ref r) = rid1 { resp_obj["_rid"] = r.clone(); }
-                        let _ = ipc1.send(IpcOutMsg { script: format!("window.__rterm_resp && window.__rterm_resp({})", serde_json::to_string(&resp_obj).unwrap_or_default()) });
+                        let _ = ipc1.send(IpcOutMsg::Script(format!("window.__rterm_resp && window.__rterm_resp({})", serde_json::to_string(&resp_obj).unwrap_or_default())));
                     });
                 }
                 "ssh_shell" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let id = match args.get("id").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("shell:{}", id), reply_tx)).ok();
+                    queue_backend_command(&ssh_tx_clone, format!("shell:{}", id), reply_tx);
                     let ipc2 = ipc_tx_for_handler.clone();
                     let rid2 = rid.clone();
                     std::thread::spawn(move || {
@@ -973,7 +1677,7 @@ fn main() {
                         let resp_val: serde_json::Value = serde_json::from_str(&resp).unwrap_or_default();
                         let mut resp_obj = resp_val;
                         if let Some(ref r) = rid2 { resp_obj["_rid"] = r.clone(); }
-                        let _ = ipc2.send(IpcOutMsg { script: format!("window.__rterm_resp && window.__rterm_resp({})", serde_json::to_string(&resp_obj).unwrap_or_default()) });
+                        let _ = ipc2.send(IpcOutMsg::Script(format!("window.__rterm_resp && window.__rterm_resp({})", serde_json::to_string(&resp_obj).unwrap_or_default())));
                     });
                 }
                 "ssh_write" => {
@@ -986,27 +1690,48 @@ fn main() {
                         None => return,
                     };
                     let data = args.get("data").and_then(|v| v.as_str()).unwrap_or("");
-                    let data_owned = data.to_string();
-                    let cmd = format!("write:{}:{}", id, data_owned);
-                    let _ = ssh_tx_clone.send((cmd, noreply_tx.clone()));
+                    let direct_writer = ssh_writers_for_handler
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .cloned();
+                    if let Some(writer) = direct_writer {
+                        // Send shell input through bounded writer queue
+                        let _ = writer.try_send(SshChannelCommand::Data(data.as_bytes().to_vec()));
+                    } else {
+                        let cmd = format!("write:{}:{}", id, data);
+                        queue_backend_command(&ssh_tx_clone, cmd, noreply_tx.clone());
+                    }
                 }
                 "ssh_resize" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let id: u32 = match args.get("id").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
                     let cols: u32 = args.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u32;
                     let rows: u32 = args.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u32;
-                    let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("resize:{}:{}:{}", id, cols, rows), reply_tx)).ok();
-                    match reply_rx.recv_timeout(Duration::from_secs(1)) {
-                        Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
-                        Err(_) => send_resp(&serde_json::json!({"success": true})),
+                    let direct_writer = ssh_writers_for_handler
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .cloned();
+                    if let Some(writer) = direct_writer {
+                        let success = writer
+                            .try_send(SshChannelCommand::Resize(cols, rows))
+                            .is_ok();
+                        send_resp(&serde_json::json!({"success": success}));
+                    } else {
+                        let (reply_tx, reply_rx) = mpsc::channel();
+                        queue_backend_command(&ssh_tx_clone, format!("resize:{}:{}:{}", id, cols, rows), reply_tx);
+                        match reply_rx.recv_timeout(Duration::from_secs(1)) {
+                            Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
+                            Err(_) => send_resp(&serde_json::json!({"success": true})),
+                        }
                     }
                 }
                 "ssh_disconnect" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let id = match args.get("id").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("disconnect:{}", id), reply_tx)).ok();
+                    queue_backend_command(&ssh_tx_clone, format!("disconnect:{}", id), reply_tx);
                     match reply_rx.recv_timeout(Duration::from_secs(1)) {
                         Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
                         Err(_) => send_resp(&serde_json::json!({"success": true})),
@@ -1015,7 +1740,7 @@ fn main() {
                 "telnet_connect" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("telnet_connect:{}", serde_json::to_string(&args).unwrap()), reply_tx)).ok();
+                    queue_backend_command(&ssh_tx_clone, format!("telnet_connect:{}", serde_json::to_string(&args).unwrap()), reply_tx);
                     let ipc = ipc_tx_for_handler.clone();
                     let rid_clone = rid.clone();
                     std::thread::spawn(move || {
@@ -1025,13 +1750,13 @@ fn main() {
                         };
                         let mut resp_val: serde_json::Value = serde_json::from_str(&resp).unwrap_or_default();
                         if let Some(ref r) = rid_clone { resp_val["_rid"] = r.clone(); }
-                        let _ = ipc.send(IpcOutMsg { script: format!("window.__rterm_resp && window.__rterm_resp({})", serde_json::to_string(&resp_val).unwrap_or_default()) });
+                        let _ = ipc.send(IpcOutMsg::Script(format!("window.__rterm_resp && window.__rterm_resp({})", serde_json::to_string(&resp_val).unwrap_or_default())));
                     });
                 }
                 "serial_connect" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("serial_connect:{}", serde_json::to_string(&args).unwrap()), reply_tx)).ok();
+                    queue_backend_command(&ssh_tx_clone, format!("serial_connect:{}", serde_json::to_string(&args).unwrap()), reply_tx);
                     let ipc = ipc_tx_for_handler.clone();
                     let rid_clone = rid.clone();
                     std::thread::spawn(move || {
@@ -1041,14 +1766,14 @@ fn main() {
                         };
                         let mut resp_val: serde_json::Value = serde_json::from_str(&resp).unwrap_or_default();
                         if let Some(ref r) = rid_clone { resp_val["_rid"] = r.clone(); }
-                        let _ = ipc.send(IpcOutMsg { script: format!("window.__rterm_resp && window.__rterm_resp({})", serde_json::to_string(&resp_val).unwrap_or_default()) });
+                        let _ = ipc.send(IpcOutMsg::Script(format!("window.__rterm_resp && window.__rterm_resp({})", serde_json::to_string(&resp_val).unwrap_or_default())));
                     });
                 }
                 "sftp_open" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let id = match args.get("id").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("sftp_open:{}", id), reply_tx)).ok();
+                    queue_backend_command(&ssh_tx_clone, format!("sftp_open:{}", id), reply_tx);
                     match reply_rx.recv_timeout(Duration::from_secs(10)) {
                         Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
                         Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
@@ -1059,7 +1784,7 @@ fn main() {
                     let id = match args.get("id").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
                     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("sftp_list:{}:{}", id, path), reply_tx)).ok();
+                    queue_backend_command(&ssh_tx_clone, format!("sftp_list:{}:{}", id, path), reply_tx);
                     match reply_rx.recv_timeout(Duration::from_secs(10)) {
                         Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
                         Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
@@ -1070,7 +1795,7 @@ fn main() {
                     let id = match args.get("id").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
                     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("sftp_open_file:{}:{}", id, path), reply_tx)).ok();
+                    queue_backend_command(&ssh_tx_clone, format!("sftp_open_file:{}:{}", id, path), reply_tx);
                     match reply_rx.recv_timeout(Duration::from_secs(10)) {
                         Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
                         Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
@@ -1084,7 +1809,7 @@ fn main() {
                     let old_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, old_path.as_bytes());
                     let new_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, new_path.as_bytes());
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("sftp_rename_b64:{}:{}:{}", id, old_b64, new_b64), reply_tx)).ok();
+                    queue_backend_command(&ssh_tx_clone, format!("sftp_rename_b64:{}:{}:{}", id, old_b64, new_b64), reply_tx);
                     match reply_rx.recv_timeout(Duration::from_secs(10)) {
                         Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
                         Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
@@ -1095,7 +1820,7 @@ fn main() {
                     let handle = match args.get("handle").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
                     let size: u32 = args.get("size").and_then(|v| v.as_u64()).unwrap_or(65536) as u32;
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("sftp_read:{}:{}:{}", handle, size, ""), reply_tx)).ok();
+                    queue_backend_command(&ssh_tx_clone, format!("sftp_read:{}:{}:{}", handle, size, ""), reply_tx);
                     match reply_rx.recv_timeout(Duration::from_secs(30)) {
                         Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
                         Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
@@ -1105,7 +1830,7 @@ fn main() {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let handle = match args.get("handle").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("sftp_close_file:{}", handle), reply_tx)).ok();
+                    queue_backend_command(&ssh_tx_clone, format!("sftp_close_file:{}", handle), reply_tx);
                     match reply_rx.recv_timeout(Duration::from_secs(5)) {
                         Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
                         Err(_) => send_resp(&serde_json::json!({"success": true})),
@@ -1116,16 +1841,26 @@ fn main() {
                     let id: u32 = match args.get("id").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
                     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let filename = args.get("filename").and_then(|v| v.as_str()).unwrap_or("download").to_string();
-                    
+                    let transfer_id = args.get("transfer_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                        .unwrap_or("download")
+                        .to_string();
                     let save_dir = args.get("save_path").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| {
-                            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                            home + "/Downloads"
-                        });
-                    let save_path = save_dir + "/" + &filename;
+                        .map(expand_local_path)
+                        .unwrap_or_else(default_download_dir);
+                    let safe_filename = std::path::Path::new(&filename)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or("download");
+                    let save_path = save_dir.join(safe_filename).to_string_lossy().to_string();
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("sftp_download:{}:{}:{}", id, path, save_path), reply_tx)).ok();
+                    queue_backend_command(&ssh_tx_clone, format!(
+                        "sftp_download:{}:{}:{}:{}",
+                        id,
+                        encode_command_field(&transfer_id),
+                        encode_command_field(&path),
+                        encode_command_field(&save_path)
+                    ), reply_tx);
                     match reply_rx.recv_timeout(Duration::from_secs(300)) {
                         Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
                         Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
@@ -1137,7 +1872,12 @@ fn main() {
                     let local_path = args.get("local_path").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let remote_path = args.get("remote_path").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("sftp_upload:{}:{}:{}", id, local_path, remote_path), reply_tx)).ok();
+                    queue_backend_command(&ssh_tx_clone, format!(
+                        "sftp_upload:{}:{}:{}",
+                        id,
+                        encode_command_field(&local_path),
+                        encode_command_field(&remote_path)
+                    ), reply_tx);
                     match reply_rx.recv_timeout(Duration::from_secs(5)) {
                         Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
                         Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
@@ -1148,28 +1888,16 @@ fn main() {
                     let id = match args.get("id").and_then(|v| v.as_u64()) { Some(i) => i as u32, None => return };
                     let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    ssh_tx_clone.send((format!("exec:{}:{}", id, cmd), reply_tx)).ok();
+                    queue_backend_command(&ssh_tx_clone, format!("exec:{}:{}", id, cmd), reply_tx);
                     match reply_rx.recv_timeout(Duration::from_secs(10)) {
                         Ok(resp) => send_resp(&serde_json::from_str(&resp).unwrap_or(serde_json::json!({"success": false}))),
                         Err(_) => send_resp(&serde_json::json!({"success": false, "error": "timeout"})),
                     }
                 }
-                                "local_list" => {
+                "local_list" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
                     let dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-                    // Expand ~ to home directory
-                    let expanded = if dir.starts_with("~") {
-                        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                        dir.replacen('~', &home, 1)
-                    } else {
-                        dir.to_string()
-                    };
-                    // Handle relative paths - use CWD
-                    let path = if expanded.starts_with('/') {
-                        std::path::PathBuf::from(&expanded)
-                    } else {
-                        std::env::current_dir().unwrap_or_default().join(&expanded)
-                    };
+                    let path = expand_local_path(dir);
                     match std::fs::read_dir(&path) {
                         Ok(entries) => {
                             let mut files = Vec::new();
@@ -1192,7 +1920,12 @@ fn main() {
                                 let bd = b.get("dir").and_then(|v| v.as_bool()).unwrap_or(false);
                                 bd.cmp(&ad).then(a.get("name").and_then(|v| v.as_str()).unwrap_or("").cmp(b.get("name").and_then(|v| v.as_str()).unwrap_or("")))
                             });
-                            send_resp(&serde_json::json!({"success": true, "result": files, "path": dir}));
+                            send_resp(&serde_json::json!({
+                                "success": true,
+                                "result": files,
+                                "path": path.to_string_lossy(),
+                                "home": home_dir().to_string_lossy()
+                            }));
                         }
                         Err(e) => send_resp(&serde_json::json!({"success": false, "error": e.to_string()})),
                     }
@@ -1205,22 +1938,7 @@ fn main() {
                         send_resp(&serde_json::json!({"success": false, "error": "empty path"}));
                         return;
                     }
-                    let expanded = if path.starts_with("~") {
-                        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                        path.replacen('~', &home, 1)
-                    } else {
-                        path.to_string()
-                    };
-
-                    // Resolve relative paths against CWD and normalize separators.
-                    let path_buf = if expanded.starts_with('/') {
-                        std::path::PathBuf::from(&expanded)
-                    } else {
-                        std::env::current_dir().unwrap_or_default().join(&expanded)
-                    };
-                    let normalized = std::path::PathBuf::from(
-                        path_buf.to_string_lossy().replace("//", "/")
-                    );
+                    let normalized = expand_local_path(path);
 
                     let result = if is_dir {
                         std::fs::remove_dir_all(&normalized).or_else(|e| {
@@ -1257,19 +1975,8 @@ fn main() {
                         send_resp(&serde_json::json!({"success": false, "error": "empty path"}));
                         return;
                     }
-                    let expand = |p: &str| -> std::path::PathBuf {
-                        let expanded = if p.starts_with("~") {
-                            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                            p.replacen('~', &home, 1)
-                        } else { p.to_string() };
-                        if expanded.starts_with('/') {
-                            std::path::PathBuf::from(expanded)
-                        } else {
-                            std::env::current_dir().unwrap_or_default().join(expanded)
-                        }
-                    };
-                    let from = expand(from_path);
-                    let to = expand(to_path);
+                    let from = expand_local_path(from_path);
+                    let to = expand_local_path(to_path);
                     match std::fs::rename(&from, &to) {
                         Ok(_) => send_resp(&serde_json::json!({"success": true})),
                         Err(e) => send_resp(&serde_json::json!({"success": false, "error": e.to_string()})),
@@ -1277,24 +1984,25 @@ fn main() {
                 }
                 "local_exec" => {
                     let args = match parsed.get("args") { Some(a) => a, None => return };
-                    let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                    let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let cols: u16 = args.get("cols").and_then(|v| v.as_u64()).map(|v| v as u16).unwrap_or(80);
-                    let resp = match std::process::Command::new("script")
-                        .arg("-q").arg("/dev/null")
-                        .arg("sh").arg("-c").arg(cmd)
-                        .env("COLUMNS", cols.to_string())
-                        .env("LINES", "40")
-                        .env("TERM", "xterm-256color")
-                        .output() {
-                        Ok(o) => {
-                            let out = String::from_utf8_lossy(&o.stdout);
-                            // script prepends shell output marker, strip it
-                            let clean = out.trim_start_matches(|c| c == '\r' || c == '\n');
-                            serde_json::json!({"success": true, "result": clean})
+                    let ipc_local = ipc_tx_for_handler.clone();
+                    let rid_local = rid.clone();
+                    std::thread::spawn(move || {
+                        let resp = match run_local_command(&cmd, cols) {
+                            Ok(output) => serde_json::json!({"success": true, "result": output}),
+                            Err(e) => serde_json::json!({"success": false, "error": e}),
+                        };
+                        let mut resp_obj = resp;
+                        if let Some(rid_val) = rid_local {
+                            resp_obj["_rid"] = rid_val;
                         }
-                        Err(e) => serde_json::json!({"success": false, "error": e.to_string()}),
-                    };
-                    send_resp(&resp);
+                        let script = format!(
+                            "window.__rterm_resp && window.__rterm_resp({})",
+                            serde_json::to_string(&resp_obj).unwrap_or_default()
+                        );
+                        ipc_local.send(IpcOutMsg::Script(script));
+                    });
                 }
                 "get_test_config" => {
                     let config = serde_json::json!({
@@ -1421,22 +2129,81 @@ fn main() {
                         Err(e) => send_resp(&serde_json::json!({"success": false, "error": e})),
                     }
                 }
+                "webview_memory" => {
+                    send_resp(&webview2_process_memory());
+                }
+                "open_devtools" => {
+                    if let Some(wv) = webview_for_ipc.lock().unwrap().as_ref() {
+                        wv.open_devtools();
+                        send_resp(&serde_json::json!({"success": true}));
+                    } else {
+                        send_resp(&serde_json::json!({"success": false, "error": "WebView unavailable"}));
+                    }
+                }
                 _ => send_resp(&serde_json::json!({"success": false, "error": "Unknown method"})),
             }
         })
         .build(&window)
         .expect("Failed to create webview");
 
+    #[cfg(windows)]
+    let _ = webview_built.set_memory_usage_level(MemoryUsageLevel::Normal);
+
     *webview.lock().unwrap() = Some(webview_built);
     let webview_clone = webview.clone();
+    let ipc_wake_pending = ipc_bus.wake_pending.clone();
+    let mut ipc_batch = String::new();
+    let mut next_msg: Option<IpcOutMsg> = None;
 
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;
-        while let Ok(msg) = ipc_rx.try_recv() {
-            if let Some(wv) = webview_clone.lock().unwrap().as_ref() {
-                let _ = wv.evaluate_script(&msg.script);
+        *control_flow = ControlFlow::Wait;
+        loop {
+            ipc_batch.clear();
+            if let Some(msg) = next_msg.take() {
+                msg.append_to(&mut ipc_batch);
             }
-            *control_flow = ControlFlow::Poll;
+            while let Ok(msg) = ipc_rx.try_recv() {
+                // Bound each script evaluation during output bursts
+                if !ipc_batch.is_empty() && ipc_batch.len() + msg.estimated_len() > 256 * 1024 {
+                    if let Some(wv) = webview_clone.lock().unwrap().as_ref() {
+                        let _ = wv.evaluate_script(&ipc_batch);
+                    }
+                    ipc_batch.clear();
+                }
+                msg.append_to(&mut ipc_batch);
+            }
+
+            if !ipc_batch.is_empty() {
+                if let Some(wv) = webview_clone.lock().unwrap().as_ref() {
+                    let _ = wv.evaluate_script(&ipc_batch);
+                }
+            }
+
+            // Drain queued messages before clearing wake state
+            ipc_wake_pending.store(false, Ordering::Release);
+            match ipc_rx.try_recv() {
+                Ok(msg) => {
+                    ipc_wake_pending.store(true, Ordering::Release);
+                    next_msg = Some(msg);
+                    continue;
+                }
+                Err(_) => break,
+            }
+        }
+        if let Event::WindowEvent { event, .. } = &event {
+            if let WindowEvent::Focused(focused) = event {
+                #[cfg(windows)]
+                {
+                    let level = if *focused {
+                        MemoryUsageLevel::Normal
+                    } else {
+                        MemoryUsageLevel::Low
+                    };
+                    if let Some(wv) = webview_clone.lock().unwrap().as_ref() {
+                        let _ = wv.set_memory_usage_level(level);
+                    }
+                }
+            }
         }
         if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
             *control_flow = ControlFlow::Exit;

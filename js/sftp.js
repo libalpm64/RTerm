@@ -84,6 +84,34 @@ async function fetchRemotePermString(fullPath) {
   return tok.length >= 9 ? tok : 'unknown';
 }
 
+async function showRemoteInfo(file, fullPath, sshId) {
+  const perms = await fetchRemotePermString(fullPath);
+  let contentsHtml = '';
+  if (file.dir) {
+    const listing = await window.rterm.sftpList(sshId, fullPath);
+    if (listing?.success) {
+      const children = Array.isArray(listing.result) ? listing.result : [];
+      const folders = children.filter(child => child.dir).length;
+      const files = children.length - folders;
+      const preview = children.slice(0, 120).map(child =>
+        `<div style="display:flex;align-items:center;gap:6px;padding:2px 0;min-width:0;">` +
+        `<span style="color:${child.dir ? 'var(--accent)' : 'var(--text3)'};font-size:11px;">${child.dir ? 'DIR' : 'FILE'}</span>` +
+        `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(child.name)}</span></div>`
+      ).join('');
+      contentsHtml = `<br><b>Contains:</b> ${files} file${files === 1 ? '' : 's'}, ${folders} folder${folders === 1 ? '' : 's'}` +
+        `<div style="margin-top:6px;max-height:150px;overflow:auto;padding:6px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text2);">${preview || '<span style="color:var(--text3)">(empty folder)</span>'}${children.length > 120 ? `<div style="padding-top:4px;color:var(--text3);">and ${children.length - 120} more...</div>` : ''}</div>`;
+    } else {
+      contentsHtml = '<br><span style="color:var(--text3)">Contents unavailable</span>';
+    }
+  }
+  openSftpActionModal({
+    title: file.dir ? 'Remote Folder Info' : 'Remote File Info',
+    body: `Location: SFTP<br>Name: ${escapeHtml(file.name)}<br>Type: ${file.dir ? 'Folder' : 'File'}<br>Permissions: ${escapeHtml(perms)}<br>Size: ${file.size || 0} bytes<br>Path: ${escapeHtml(fullPath)}${contentsHtml}`,
+    okText: 'Close',
+    showCancel: false
+  });
+}
+
 function permToRwx(perm) {
   const n = Number(perm);
   if (!Number.isFinite(n) || n === 0) return 'unknown';
@@ -94,6 +122,164 @@ function permToRwx(perm) {
 
 function currentSftpSessionId() {
   return sftpSshId ?? Array.from(sessions.values()).find(s => s.type === 'ssh' && s.sshId !== null && s.sshId !== undefined)?.sshId;
+}
+
+function normalizeRemotePath(value) {
+  const path = String(value || '').trim();
+  if (!path) return '/';
+  return path.replace(/[\\/]+/g, '/').replace(/\/\.\//g, '/');
+}
+
+function parentLocalPath(value) {
+  const path = String(value || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!path || path === '/' || path === '~') return '/';
+  if (path.startsWith('~/')) {
+    const parts = path.slice(2).split('/').filter(Boolean);
+    return parts.length > 1 ? `~/${parts.slice(0, -1).join('/')}` : '~';
+  }
+  const driveMatch = path.match(/^([A-Za-z]:)(?:\/(.*))?$/);
+  if (driveMatch) {
+    const parts = (driveMatch[2] || '').split('/').filter(Boolean);
+    return parts.length > 1 ? `${driveMatch[1]}/${parts.slice(0, -1).join('/')}` : `${driveMatch[1]}/`;
+  }
+  const parts = path.split('/').filter(Boolean);
+  if (path.startsWith('/')) return '/' + parts.slice(0, -1).join('/');
+  return parts.slice(0, -1).join('/') || '/';
+}
+
+function renderSftpPathEditor(pathEl, path) {
+  const value = normalizeRemotePath(path);
+  // Use the path field for navigation
+  pathEl.innerHTML = `<input id="sftp-path-input" aria-label="Remote directory" value="${escapeHtml(value)}" placeholder="/remote/path" style="flex:1;min-width:0;height:20px;padding:1px 6px;border:1px solid var(--border2);border-radius:3px;background:var(--bg2);color:var(--text);font:11px 'JetBrains Mono',monospace;outline:none;">`;
+  const input = document.getElementById('sftp-path-input');
+  const submit = () => {
+    const next = normalizeRemotePath(input?.value);
+    if (next !== _currentSftpPath) loadSftpDir(next);
+    else if (input) input.value = next;
+  };
+  input?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submit();
+    }
+  });
+  input?.addEventListener('change', submit);
+}
+
+const MAX_REMOTE_DOWNLOAD_FILES = 10000;
+const DEFAULT_SFTP_CONCURRENCY = 3;
+const MAX_SFTP_CONCURRENCY = 10;
+
+function configuredSftpConcurrency() {
+  const value = Number.parseInt(document.getElementById('setting-sftp-concurrent')?.value, 10);
+  if (!Number.isFinite(value)) return DEFAULT_SFTP_CONCURRENCY;
+  return Math.max(1, Math.min(MAX_SFTP_CONCURRENCY, value));
+}
+
+/** Run async work with bounded concurrency */
+async function runWithConcurrency(items, worker, limit = configuredSftpConcurrency()) {
+  if (!items.length) return;
+  let next = 0;
+  const workerCount = Math.min(limit, items.length);
+  const runners = Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      try {
+        await worker(items[index], index);
+      } catch (error) {
+        // Continue remaining transfers after a file error
+        console.error('SFTP transfer failed:', error);
+      }
+    }
+  });
+  await Promise.all(runners);
+}
+
+async function runWithConcurrencyIterable(iterable, worker, limit = configuredSftpConcurrency()) {
+  const iterator = iterable[Symbol.asyncIterator]();
+  const workerCount = Math.max(1, limit);
+  let iteratorError = null;
+  const runners = Array.from({ length: workerCount }, async () => {
+    while (!iteratorError) {
+      let step;
+      try {
+        step = await iterator.next();
+      } catch (error) {
+        iteratorError = error;
+        return;
+      }
+      if (step.done) return;
+      try {
+        await worker(step.value);
+      } catch (error) {
+        console.error('SFTP transfer failed:', error);
+      }
+    }
+  });
+  await Promise.all(runners);
+  if (iteratorError) throw iteratorError;
+}
+
+function joinRemotePath(base, name) {
+  const root = normalizeRemotePath(base);
+  return root === '/' ? `/${name}` : `${root}/${name}`;
+}
+
+function joinLocalPath(base, relative) {
+  const left = String(base || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  const right = String(relative || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!left) return right;
+  if (!right) return left;
+  return `${left}/${right}`;
+}
+
+/** Stream remote files with bounded concurrency */
+async function* iterateRemoteFiles(sshId, remotePath, relativePath = '', state = { count: 0 }, visited = new Set()) {
+  const path = normalizeRemotePath(remotePath);
+  if (visited.has(path)) return;
+  visited.add(path);
+  const listing = await window.rterm.sftpList(sshId, path);
+  if (!listing?.success) throw new Error(listing?.error || `Unable to list ${path}`);
+
+  for (const child of (Array.isArray(listing.result) ? listing.result : [])) {
+    if (!child?.name || child.name === '.' || child.name === '..') continue;
+    const childPath = joinRemotePath(path, child.name);
+    const childRelative = relativePath ? `${relativePath}/${child.name}` : child.name;
+    if (child.dir) {
+      yield* iterateRemoteFiles(sshId, childPath, childRelative, state, visited);
+      continue;
+    }
+    state.count += 1;
+    if (state.count > MAX_REMOTE_DOWNLOAD_FILES) {
+      throw new Error(`Folder contains more than ${MAX_REMOTE_DOWNLOAD_FILES.toLocaleString()} files`);
+    }
+    yield { path: childPath, name: child.name, relative: childRelative };
+  }
+}
+
+async function downloadRemoteFolder(sshId, remotePath, folderName, saveDir) {
+  const transferId = `folder-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  window.__rterm_transferProgress?.(transferId, `Scanning ${folderName}...`, 0);
+  try {
+    const state = { count: 0 };
+    const files = iterateRemoteFiles(sshId, remotePath, '', state);
+    const destinationRoot = joinLocalPath(saveDir, folderName);
+    await runWithConcurrencyIterable(files, async (file) => {
+      const relativeDir = file.relative.includes('/')
+        ? file.relative.slice(0, file.relative.lastIndexOf('/'))
+        : '';
+      const localDir = joinLocalPath(destinationRoot, relativeDir);
+      await window.rterm.sftpDownload(sshId, file.path, file.name, localDir);
+    });
+    if (state.count === 0) {
+      window.__rterm_transferProgress?.(transferId, `${folderName} is empty`, 100, { done: true });
+      return;
+    }
+    window.__rterm_transferProgress?.(transferId, `Downloaded ${state.count} file${state.count === 1 ? '' : 's'}`, 100, { done: true });
+  } catch (error) {
+    window.__rterm_transferProgress?.(transferId, `Folder download failed: ${error?.message || error}`, 100, { error: true });
+  }
 }
 
 function escapeHtml(s) {
@@ -199,8 +385,19 @@ export async function initSftp(id) {
   return false;
 }
 
+// Release per session state when SSH closes
+export function forgetSftpSession(id) {
+  sftpOpenedIds.delete(id);
+  if (sftpSshId === id) {
+    setSftpSshId(null);
+    setSftpInitialized(false);
+    sftpSelected.clear();
+  }
+}
+
 export async function loadSftpDir(path) {
-  _currentSftpPath = path || '/';
+  path = normalizeRemotePath(path);
+  _currentSftpPath = path;
   const listEl = document.getElementById('sftp-list');
   const pathEl = document.getElementById('sftp-path');
   const statusEl = document.getElementById('sftp-status');
@@ -219,6 +416,7 @@ export async function loadSftpDir(path) {
   statusEl.classList.remove('connected');
   statusEl.classList.add('connecting');
   statusEl.querySelector('.label').textContent = 'Connecting...';
+  renderSftpPathEditor(pathEl, path);
 
   const ok = await initSftp(sftpSshId);
   if (!ok) {
@@ -231,26 +429,18 @@ export async function loadSftpDir(path) {
   statusEl.classList.add('connected');
   statusEl.querySelector('.label').textContent = 'Connected';
 
-  pathEl.innerHTML = path.split('/').filter(Boolean).map(p => `<span style="color:var(--text3)">/</span><span>${escapeHtml(p)}</span>`).join('');
-  if (path === '/') pathEl.innerHTML = '<span style="color:var(--text3)">/</span>';
-
   listEl.innerHTML = '<div style="padding:8px;color:var(--text3)">Loading...</div>';
 
   try {
     const result = await window.rterm.sftpList(sftpSshId, path);
     if (!result.success) {
       listEl.innerHTML = '<div style="color:var(--red);padding:8px">Error: ' + (result.error || 'unknown') + '</div>';
-      pathEl.innerHTML = `<input id="sftp-path-input" value="${path.replace(/"/g, '&quot;')}" style="width:100%;background:var(--bg2);border:1px solid var(--border2);color:var(--text);font-size:11px;padding:2px 6px;border-radius:4px;" />`;
-      const input = document.getElementById('sftp-path-input');
-      if (input) {
-        input.addEventListener('keydown', (ev) => {
-          if (ev.key === 'Enter') loadSftpDir(input.value || '/');
-        });
-      }
+      renderSftpPathEditor(pathEl, path);
       return;
     }
 
     listEl.innerHTML = '';
+    renderSftpPathEditor(pathEl, path);
     ensureSftpBulkBar();
     renderSftpBulkBar();
     let currentPath = path;
@@ -289,12 +479,20 @@ export async function loadSftpDir(path) {
           const menu = document.createElement('div');
           menu.id = 'sftp-ctx';
           menu.style.cssText = 'position:fixed;z-index:9999;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:4px;box-shadow:0 8px 24px rgba(0,0,0,.5);min-width:160px;font-size:12px;';
-          menu.innerHTML = '<div class="dropdown-item" id="sctx-mv">Move...</div><div class="dropdown-item" id="sctx-rn">Rename...</div><div class="dropdown-item" id="sctx-info">Info</div><div class="dropdown-item" id="sctx-sm">Select Mode</div>';
+          menu.innerHTML = '<div class="dropdown-item" id="sctx-dl">Download folder...</div><div class="dropdown-item" id="sctx-mv">Move...</div><div class="dropdown-item" id="sctx-rn">Rename...</div><div class="dropdown-item" id="sctx-info">Info</div><div class="dropdown-item" id="sctx-sm">Select Mode</div>';
           document.body.appendChild(menu);
           menu.addEventListener('mousedown', (ev) => ev.stopPropagation());
           menu.addEventListener('click', (ev) => ev.stopPropagation());
           menu.style.left = Math.max(4, Math.min(e.clientX, window.innerWidth - 188)) + 'px';
-          menu.style.top = Math.max(4, Math.min(e.clientY, window.innerHeight - 88)) + 'px';
+          menu.style.top = Math.max(4, Math.min(e.clientY, window.innerHeight - menu.offsetHeight - 4)) + 'px';
+          document.getElementById('sctx-dl').onclick = async () => {
+            menu.remove();
+            const sshId = currentSftpSessionId();
+            if (sshId === null || sshId === undefined) { alert('No active SSH session'); return; }
+            const saveDir = await showSaveDialog(f.name);
+            if (!saveDir) return;
+            void downloadRemoteFolder(sshId, fullPath, f.name, saveDir);
+          };
           document.getElementById('sctx-mv').onclick = async () => {
             menu.remove();
             const targetDir = await pickSftpTargetDir(getCurrentSftpPath() || '/', 'Move Remote Item', f.name);
@@ -326,8 +524,7 @@ export async function loadSftpDir(path) {
           };
           document.getElementById('sctx-info').onclick = async () => {
             menu.remove();
-            const perms = await fetchRemotePermString(fullPath);
-            openSftpActionModal({ title: 'Remote File Info', body: `Location: SFTP<br>Name: ${escapeHtml(f.name)}<br>Type: Folder<br>Permissions: ${escapeHtml(perms)}<br>Size: ${f.size || 0} bytes<br>Path: ${escapeHtml(fullPath)}`, okText: 'Close', showCancel: false });
+            await showRemoteInfo(f, fullPath, currentSftpSessionId());
           };
           document.getElementById('sctx-sm').onclick = () => {
             menu.remove();
@@ -369,8 +566,7 @@ export async function loadSftpDir(path) {
             menu.remove();
             const saveDir = await showSaveDialog(f.name);
             if (!saveDir) return;
-            window.__rterm_dlProgress(`Downloading ${f.name} to ${saveDir}...`, 0);
-            window.rterm.sftpDownload(sftpSshId, fullPath, f.name, saveDir);
+            void window.rterm.sftpDownload(sftpSshId, fullPath, f.name, saveDir);
           };
           document.getElementById('sctx-mv').onclick = async () => {
             menu.remove();
@@ -403,8 +599,7 @@ export async function loadSftpDir(path) {
           };
           document.getElementById('sctx-info').onclick = async () => {
             menu.remove();
-            const perms = await fetchRemotePermString(fullPath);
-            openSftpActionModal({ title: 'Remote File Info', body: `Location: SFTP<br>Name: ${escapeHtml(f.name)}<br>Type: File<br>Permissions: ${escapeHtml(perms)}<br>Size: ${f.size || 0} bytes<br>Path: ${escapeHtml(fullPath)}`, okText: 'Close', showCancel: false });
+            await showRemoteInfo(f, fullPath, currentSftpSessionId());
           };
           document.getElementById('sctx-sm').onclick = () => {
             menu.remove();
@@ -433,8 +628,10 @@ export async function loadSftpDir(path) {
 
 let _sdResolve = null;
 let _sdPath = '~';
+let _sdLastFolder = '~';
 let _sdFilename = '';
 let _sdMode = 'folder';
+let _sdLoadToken = 0;
 let _currentSftpPath = '/';
 
 export function getCurrentSftpPath() {
@@ -446,13 +643,13 @@ export function showSaveDialog(filename, mode = 'folder') {
     _sdResolve = resolve;
     _sdFilename = filename;
     _sdMode = mode;
-    if (mode === 'file' && localExpanded) _sdPath = localExpanded;
-    if (mode === 'folder' && (!_sdPath || _sdPath === '~') && localExpanded) _sdPath = localExpanded;
+    // Keep picker path at a valid directory
+    _sdPath = localExpanded || _sdLastFolder || '~';
     document.getElementById('save-dialog').style.display = 'flex';
     const header = document.getElementById('sd-header-title');
     if (header) header.textContent = mode === 'file' ? 'Select Local File to Upload' : 'Select Download Folder';
-    document.getElementById('sd-title').textContent = mode === 'file' ? 'Select File to Upload' : 'Select Destination Folder';
-    document.getElementById('sd-select').textContent = mode === 'file' ? 'Select File' : 'Select Folder';
+    const selectButton = document.getElementById('sd-select');
+    if (selectButton) selectButton.textContent = mode === 'file' ? 'Select File' : 'Select Folder';
     loadSaveDir(filename, _sdPath);
   });
 }
@@ -460,15 +657,22 @@ export function showSaveDialog(filename, mode = 'folder') {
 function loadSaveDir(filename, dir) {
   const list = document.getElementById('sd-list');
   const pathEl = document.getElementById('sd-path');
+  if (!list || !pathEl) return;
+  const loadToken = ++_sdLoadToken;
   _sdPath = dir;
-  pathEl.textContent = dir === '~' ? '/home/' + (document.getElementById('ssh-user')?.value || 'user') : dir;
+  _sdLastFolder = dir;
+  pathEl.textContent = dir === '~' ? 'Home' : dir;
   list.innerHTML = '<div style="padding:16px;color:var(--text3);text-align:center;font-size:13px;">Loading...</div>';
 
   window.rterm.localList(dir).then(result => {
+    if (loadToken !== _sdLoadToken) return;
     if (!result || !result.success) {
-      list.innerHTML = '<div style="padding:16px;color:var(--red);text-align:center;font-size:13px;">' + (result?.error || 'Cannot read directory') + '</div>';
+      pathEl.textContent = dir === '~' ? (window.__rterm_home || 'Home') : dir;
+      list.innerHTML = '<div style="padding:16px;color:var(--red);text-align:center;font-size:13px;">' + escapeHtml(result?.error || 'Cannot read directory') + '</div>';
       return;
     }
+    if (result.home) window.__rterm_home = result.home;
+    pathEl.textContent = result.path || (dir === '~' ? (result.home || 'Home') : dir);
     const files = result.result || [];
     list.innerHTML = '';
 
@@ -477,8 +681,7 @@ function loadSaveDir(filename, dir) {
       p.className = 'sd-item';
       p.innerHTML = '<span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path></svg></span><span>..</span>';
       p.onclick = () => {
-        const parent = '/' + dir.split('/').filter(Boolean).slice(0, -1).join('/');
-        _sdPath = parent === '' ? '/' : parent;
+        _sdPath = parentLocalPath(dir);
         loadSaveDir(filename, _sdPath);
       };
       list.appendChild(p);
@@ -511,13 +714,19 @@ function loadSaveDir(filename, dir) {
     if (!hasItems && dir !== '/') {
       list.innerHTML += '<div style="padding:16px;color:var(--text3);text-align:center;font-size:12px;">(empty directory)</div>';
     }
+  }).catch(error => {
+    if (loadToken !== _sdLoadToken) return;
+    // Keep picker usable when directory IPC fails
+    pathEl.textContent = dir === '~' ? (window.__rterm_home || 'Home') : dir;
+    list.innerHTML = '<div style="padding:16px;color:var(--red);text-align:center;font-size:13px;">' + escapeHtml(error?.message || error || 'Cannot read directory') + '</div>';
   });
 }
 
 function finishSaveDialog(filename) {
   let path = _sdPath;
   if (path === '~') {
-    path = window.__rterm_home || '/tmp';
+    // Preserve home token for cross platform path expansion
+    path = window.__rterm_home || '~';
   } else if (_sdMode === 'file') {
     document.getElementById('save-dialog').style.display = 'none';
     if (_sdResolve) { _sdResolve(path); _sdResolve = null; }
@@ -529,10 +738,12 @@ function finishSaveDialog(filename) {
 
 export function setupSaveDialog() {
   document.getElementById('sd-close').onclick = () => {
+    _sdLoadToken += 1;
     document.getElementById('save-dialog').style.display = 'none';
     if (_sdResolve) { _sdResolve(null); _sdResolve = null; }
   };
   document.getElementById('sd-cancel').onclick = () => {
+    _sdLoadToken += 1;
     document.getElementById('save-dialog').style.display = 'none';
     if (_sdResolve) { _sdResolve(null); _sdResolve = null; }
   };
@@ -607,10 +818,9 @@ function ensureSftpTopActions() {
   icons.insertBefore(dl, mv);
   dl.onclick = async () => {
     const entries = Array.from(sftpSelected.entries()).filter(([, v]) => !v.dir);
-    if (entries.length) window.__rterm_dlProgress(`Downloading ${entries.length} file(s)...`, 0);
-    for (const [p, meta] of entries) {
-      window.rterm.sftpDownload(sftpSshId, p, meta.name);
-    }
+    void runWithConcurrency(entries, async ([p, meta]) => {
+      await window.rterm.sftpDownload(sftpSshId, p, meta.name);
+    });
   };
   mv.onclick = async () => {
     const targetDir = await openSftpActionModal({ title: 'Move Selected Items', body: `Move ${sftpSelected.size} selected item(s) to directory:`, withInput: true, value: getCurrentSftpPath() || '/', okText: 'Move' });

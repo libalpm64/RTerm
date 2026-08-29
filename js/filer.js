@@ -235,8 +235,8 @@ export async function loadLocalDir(dir) {
   if (!listEl) return;
 
   if (!localHome) {
-    const h = await window.rterm.getEnv('HOME');
-    setLocalHome((h.result || '').trim() || '/');
+    const h = await window.rterm.localList('~');
+    setLocalHome((h?.home || h?.path || '').trim() || '~');
   }
 
   const resolved = dir === '~' || dir === '' ? localHome : dir;
@@ -245,6 +245,7 @@ export async function loadLocalDir(dir) {
 
   const result = await window.rterm.localList(resolved);
   if (!result.success) { listEl.innerHTML = '<div style="padding:8px;color:var(--red)">Error: ' + (result.error || 'unknown') + '</div>'; return; }
+  if (result.home) setLocalHome(result.home);
 
   const parts = dir.split('/').filter(Boolean);
   pathEl.innerHTML = parts.map((p, i) => {
@@ -256,6 +257,10 @@ export async function loadLocalDir(dir) {
 
   listEl.innerHTML = '';
   localRowMap = new Map();
+  // Prune metadata for items no longer selected
+  for (const key of localTypeMap.keys()) {
+    if (!localSelected.has(key)) localTypeMap.delete(key);
+  }
   ensureLocalBulkBar();
   renderLocalBulkBar();
 
@@ -417,6 +422,7 @@ window.loadLocalDir = loadLocalDir;
 function toggleLocalSelect(el, key) {
   if (localSelected.has(key)) {
     localSelected.delete(key);
+    localTypeMap.delete(key);
     el.classList.remove('selected');
     el.style.background = '';
     el.style.color = '';
@@ -470,6 +476,7 @@ function ensureLocalTopActions() {
       await window.rterm.localDelete(p, isDir);
     }
     localSelected.clear();
+    localTypeMap.clear();
     renderLocalBulkBar();
     loadLocalDir(localPath);
   };
@@ -481,6 +488,7 @@ function ensureLocalTopActions() {
       await window.rterm.localMove(p, (targetDir === '/' ? '' : targetDir) + '/' + name);
     }
     localSelected.clear();
+    localTypeMap.clear();
     renderLocalBulkBar();
     loadLocalDir(localPath);
   };
@@ -513,6 +521,7 @@ function setLocalSelectMode(enabled) {
       el.style.color = '';
     }
     localSelected.clear();
+    localTypeMap.clear();
   }
   renderLocalBulkBar();
 }

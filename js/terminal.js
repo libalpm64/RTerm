@@ -2,6 +2,7 @@
 import {
   sessions, activeId, fontSize, cursorStyle, cursorBlink, scrollback,
   currentTerm, currentFitAddon, commandHistory,
+  MAX_COMMAND_HISTORY, MAX_HISTORY_ENTRY_LENGTH,
   savedSessions, savedSessionsDirty,
   _editingIndex, connecting,
   keysTabOpen, draggedTabId,
@@ -11,6 +12,17 @@ import {
 } from './state.js';
 import { _ipc, invoke } from './ipc.js';
 import { byId } from './dom.js';
+
+// Set explicit ANSI black colors for dark terminal output
+const RTERM_TERMINAL_THEME = {
+  background: '#000000',
+  foreground: '#e0e0e0',
+  cursor: '#4fc3f7',
+  cursorAccent: '#000000',
+  black: '#000000',
+  brightBlack: '#555555',
+};
+const MAX_INPUT_BUFFER_LENGTH = 64 * 1024;
 
 export function showTerminalView() {
   document.getElementById('keys-panel').style.display = 'none';
@@ -102,6 +114,9 @@ export function closeTab(id) {
 
   if (sess && sess.sshId !== null && sess.sshId !== undefined) {
     window.rterm?.sshDisconnect?.(sess.sshId);
+    import('./sftp.js').then(({ forgetSftpSession }) => {
+      forgetSftpSession(sess.sshId);
+    }).catch(() => {});
   }
 
   if (sess?.type === 'keys') {
@@ -373,11 +388,16 @@ export function showQuickMenu(e) {
 }
 
 export function addHistoryItem(cmd) {
+  if (typeof cmd !== 'string' || !cmd) return;
+  // Bound terminal input buffer size
+  cmd = cmd.length > MAX_HISTORY_ENTRY_LENGTH
+    ? cmd.slice(0, MAX_HISTORY_ENTRY_LENGTH)
+    : cmd;
   if (commandHistory[0] === cmd) return;
   const idx = commandHistory.indexOf(cmd);
   if (idx !== -1) commandHistory.splice(idx, 1);
   commandHistory.unshift(cmd);
-  if (commandHistory.length > 50) commandHistory.pop();
+  if (commandHistory.length > MAX_COMMAND_HISTORY) commandHistory.length = MAX_COMMAND_HISTORY;
   renderHistory();
   window.rterm?.saveSetting('command_history', JSON.stringify(commandHistory));
 }
@@ -453,7 +473,7 @@ export function createTerminalInstance(id, onReady) {
   const term = new Terminal({
     cursorBlink: cursorBlink,
     cursorStyle: cursorStyle,
-    theme: { background: '#000', cursor: '#4fc3f7', foreground: '#e0e0e0' },
+    theme: RTERM_TERMINAL_THEME,
     fontSize: fontSize,
     fontFamily: 'JetBrains Mono, monospace',
     allowProposedApi: true,
@@ -499,7 +519,7 @@ export function createTerminalInstance(id, onReady) {
             sess.cmdBuffer = sess.cmdBuffer.slice(0, -1);
             window.rterm.sshWrite(sess.sshId, '\x7f');
           } else if (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) <= 126) {
-            sess.cmdBuffer += data;
+            if (sess.cmdBuffer.length < MAX_INPUT_BUFFER_LENGTH) sess.cmdBuffer += data;
             window.rterm.sshWrite(sess.sshId, data);
           } else {
             window.rterm.sshWrite(sess.sshId, data);
@@ -521,6 +541,11 @@ export function createTerminalInstance(id, onReady) {
         sess.buffer = '';
         term.write('\r\n');
         if (cmd.trim()) {
+          if (/^(clear|cls)$/i.test(cmd.trim())) {
+            term.write('\x1b[2J\x1b[H');
+            term.write('$ ');
+            return;
+          }
           window.rterm.localExec(cmd, term.cols).then(resp => {
             if (resp && resp.result) {
               term.write(resp.result);
@@ -539,7 +564,7 @@ export function createTerminalInstance(id, onReady) {
           term.write('\b \b');
         }
       } else if (data.length === 1) {
-        sess.buffer += data;
+        if (sess.buffer.length < MAX_INPUT_BUFFER_LENGTH) sess.buffer += data;
         term.write(data);
       }
     }
@@ -548,17 +573,20 @@ export function createTerminalInstance(id, onReady) {
   term.onResize(({ cols, rows }) => {
     const sess = sessions.get(id);
     if ((sess?.type === 'ssh' || sess?.type === 'telnet' || sess?.type === 'serial') && sess?.sshId !== null && sess?.sshId !== undefined && window.rterm) {
+      if (sess._ptyCols === cols && sess._ptyRows === rows) return;
+      sess._ptyCols = cols;
+      sess._ptyRows = rows;
       window.rterm.sshResize(sess.sshId, cols, rows);
     }
   });
 
-  let statusRAF = null;
+  let statusTimer = null;
   term.onCursorMove(() => {
-    if (statusRAF) return;
-    statusRAF = requestAnimationFrame(() => {
-      statusRAF = null;
+    if (statusTimer) return;
+    statusTimer = setTimeout(() => {
+      statusTimer = null;
       updateStatus(id);
-    });
+    }, 100);
   });
 
   if (!invoke && !window.rterm) {
@@ -587,15 +615,15 @@ export function updateFontSize(size) {
 }
 
 export function updateScrollback(value) {
-  let val = parseInt(value);
-  if (val <= 0) val = 1000000;
-  setScrollback(val);
+  setScrollback(value);
+  const scrollbackField = byId('setting-scrollback');
+  if (scrollbackField) scrollbackField.value = scrollback;
   sessions.forEach(sess => {
     if (sess.term) {
       sess.term.options.scrollback = scrollback;
     }
   });
-  window.rterm?.saveSetting('scrollback', value.toString());
+  window.rterm?.saveSetting('scrollback', scrollback.toString());
 }
 
 export function updateCursorStyle(style) {
@@ -675,17 +703,21 @@ export async function doConnect() {
         savedSessions[_editingIndex] = { ...savedSessions[_editingIndex], ...sessionData };
         setEditingIndex(-1);
         setSavedSessionsDirty(true);
-        import('./sessions.js').then(mod => mod.renderSavedSessions());
+        const mod = await import('./sessions.js');
+        mod.renderSavedSessions();
       } else {
-        import('./sessions.js').then(mod => mod.addSession('ssh', sessionData, true));
+        // Save after adding the new session
+        const mod = await import('./sessions.js');
+        mod.addSession('ssh', sessionData, true);
       }
       if (window.__rterm_vault_pass) {
-        window.rterm.saveSessions(savedSessions.map(s => ({
+        const persisted = await window.rterm.saveSessions(savedSessions.map(s => ({
           host: s.host, port: s.port,
           user: s.user, password: s.password,
           key_path: s.key_path, key_name: s.key_name,
           vault_pass: s.vault_pass, name: s.name
         })), window.__rterm_vault_pass);
+        if (!persisted?.success) console.error('Failed to persist saved session:', persisted?.error || 'unknown error');
       }
     }
 
@@ -807,7 +839,11 @@ export function fitAll() {
       try { sess.fitAddon.fit(); } catch (_) { }
       if (sess.type === 'ssh' && sess.sshId != null && sess.term) {
         const dims = sess.fitAddon.proposeDimensions();
-        if (dims) window.rterm?.sshResize(sess.sshId, dims.cols, dims.rows);
+        if (dims && (sess._ptyCols !== dims.cols || sess._ptyRows !== dims.rows)) {
+          sess._ptyCols = dims.cols;
+          sess._ptyRows = dims.rows;
+          window.rterm?.sshResize(sess.sshId, dims.cols, dims.rows);
+        }
       }
     });
   });

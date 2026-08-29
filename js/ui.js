@@ -25,21 +25,42 @@ function ensureDlBar() {
   if (!bar) {
     bar = document.createElement('div');
     bar.id = 'dl-progress';
-    bar.style.cssText = 'position:fixed;bottom:30px;left:12px;min-width:280px;max-width:420px;background:var(--bg3);padding:10px 12px;z-index:9999;border:1px solid var(--border2);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.4);font-size:12px;display:none;';
+    bar.style.cssText = 'position:fixed;bottom:30px;left:12px;width:360px;max-width:calc(100vw - 24px);max-height:42vh;background:var(--bg3);padding:10px 12px;z-index:9999;border:1px solid var(--border2);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.4);font-size:12px;display:none;overflow:hidden;';
     bar.innerHTML =
-      '<div class="dl-label" style="margin-bottom:6px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>' +
-      '<div class="dl-track" style="height:4px;border-radius:2px;background:var(--bg2);overflow:hidden;"><div class="dl-fill" style="height:100%;width:0%;background:var(--accent);border-radius:2px;transition:width .25s;"></div></div>';
+      '<div class="dl-head" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;color:var(--text);font-weight:600;">' +
+        '<span>Transfers</span><span class="dl-count" style="color:var(--text3);font-size:11px;font-weight:400;"></span>' +
+        '<button class="dl-dismiss" type="button" title="Hide transfers" style="margin-left:auto;border:0;background:transparent;color:var(--text3);font-size:16px;line-height:1;cursor:pointer;padding:0 2px;">&times;</button>' +
+      '</div><div class="dl-list" style="display:flex;flex-direction:column;gap:8px;overflow:auto;max-height:calc(42vh - 42px);"></div>';
+    bar.querySelector('.dl-dismiss').onclick = () => { bar.style.display = 'none'; };
     document.body.appendChild(bar);
   }
   return bar;
 }
 
-let _dlHideTimer = null;
-window.__rterm_dlProgress = function (text, pct, opts) {
+const _dlTransfers = new Map();
+
+function updateDlBarVisibility(bar) {
+  const count = bar.querySelector('.dl-count');
+  if (count) count.textContent = _dlTransfers.size ? `(${_dlTransfers.size})` : '';
+  if (!_dlTransfers.size) bar.style.display = 'none';
+}
+
+window.__rterm_transferProgress = function (id, text, pct, opts) {
   const bar = ensureDlBar();
-  const label = bar.querySelector('.dl-label');
-  const fill = bar.querySelector('.dl-fill');
-  if (_dlHideTimer) { clearTimeout(_dlHideTimer); _dlHideTimer = null; }
+  const key = String(id || 'transfer');
+  let row = _dlTransfers.get(key);
+  if (!row) {
+    row = document.createElement('div');
+    row.className = 'dl-row';
+    row.style.cssText = 'min-width:0;';
+    row.innerHTML =
+      '<div class="dl-label" style="margin-bottom:4px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>' +
+      '<div class="dl-track" style="height:5px;border-radius:3px;background:var(--bg2);overflow:hidden;"><div class="dl-fill" style="height:100%;width:0%;background:var(--accent);border-radius:3px;transition:width .2s;"></div></div>';
+    bar.querySelector('.dl-list').appendChild(row);
+    _dlTransfers.set(key, row);
+  }
+  const label = row.querySelector('.dl-label');
+  const fill = row.querySelector('.dl-fill');
   bar.style.display = 'block';
   label.textContent = text || '';
   if (typeof pct === 'number' && isFinite(pct)) {
@@ -50,11 +71,20 @@ window.__rterm_dlProgress = function (text, pct, opts) {
   fill.style.background = color;
   label.style.color = o.error ? 'var(--red)' : o.done ? 'var(--green)' : 'var(--text)';
   if (o.done || o.error) {
-    _dlHideTimer = setTimeout(() => {
-      bar.style.display = 'none';
-      fill.style.width = '0%';
-    }, o.error ? 6000 : 4000);
+    setTimeout(() => {
+      if (_dlTransfers.get(key) !== row) return;
+      _dlTransfers.delete(key);
+      row.remove();
+      updateDlBarVisibility(bar);
+    }, o.error ? 3500 : 2000);
   }
+  const count = bar.querySelector('.dl-count');
+  if (count) count.textContent = `(${_dlTransfers.size})`;
+};
+
+// Compatibility adapter for upload progress
+window.__rterm_dlProgress = function (text, pct, opts) {
+  window.__rterm_transferProgress('legacy', text, pct, opts);
 };
 
 export function closeMenusInternal() {
@@ -310,6 +340,10 @@ export function setupEventListeners() {
   document.getElementById('action-zoomout').onclick = zoomOut;
   document.getElementById('action-zoomreset').onclick = resetZoom;
   document.getElementById('action-about').onclick = () => showModalInternal('about');
+  document.getElementById('action-devtools').onclick = () => {
+    closeMenusInternal();
+    window.rterm?.openDevtools().catch(console.error);
+  };
   document.getElementById('action-docs').onclick = () => window.open('https://github.com', '_blank');
   document.getElementById('action-issue').onclick = () => window.open('https://github.com', '_blank');
 
@@ -466,7 +500,8 @@ async function saveAllSettings() {
     const pass = vaultPass.value;
     await window.rterm.saveSessions(savedSessions.map(s => ({
       host: s.host, port: s.port, user: s.user,
-      password: s.password, key_path: s.key_path, name: s.name
+      password: s.password, key_path: s.key_path, key_name: s.key_name,
+      vault_pass: s.vault_pass, compression: s.compression, name: s.name
     })), pass, window.__rterm_vault_keys || []);
     window.__rterm_vault_pass = pass;
   } else if (!isOn) {

@@ -2,11 +2,14 @@ export const sessions = new Map();
 export const activeKeywords = [];
 export let semanticHlEnabled = true;
 export const commandHistory = [];
+export const MAX_COMMAND_HISTORY = 50;
+export const MAX_HISTORY_ENTRY_LENGTH = 4096;
 export let activeId = null;
 export let fontSize = 13;
 export let cursorStyle = 'block';
 export let cursorBlink = true;
-export let scrollback = 10000;
+export let scrollback = 2000;
+export const MAX_SCROLLBACK_LINES = 100000;
 
 export let activeMenu = null;
 export let currentView = 'terminal';
@@ -42,7 +45,13 @@ export function setActiveId(val) { activeId = val; }
 export function setFontSize(val) { fontSize = val; }
 export function setCursorStyle(val) { cursorStyle = val; }
 export function setCursorBlink(val) { cursorBlink = val; }
-export function setScrollback(val) { scrollback = val; }
+export function normalizeScrollback(val) {
+  const parsed = Number.parseInt(val, 10);
+  // Bound xterm scrollback to a safe maximum
+  if (!Number.isFinite(parsed) || parsed <= 0) return MAX_SCROLLBACK_LINES;
+  return Math.min(parsed, MAX_SCROLLBACK_LINES);
+}
+export function setScrollback(val) { scrollback = normalizeScrollback(val); }
 export function setSemanticHlEnabled(val) { semanticHlEnabled = val; }
 export function setActiveMenu(val) { activeMenu = val; }
 export function setCurrentView(val) { currentView = val; }
