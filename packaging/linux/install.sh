@@ -1,8 +1,8 @@
 #!/bin/sh
-# Install a matching desktop/CLI pair from the Linux portable archive.
+# Install the desktop, CLI and tunnel client from the Linux portable archive.
 set -eu
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-for file in rterm rterm-agent rterm.desktop rterm.png licenses/Inter-OFL.txt licenses/JetBrainsMono-OFL.txt licenses/alacritty-LICENSE-APACHE licenses/THIRD-PARTY-LICENSES.html; do
+for file in rterm rterm-agent tunnel-client rterm.desktop rterm.png licenses/Inter-OFL.txt licenses/JetBrainsMono-OFL.txt licenses/alacritty-LICENSE-APACHE licenses/THIRD-PARTY-LICENSES.html licenses/tunnel-client-LICENSE licenses/tunnel-client-NOTICE licenses/tunnel-client-THIRD-PARTY-LICENSES.txt licenses/tunnel-client.spdx.json; do
     if [ ! -f "$here/$file" ] || [ ! -r "$here/$file" ]; then
         printf 'Incomplete RTerm archive: missing %s\n' "$file" >&2
         exit 1
@@ -29,9 +29,10 @@ if printf '%s' "$prefix" | LC_ALL=C grep -q '[[:cntrl:]]'; then
     echo "PREFIX must not contain control characters" >&2
     exit 1
 fi
-mkdir -p "$prefix/bin" "$prefix/share/applications"
+mkdir -p "$prefix/bin" "$prefix/lib/rterm" "$prefix/share/applications"
 install -m 755 -T "$here/rterm" "$prefix/bin/rterm"
 install -m 755 -T "$here/rterm-agent" "$prefix/bin/rterm-agent"
+install -m 755 -T "$here/tunnel-client" "$prefix/lib/rterm/tunnel-client"
 # Escape Exec's quoted argument and then the desktop-entry string value.
 exec_path=$(printf '%s' "$prefix/bin/rterm" | sed 's/%/%%/g; s/["`$\\]/\\&/g; s/\\/\\\\/g')
 exec_line="Exec=\"$exec_path\""
@@ -59,7 +60,7 @@ mkdir -p "$icon_dir"
 install -m 644 -T "$here/rterm.png" "$icon_dir/rterm.png"
 doc_dir="$prefix/share/doc/rterm"
 mkdir -p "$doc_dir"
-for file in Inter-OFL.txt JetBrainsMono-OFL.txt alacritty-LICENSE-APACHE THIRD-PARTY-LICENSES.html; do
+for file in Inter-OFL.txt JetBrainsMono-OFL.txt alacritty-LICENSE-APACHE THIRD-PARTY-LICENSES.html tunnel-client-LICENSE tunnel-client-NOTICE tunnel-client-THIRD-PARTY-LICENSES.txt tunnel-client.spdx.json; do
     install -m 644 -T "$here/licenses/$file" "$doc_dir/$file"
 done
 if [ -f "$here/licenses/RTerm-LICENSE" ]; then
@@ -74,7 +75,10 @@ data_identity=$(stat -Lc '%d:%i' -- "$data_home/applications")
 if [ "$prefix_identity" != "$data_identity" ]; then
     install -m 644 -T "$stage/rterm.desktop" "$data_home/applications/rterm.desktop"
 fi
-echo "Installed RTerm and rterm-agent in $prefix/bin."
+echo "Installed RTerm and rterm-agent in $prefix/bin; OpenAI tunnel-client in $prefix/lib/rterm."
+if ! command -v fc-match >/dev/null 2>&1; then
+    echo "Install Fontconfig and Noto Sans CJK for automatic Chinese, Japanese and Korean font discovery."
+fi
 case ":$PATH:" in *":$prefix/bin:"*) ;; *) echo "Add $prefix/bin to PATH and restart your terminal/AI client.";; esac
 # Ask only in an interactive terminal, as the user who owns the desktop.
 # Noninteractive installs and elevated installs defer to the app on first launch.

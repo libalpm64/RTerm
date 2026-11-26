@@ -49,6 +49,14 @@ try {
             Copy-Item -LiteralPath $file -Destination $stage
             if ($Sign) { Sign-File (Join-Path $stage ([IO.Path]::GetFileName($file))) }
         }
+        # Keep upstream binary bytes intact after checksum verification.
+        $tunnelArgs = @('packaging/fetch_tunnel_client.sh', 'windows-amd64', (Join-Path $stage 'tunnel'))
+        if ($env:RTERM_TUNNEL_ARCHIVE) { $tunnelArgs += $env:RTERM_TUNNEL_ARCHIVE }
+        $git = (Get-Command git.exe -ErrorAction Stop).Source
+        $bash = Join-Path (Split-Path -Parent (Split-Path -Parent $git)) 'bin/bash.exe'
+        if (-not (Test-Path -LiteralPath $bash -PathType Leaf)) { throw 'Install Git for Windows with Git Bash' }
+        Invoke-Checked $bash $tunnelArgs
+        Invoke-Checked (Join-Path $stage 'tunnel/tunnel-client.exe') @('--version')
         $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
         if (-not (Test-Path -LiteralPath $iscc)) { throw 'Install Inno Setup 6 first' }
         $compilerArgs = @("/DAppVersion=$version", "/DBinDir=$stage", "/DOutDir=$stage")

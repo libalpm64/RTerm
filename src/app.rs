@@ -483,19 +483,26 @@ impl App {
     pub(crate) fn apply_settings(&mut self, context: &egui::Context) {
         // Any committed AI-policy change invalidates existing credentials/grants.
         self.stop_agent();
-        let locale = crate::i18n::resolve(self.settings.get("language"));
-        if locale != crate::i18n::current(context) {
-            crate::i18n::set(context, locale);
-            theme::install_fonts(context);
-        }
+        self.apply_language(context);
         self.theme = Theme::dark();
         self.theme.apply(context);
         self.highlighter = Highlighter::new(
             self.settings.on("semantic_hl"),
             self.settings.get("highlight_keywords"),
         );
-        if let Err(error) = self.settings.save() {
+        if self.persist_history
+            && let Err(error) = self.settings.save()
+        {
             self.fail(error);
+        }
+        context.request_repaint();
+    }
+
+    fn apply_language(&self, context: &egui::Context) {
+        let locale = crate::i18n::resolve(self.settings.get("language"));
+        if locale != crate::i18n::current(context) {
+            crate::i18n::set(context, locale);
+            theme::install_fonts(context);
         }
     }
 

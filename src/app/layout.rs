@@ -1646,6 +1646,41 @@ mod tests {
     }
 
     #[test]
+    fn applying_settings_switches_all_supported_languages() {
+        let context = egui::Context::default();
+        let mut app = App::with_settings(&context, Settings::benchmark_defaults(), false);
+        for &(code, _) in crate::i18n::CHOICES
+            .iter()
+            .filter(|(code, _)| *code != "auto")
+        {
+            app.settings.set("language", code.into());
+            app.apply_settings(&context);
+            let expected = if crate::i18n::SCRIPT_LOCALES.contains(&code)
+                && crate::i18n::system_font(code).is_none()
+            {
+                "en"
+            } else {
+                code
+            };
+            assert_eq!(crate::i18n::current(&context), expected, "{code}");
+            let _ = context.run(Default::default(), |ctx| {
+                for key in ["Settings", "Apply", "Cancel", "Language", "Appearance"] {
+                    let label = crate::i18n::text(ctx, key);
+                    if expected != "en" {
+                        assert_ne!(label, key, "{code}: {key}");
+                    }
+                    assert!(
+                        ctx.fonts_mut(|fonts| {
+                            fonts.has_glyphs(&app.theme.chrome_font(12.0), label)
+                        }),
+                        "{code}: {label}"
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
     fn workspace_and_dialogs_have_unique_widget_ids() {
         let context = egui::Context::default();
         context.options_mut(|options| options.warn_on_id_clash = true);

@@ -9,6 +9,22 @@ permissions:
   contents: read
 
 jobs:
+  tunnel-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y jq curl zip unzip
+      - run: bash packaging/test_fetch_tunnel_client.sh
+      - name: Resolve latest stable OpenAI tunnel-client
+        run: bash packaging/fetch_tunnel_client.sh --resolve target/tunnel-release/manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tunnel-release
+          path: target/tunnel-release/manifest.json
+          if-no-files-found: error
   audit:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -29,7 +45,9 @@ jobs:
           path: target/release-notices/THIRD-PARTY-LICENSES.html
           if-no-files-found: error
   windows:
-    needs: audit
+    needs: [audit, tunnel-release]
+    env:
+      RTERM_TUNNEL_MANIFEST: target/tunnel-release/manifest.json
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
@@ -41,6 +59,10 @@ jobs:
         with:
           name: release-notices
           path: target/release-notices
+      - uses: actions/download-artifact@v4
+        with:
+          name: tunnel-release
+          path: target/tunnel-release
       - run: cargo build --release --locked --bins
       - run: .\target\release\rterm-agent.exe --version
       - shell: pwsh
@@ -48,13 +70,36 @@ jobs:
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { choco install innosetup --yes --no-progress; if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' } }
           ./packaging/windows/package.ps1
+      - name: Verify installed Windows tunnel client
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist/RTerm-*-windows-x64-setup.exe | Select-Object -First 1
+          if (-not $installer) { throw 'Missing Windows installer' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'rterm-installer-smoke'
+          $result = Start-Process -FilePath $installer.FullName -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/DIR="' + $installDir + '"')) -Wait -PassThru
+          if ($result.ExitCode -ne 0) { throw "Installation failed: $($result.ExitCode)" }
+          try {
+            & (Join-Path $installDir 'tunnel-client.exe') --version
+            if ($LASTEXITCODE -ne 0) { throw 'Installed tunnel-client failed' }
+            foreach ($notice in @('tunnel-client-LICENSE', 'tunnel-client-NOTICE', 'tunnel-client-THIRD-PARTY-LICENSES.txt', 'tunnel-client.spdx.json')) {
+              if (-not (Test-Path -LiteralPath (Join-Path $installDir "licenses/$notice") -PathType Leaf)) { throw "Missing tunnel notice: $notice" }
+            }
+          } finally {
+            $uninstaller = Join-Path $installDir 'unins000.exe'
+            if (Test-Path -LiteralPath $uninstaller) {
+              $result = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+              if ($result.ExitCode -ne 0) { throw "Uninstall failed: $($result.ExitCode)" }
+            }
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: RTerm-windows-x64
           path: dist/*
           if-no-files-found: error
   macos:
-    needs: audit
+    needs: [audit, tunnel-release]
+    env:
+      RTERM_TUNNEL_MANIFEST: target/tunnel-release/manifest.json
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -76,6 +121,10 @@ jobs:
         with:
           name: release-notices
           path: target/release-notices
+      - uses: actions/download-artifact@v4
+        with:
+          name: tunnel-release
+          path: target/tunnel-release
       - run: rustup target add ${{ matrix.target }}
       - run: cargo build --release --locked --bins --target ${{ matrix.target }}
       - run: target/${{ matrix.target }}/release/rterm-agent --version
@@ -84,28 +133,46 @@ jobs:
           version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -1)
           if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then exit 1; fi
           sh packaging/macos/package.sh target/${{ matrix.target }}/release "$version" ${{ matrix.arch }} dist
+      - name: Verify macOS package tunnel payload
+        shell: bash
+        run: |
+          stage=$(mktemp -d)
+          trap 'rm -rf "$stage"' EXIT
+          pkgutil --expand-full dist/RTerm-*-macos-${{ matrix.arch }}.pkg "$stage/expanded"
+          client=$(find "$stage/expanded" -type f -path '*/Applications/RTerm.app/Contents/MacOS/tunnel-client' -print -quit)
+          test -n "$client"
+          "$client" --version
+          bundle="$(dirname "$(dirname "$client")")"
+          for notice in tunnel-client-LICENSE tunnel-client-NOTICE tunnel-client-THIRD-PARTY-LICENSES.txt tunnel-client.spdx.json; do
+            test -s "$bundle/Resources/licenses/$notice"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: RTerm-macos-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
   linux:
-    needs: audit
+    needs: [audit, tunnel-release]
+    env:
+      RTERM_TUNNEL_MANIFEST: target/tunnel-release/manifest.json
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxrandr-dev libgl1-mesa-dev libegl1-mesa-dev libudev-dev libdbus-1-dev pkg-config desktop-file-utils shellcheck
-      - run: shellcheck -x run.sh packaging/linux/*.sh packaging/macos/*.sh
-      - run: shellcheck packaging/publish.sh
-      - run: python3 packaging/linux/test_install.py
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxrandr-dev libgl1-mesa-dev libegl1-mesa-dev libudev-dev libdbus-1-dev pkg-config desktop-file-utils shellcheck curl jq unzip zip libglib2.0-bin fontconfig fonts-noto-cjk
+      - run: shellcheck -x run.sh packaging/*.sh packaging/linux/*.sh packaging/macos/*.sh
+      - run: bash packaging/linux/test_install.sh
       - uses: ./.github/actions/check-rust
       - uses: actions/download-artifact@v4
         with:
           name: release-notices
           path: target/release-notices
+      - uses: actions/download-artifact@v4
+        with:
+          name: tunnel-release
+          path: target/tunnel-release
       - run: cargo build --release --locked --bins
       - run: target/release/rterm-agent --version
       - shell: bash
@@ -113,6 +180,20 @@ jobs:
           version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -1)
           if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then exit 1; fi
           sh packaging/linux/package.sh target/release "$version" dist
+      - name: Verify Linux package tunnel payloads
+        shell: bash
+        run: |
+          stage=$(mktemp -d)
+          trap 'rm -rf "$stage"' EXIT
+          mkdir -p "$stage/deb" "$stage/portable"
+          dpkg-deb -x dist/RTerm-*-linux-amd64.deb "$stage/deb"
+          tar -xzf dist/RTerm-*-linux-amd64.tar.gz -C "$stage/portable"
+          "$stage/deb/usr/lib/rterm/tunnel-client" --version
+          "$stage/portable/tunnel-client" --version
+          for notice in tunnel-client-LICENSE tunnel-client-NOTICE tunnel-client-THIRD-PARTY-LICENSES.txt tunnel-client.spdx.json; do
+            test -s "$stage/deb/usr/share/doc/rterm/$notice"
+            test -s "$stage/portable/licenses/$notice"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: RTerm-linux-amd64

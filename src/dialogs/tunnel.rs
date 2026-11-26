@@ -66,7 +66,7 @@ impl Draft {
         ui.horizontal_wrapped(|ui| {
             ui.hyperlink_to("Platform Tunnels", tunnel::PLATFORM_TUNNELS);
             ui.hyperlink_to("API keys", tunnel::PLATFORM_API_KEYS);
-            ui.hyperlink_to("Download client", tunnel::DOWNLOAD);
+            ui.hyperlink_to("Client downloads (manual setup)", tunnel::DOWNLOAD);
             ui.hyperlink_to("ChatGPT Plugins", tunnel::CHATGPT_PLUGINS);
             ui.hyperlink_to("Guide", tunnel::GUIDE);
         });
@@ -119,6 +119,9 @@ impl Draft {
                             .size(11.0)
                             .color(theme.muted),
                     );
+                    if !self.client.is_empty() && ui.small_button("Use Automatic").clicked() {
+                        self.client.clear();
+                    }
                     if ui.small_button(crate::i18n::tr(ui, "Browse…")).clicked()
                         && let Some(path) = rfd::FileDialog::new()
                             .set_title("Select OpenAI tunnel-client")
@@ -129,7 +132,17 @@ impl Draft {
                     label.id
                 })
                 .inner;
-            input(ui, theme, &mut self.client, "Automatic", false).labelled_by(client_label);
+            input(
+                ui,
+                theme,
+                &mut self.client,
+                "Automatic (bundled client)",
+                false,
+            )
+            .labelled_by(client_label);
+            ui.label(
+                "RTerm installers include the tunnel client. Leave this blank for automatic setup.",
+            );
         });
         let has_credentials = !self.id.trim().is_empty()
             && if saved.is_some() && !self.replacing_key {

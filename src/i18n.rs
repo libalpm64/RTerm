@@ -234,6 +234,11 @@ pub(crate) fn system_font(code: &str) -> Option<egui::FontData> {
     }
     #[cfg(target_os = "linux")]
     {
+        // Fontconfig knows distribution-specific paths, per-user fonts, and
+        // variable font collections (e.g. Fedora's NotoSansCJK-VF.ttc).
+        if let Some(face) = linux_fontconfig_face(code) {
+            candidates.push(face);
+        }
         let index = match code {
             "ja" => 0,
             "ko" => 1,
@@ -255,11 +260,68 @@ pub(crate) fn system_font(code: &str) -> Option<egui::FontData> {
     candidates.into_iter().find_map(|(path, index)| {
         let bytes = std::fs::read(path).ok()?;
         // egui panics on malformed fonts. Validate with its own parser first.
-        ab_glyph::FontRef::try_from_slice_and_index(&bytes, index).ok()?;
+        let face = ab_glyph::FontRef::try_from_slice_and_index(&bytes, index).ok()?;
+        #[cfg(target_os = "linux")]
+        if !linux_font_has_script(&face, code) {
+            return None;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = face;
         let mut font = egui::FontData::from_owned(bytes);
         font.index = index;
         Some(font)
     })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_fontconfig_face(code: &str) -> Option<(std::path::PathBuf, u32)> {
+    let language = match code {
+        "ja" => "ja",
+        "ko" => "ko",
+        "zh-CN" => "zh-cn",
+        "zh-TW" => "zh-tw",
+        _ => return None,
+    };
+    let output = std::process::Command::new("fc-match")
+        .args([
+            "--format",
+            "%{file}\n%{index}\n",
+            &format!("sans-serif:lang={language}"),
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_fontconfig_face(std::str::from_utf8(&output.stdout).ok()?)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_fontconfig_face(output: &str) -> Option<(std::path::PathBuf, u32)> {
+    let mut lines = output.lines();
+    let path = std::path::PathBuf::from(lines.next()?);
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    // Fontconfig encodes the FreeType named-instance index in the upper
+    // 16 bits. ab_glyph expects only the collection's face index.
+    let index = lines.next()?.parse::<u32>().ok()? & 0xffff;
+    Some((path, index))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_font_has_script(font: &ab_glyph::FontRef<'_>, code: &str) -> bool {
+    use ab_glyph::Font;
+    // fc-match can return an unrelated fallback even when no font supports
+    // the requested language. Check the script before accepting that match.
+    let Some((_, native)) = CHOICES.iter().find(|(key, _)| *key == code) else {
+        return false;
+    };
+    native
+        .chars()
+        .chain(translate(code, "Settings").chars())
+        .filter(|ch| !ch.is_whitespace())
+        .all(|ch| font.glyph_id(ch).0 != 0)
 }
 
 /// Substitute only named fields in known UI templates, without parsing user text.
@@ -432,6 +494,17 @@ mod tests {
         });
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fontconfig_variable_font_index_selects_collection_face() {
+        let path = "/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc";
+        assert_eq!(
+            parse_fontconfig_face(&format!("{path}\n262147\n")),
+            Some((std::path::PathBuf::from(path), 3))
+        );
+        assert!(parse_fontconfig_face("missing index").is_none());
+    }
+
     #[test]
     fn script_fonts_or_readable_english_fallback() {
         for &code in SCRIPT_LOCALES {
@@ -440,6 +513,17 @@ mod tests {
             crate::theme::install_fonts(&ctx);
             let active = current(&ctx);
             assert!(active == code || active == "en");
+            #[cfg(target_os = "linux")]
+            if let Some((path, index)) = linux_fontconfig_face(code)
+                && let Ok(bytes) = std::fs::read(path)
+                && let Ok(face) = ab_glyph::FontRef::try_from_slice_and_index(&bytes, index)
+                && linux_font_has_script(&face, code)
+            {
+                assert_eq!(
+                    active, code,
+                    "installed Fontconfig font must activate {code}"
+                );
+            }
             let _ = ctx.run(Default::default(), |ctx| {
                 let label = text(ctx, "Settings");
                 ctx.fonts_mut(|fonts| {

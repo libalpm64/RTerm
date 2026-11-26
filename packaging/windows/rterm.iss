@@ -36,6 +36,8 @@ SignedUninstaller=yes
 [Files]
 Source: "{#BinDir}\rterm.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\rterm-agent.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\tunnel\tunnel-client.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\tunnel\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "..\..\assets\Inter-OFL.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "..\..\assets\JetBrainsMono-OFL.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "..\..\vendor\alacritty_terminal\LICENSE-APACHE"; DestDir: "{app}\licenses"; DestName: "alacritty-LICENSE-APACHE"; Flags: ignoreversion

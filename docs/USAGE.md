@@ -11,7 +11,7 @@ The repository includes native installer recipes and a **Build installers** GitH
 | Linux x64 | DEB | /usr/bin and desktop application menu |
 | Linux x64 | tar.gz | Extract and run sh install.sh; defaults to ~/.local/bin (or /usr/local/bin as root; optional PREFIX) |
 
-Linux packages are built on Ubuntu 24.04 and require compatible glibc and graphics libraries. They are not universal across every Linux distribution. Hosted CI produces ad-hoc signed macOS and unsigned Windows test packages. See [release builds](#release-builds) for trusted distribution.
+Linux packages are built on Ubuntu 24.04 and require compatible glibc and graphics libraries. They are not universal across every Linux distribution. Every RTerm installer bundles the same latest stable, checksum-verified official OpenAI tunnel-client for its target architecture, with upstream license notices. The client is installed beside RTerm on Windows and in the macOS app bundle, or in the private lib/rterm directory on Linux. No separate network download or manual client selection is needed at install time. Hosted CI produces ad-hoc signed macOS and unsigned Windows test packages. See [release builds](#release-builds) for trusted distribution.
 
 Desktop shortcuts are optional. The Windows installer offers a **Create a desktop shortcut** checkbox (unchecked by default). The Linux portable installer asks when run interactively as a normal user. The macOS PKG and Linux DEB offer a one-time shortcut choice on first launch as the actual desktop user, rather than creating shortcuts in the installing administrator's home. The macOS shortcut links to the installed app; Linux creates an executable desktop launcher in the user's configured desktop directory, if available. Some Linux desktops require manually allowing launch of desktop files. Existing shortcuts are not overwritten by the Unix setup, and declining the offer leaves the desktop unchanged.
 
@@ -51,13 +51,15 @@ Choose the interface language in **File → Settings → Appearance → Language
 
 The 14 catalogs cover English, Simplified Chinese, Japanese, Spanish, Brazilian Portuguese, Russian, German, Korean, French, Traditional Chinese, Italian, Polish, Turkish and Ukrainian. The selector shows each language in its own script. Hindi, Hebrew and Arabic are deferred until text shaping and bidirectional rendering are adequate.
 
-Chinese, Japanese and Korean require compatible installed system fonts. Install the appropriate OS language/font pack, or Noto Sans CJK on Linux. RTerm loads installed CJK fonts for the language selector and terminal independently of the interface language. If RTerm cannot load a recognized font for the selected script, it falls back to English; restart after installing the font. OS fonts are not redistributed.
+Chinese, Japanese and Korean require compatible installed system fonts. Install the appropriate OS language/font pack, or Fontconfig and Noto Sans CJK on Linux (both are DEB dependencies; portable installs use installed system fonts). Linux discovers fonts via Fontconfig, including Fedora variable fonts and user-installed fonts. RTerm loads installed CJK fonts for the language selector and terminal independently of the interface language. If RTerm cannot load a recognized font for the selected script, it falls back to English; restart after installing the font. OS fonts are not redistributed.
 
 Translations are AI-generated and corrections are welcome. Edit the UTF-8 JSON catalogs in [locales](../locales/). Keep English source keys and placeholders unchanged. Preserve technical terms and run `cargo test --locked --bin rterm i18n::tests`. Terminal output and diagnostic errors are not translated. Some advanced controls may still appear in English.
 
 ## Release builds
 
 Run the Native builds and Build installers workflows. Review the dependency audit exceptions in .cargo/audit.toml at each release. Test the installers on each supported platform before publishing. Confirm the first-party license and artwork rights before distributing the application. Review third-party notices and never include local credentials or vaults.
+
+Packaging requires Bash, curl, jq, unzip, and SHA-256 utilities (sha256sum or shasum). Windows uses Git Bash from Git for Windows; jq must be available on PATH. Each commit-triggered installer workflow resolves the latest stable official OpenAI tunnel-client release once and shares its version and published SHA-256 digests across all platform jobs. Local packaging resolves latest by default too. Missing assets or hashes, or a checksum mismatch, fail the build instead of silently using an older version. For an offline repeat build, first save the release snapshot with `bash packaging/fetch_tunnel_client.sh --resolve manifest.json`, then set `RTERM_TUNNEL_MANIFEST` to that snapshot and `RTERM_TUNNEL_ARCHIVE` to its matching upstream ZIP.
 
 Generate the license report required by the packaging scripts:
 
@@ -71,7 +73,7 @@ On Windows use `New-Item -ItemType Directory -Force target/release-notices` inst
 
 * Windows: install Inno Setup 6 and Windows SDK SignTool. Set RTERM_WIN_CERT_THUMBPRINT to the installed signing certificate thumbprint and run `powershell -File packaging/windows/package.ps1 -Sign`. Verify the installer and embedded uninstaller signatures.
 * macOS: provision Developer ID Application and Installer identities and a notarytool keychain profile. Set RTERM_SIGN=1 and RTERM_MAC_APP_IDENTITY and RTERM_MAC_INSTALLER_IDENTITY and RTERM_MAC_NOTARY_PROFILE. Run `sh packaging/macos/package.sh target/release 2.0.0 arm64 dist` with the appropriate version and architecture. Verify signing and notarization.
-* Linux: use the packaging scripts and run `python3 packaging/linux/test_install.py` as an unprivileged user. Run ShellCheck on the shell scripts.
+* Linux: use the packaging scripts and run `bash packaging/linux/test_install.sh` as an unprivileged user with gio installed. Run the tunnel tests with bash packaging/test_fetch_tunnel_client.sh (requires jq and zip). Run ShellCheck on the shell scripts.
 
 Verify installs and upgrades and uninstalls plus local terminal and SSH and SFTP and vault and language and agent permission behavior. The legacy vault's shared derivation salt still needs a future migration to per-vault random salts. Publish only artifacts built from the intended committed revision with matching SHA-256 checksums.
 

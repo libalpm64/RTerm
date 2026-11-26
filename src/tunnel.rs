@@ -176,28 +176,68 @@ fn find_client(configured: &Path) -> Result<PathBuf, String> {
     } else {
         "tunnel-client"
     };
-    if !configured.as_os_str().is_empty() {
-        if configured.is_absolute() && configured.is_file() {
-            return Ok(configured.into());
-        }
-        return Err("Select the installed OpenAI tunnel-client executable".into());
-    }
-    let sibling = std::env::current_exe()
-        .ok()
-        .and_then(|app| app.parent().map(|dir| dir.join(name)));
+    let app = std::env::current_exe().ok();
     let path = std::env::var_os("PATH");
-    sibling
+    resolve_client(configured, app.as_deref(), path.as_deref(), name)
+}
+
+fn resolve_client(
+    configured: &Path,
+    app: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
+    name: &str,
+) -> Result<PathBuf, String> {
+    if configured.is_absolute() && client_executable(configured) {
+        return Ok(configured.into());
+    }
+    let directory = app.and_then(Path::parent);
+    // Linux installers use bin/../lib/rterm. Windows and macOS installers
+    // place the client next to RTerm, including inside the macOS app bundle.
+    #[cfg(target_os = "linux")]
+    let bundled = directory
+        .and_then(Path::parent)
+        .map(|prefix| prefix.join("lib").join("rterm").join(name));
+    #[cfg(not(target_os = "linux"))]
+    let bundled: Option<PathBuf> = None;
+    let sibling = directory.map(|dir| dir.join(name));
+    if let Some(installed) = bundled
         .into_iter()
-        .chain(
-            path.iter()
-                .flat_map(std::env::split_paths)
-                .filter(|dir| dir.is_absolute())
-                .map(|dir| dir.join(name)),
-        )
-        .find(|path| path.is_file())
+        .chain(sibling)
+        .find(|candidate| client_executable(candidate))
+    {
+        // An obsolete saved path must not prevent an upgraded installation
+        // from using its own verified client.
+        return Ok(installed);
+    }
+    if !configured.as_os_str().is_empty() {
+        return Err(
+            "Select an executable OpenAI tunnel-client, or clear the path to use Automatic".into(),
+        );
+    }
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| client_executable(candidate))
         .ok_or_else(|| {
-            "Download OpenAI tunnel-client and select its executable in Advanced AI Settings".into()
+            "OpenAI tunnel-client was not found. Reinstall RTerm to restore the bundled client, or select an installed executable in Advanced AI Settings".into()
         })
+}
+
+fn client_executable(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    true
 }
 
 fn client_command(
@@ -350,4 +390,49 @@ async fn readiness(path: &Path) -> bool {
     let mut line = String::new();
     let _ = BufReader::new(stream.take(256)).read_line(&mut line).await;
     line.split_ascii_whitespace().nth(1) == Some("200")
+}
+
+#[cfg(test)]
+mod client_tests {
+    use super::*;
+
+    fn executable(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"fixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn automatic_client_uses_installed_copy_even_with_stale_saved_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let name = if cfg!(windows) {
+            "tunnel-client.exe"
+        } else {
+            "tunnel-client"
+        };
+        let directory = root.join("bin");
+        let app = directory.join("rterm");
+        #[cfg(target_os = "linux")]
+        let bundled = root.join("lib").join("rterm").join(name);
+        #[cfg(not(target_os = "linux"))]
+        let bundled = directory.join(name);
+        let override_path = root.join("custom").join(name);
+        let external = root.join("external").join(name);
+        executable(&bundled);
+        executable(&external);
+        executable(&override_path);
+        let path = std::env::join_paths([external.parent().unwrap()]).unwrap();
+        let resolve = |configured: &Path| resolve_client(configured, Some(&app), Some(&path), name);
+        assert_eq!(resolve(Path::new("")).unwrap(), bundled);
+        assert_eq!(resolve(&root.join("removed-client")).unwrap(), bundled);
+        assert_eq!(resolve(&override_path).unwrap(), override_path);
+        std::fs::remove_file(&bundled).unwrap();
+        assert_eq!(resolve(Path::new("")).unwrap(), external);
+        assert!(resolve(&root.join("removed-client")).is_err());
+    }
 }

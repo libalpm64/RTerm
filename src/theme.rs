@@ -69,6 +69,11 @@ impl Theme {
     }
 
     pub(crate) fn apply(self, context: &egui::Context) {
+        #[cfg(target_os = "linux")]
+        {
+            context.set_theme(egui::Theme::Dark);
+            context.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
+        }
         let mut style = egui::Style {
             animation_time: 0.075,
             ..Default::default()
@@ -519,4 +524,23 @@ pub(crate) fn icon(ui: &egui::Ui, rect: Rect, glyph: Icon, color: Color32) {
         }
         Icon::Check => path(&[(4., 12.), (10., 18.), (21., 6.)]),
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn linux_theme_requests_dark_window_decorations() {
+    let context = egui::Context::default();
+    let output = context.run(egui::RawInput::default(), |context| {
+        Theme::dark().apply(context);
+    });
+    assert_eq!(context.theme(), egui::Theme::Dark);
+    assert!(
+        output.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .iter()
+            .any(|command| matches!(
+                command,
+                egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark)
+            ))
+    );
 }

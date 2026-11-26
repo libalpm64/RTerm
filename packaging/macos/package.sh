@@ -8,18 +8,25 @@ here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=packaging/common.sh
 . "$here/../common.sh"
 prepare_package
-case "$arch" in arm64) cpu=arm64;; x64) cpu=x86_64;; *) echo "Unsupported macOS architecture" >&2; exit 1;; esac
+case "$arch" in arm64) cpu=arm64; tunnel_arch=arm64;; x64) cpu=x86_64; tunnel_arch=amd64;; *) echo "Unsupported macOS architecture" >&2; exit 1;; esac
 for file in rterm rterm-agent; do
     lipo "$bin_dir/$file" -verify_arch "$cpu"
 done
+bash "$here/../fetch_tunnel_client.sh" "darwin-$tunnel_arch" "$stage/tunnel" "${RTERM_TUNNEL_ARCHIVE:-}"
+lipo "$stage/tunnel/tunnel-client" -verify_arch "$cpu"
+if [ "$(uname -m)" = "$cpu" ]; then
+    "$stage/tunnel/tunnel-client" --version
+fi
 root="$stage/root"
 app="$root/Applications/RTerm.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$root/usr/local/bin"
 install -m 755 "$bin_dir/rterm" "$app/Contents/MacOS/rterm"
 install -m 755 "$bin_dir/rterm-agent" "$app/Contents/MacOS/rterm-agent"
+install -m 755 "$stage/tunnel/tunnel-client" "$app/Contents/MacOS/tunnel-client"
 cp "$here/Info.plist" "$app/Contents/Info.plist"
 install -m 644 "$here/../../assets/rterm.icns" "$app/Contents/Resources/rterm.icns"
 install_notices "$app/Contents/Resources/licenses"
+install -m 644 "$stage/tunnel/licenses/"* "$app/Contents/Resources/licenses/"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$app/Contents/Info.plist"
 ln -s /Applications/RTerm.app/Contents/MacOS/rterm-agent "$root/usr/local/bin/rterm-agent"
@@ -30,6 +37,7 @@ if [ "${RTERM_SIGN:-0}" = 1 ]; then
     : "${RTERM_MAC_INSTALLER_IDENTITY:?Developer ID Installer identity required}"
     : "${RTERM_MAC_NOTARY_PROFILE:?notarytool keychain profile required}"
     codesign --force --options runtime --timestamp --sign "$RTERM_MAC_APP_IDENTITY" "$app/Contents/MacOS/rterm-agent"
+    codesign --force --options runtime --timestamp --sign "$RTERM_MAC_APP_IDENTITY" "$app/Contents/MacOS/tunnel-client"
     codesign --force --options runtime --timestamp --sign "$RTERM_MAC_APP_IDENTITY" "$app"
 else
     if [ "${RTERM_SIGN:-0}" != 0 ]; then
@@ -37,6 +45,7 @@ else
     fi
     echo "Creating ad-hoc signed test package (not notarized)." >&2
     codesign --force --sign - "$app/Contents/MacOS/rterm-agent"
+    codesign --force --sign - "$app/Contents/MacOS/tunnel-client"
     codesign --force --sign - "$app"
 fi
 codesign --verify --deep --strict "$app"
