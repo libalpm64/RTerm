@@ -1,0 +1,10 @@
+[advisories]
+# Release risk acceptance for maintenance-only notices, reviewed 2026-11-25.
+# See RELEASE.md. Do not add vulnerability, unsoundness or yank exceptions.
+ignore = [
+    "RUSTSEC-2026-0543", # chrono: SFTP dependency and local timestamps
+    "RUSTSEC-2026-0192", # ttf-parser: egui glyph rendering
+    "RUSTSEC-2026-0371", # zbus_names: Linux accessibility/portal stack
+    "RUSTSEC-2026-0370", # zvariant: Linux accessibility/portal stack
+    "RUSTSEC-2026-0372", # zvariant_derive: Linux accessibility/portal stack
+]

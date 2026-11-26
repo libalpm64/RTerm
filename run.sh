@@ -1,3 +1,4 @@
-#!/bin/bash
-cd "$(dirname "$0")"
-./wry-app/target/debug/rterm
+#!/usr/bin/env sh
+set -eu
+CDPATH= cd -- "$(dirname -- "$0")"
+exec cargo run --locked -- "$@"

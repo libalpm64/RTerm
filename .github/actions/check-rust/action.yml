@@ -1,0 +1,17 @@
+name: Check RTerm Rust code
+description: Shared formatting, lint and regression gates on the native runner
+runs:
+  using: composite
+  steps:
+    - run: rustup update stable --no-self-update
+      shell: bash
+    - run: rustup component add rustfmt clippy
+      shell: bash
+    - run: cargo fmt --package rterm -- --check
+      shell: bash
+    - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      shell: bash
+    - run: cargo test --locked --all-features --bins
+      shell: bash
+    - run: cargo test --release --locked --bins
+      shell: bash

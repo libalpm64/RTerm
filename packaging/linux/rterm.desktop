@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=RTerm
+GenericName=Terminal Emulator
+Comment=Native terminal and SSH client
+Exec=/usr/bin/rterm
+Icon=rterm
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=Terminal;SSH;SFTP;Shell;Console;
+StartupWMClass=rterm

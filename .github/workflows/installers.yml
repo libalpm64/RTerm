@@ -1,0 +1,119 @@
+name: Build installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup update stable --no-self-update
+      - run: cargo install cargo-audit --version 0.23.0 --locked
+      - run: cargo audit --deny warnings
+      - run: cargo install cargo-about --version 0.9.3 --features cli --locked
+      - run: |
+          mkdir -p target/release-notices
+          cargo about generate --locked --fail -o target/release-notices/THIRD-PARTY-LICENSES.html packaging/licenses.hbs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notices
+          path: target/release-notices/THIRD-PARTY-LICENSES.html
+          if-no-files-found: error
+  windows:
+    needs: audit
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/check-rust
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notices
+          path: target/release-notices
+      - run: cargo build --release --locked --bins
+      - run: .\target\release\rterm-agent.exe --version
+      - shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --yes --no-progress; if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' } }
+          ./packaging/windows/package.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RTerm-windows-x64
+          path: dist/*
+          if-no-files-found: error
+  macos:
+    needs: audit
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/check-rust
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notices
+          path: target/release-notices
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --release --locked --bins --target ${{ matrix.target }}
+      - run: target/${{ matrix.target }}/release/rterm-agent --version
+      - shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -1)
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then exit 1; fi
+          sh packaging/macos/package.sh target/${{ matrix.target }}/release "$version" ${{ matrix.arch }} dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RTerm-macos-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+  linux:
+    needs: audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxrandr-dev libgl1-mesa-dev libegl1-mesa-dev libudev-dev libdbus-1-dev pkg-config desktop-file-utils shellcheck
+      - run: shellcheck -x run.sh packaging/linux/*.sh packaging/macos/*.sh
+      - run: python3 packaging/linux/test_install.py
+      - uses: ./.github/actions/check-rust
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notices
+          path: target/release-notices
+      - run: cargo build --release --locked --bins
+      - run: target/release/rterm-agent --version
+      - shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -1)
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then exit 1; fi
+          sh packaging/linux/package.sh target/release "$version" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RTerm-linux-amd64
+          path: dist/*
+          if-no-files-found: error
