@@ -1,7 +1,7 @@
 # RTerm V2
 Rterm is a lightweight terminal emulator built with Rust and egui. I built this because Windterm kept crashing whenever I tried to load SSH keys. I also wanted a terminal without a bloated frontend or TypeScript. Rterm now uses a native Rust UI with the Alacritty terminal engine.
 
-<img width="800" height="600" alt="Rterm interface reference" src="https://github.com/user-attachments/assets/835a7ad0-e4f2-4ca1-a7c7-5f19666f16e2" />
+<img width="2048" height="1106" alt="image" src="https://github.com/user-attachments/assets/3ef9b1cc-c68c-4c14-bcbc-41626700579a" />
 
 ## Features
 * Local terminal sessions
@@ -63,7 +63,7 @@ Supported platforms:
 * macOS: PKG
 * Linux: DEB or portable tar.gz
 
-Linux packages target Ubuntu 24.04 or compatible distributions. See [build and installation instructions](docs/USAGE.md#installation).
+Linux packages target Arch, Debian or compatible distributions. See [build and installation instructions](docs/USAGE.md#installation).
 
 ## AI setup
 AI is optional and disabled by default. You can use the local rterm-agent CLI or connect ChatGPT through a private MCP tunnel.
