@@ -2,6 +2,7 @@ name: Native builds
 
 on:
   push:
+    branches-ignore: [main]
   pull_request:
 
 permissions:

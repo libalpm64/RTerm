@@ -19,7 +19,7 @@ Application menu registration is automatic, separate from desktop shortcuts: Win
 
 The shared command is `rterm-agent --version`. Restart your terminal or AI client after installing so it sees PATH changes. On macOS ensure /usr/local/bin is on PATH; on Linux portable installs ensure ~/.local/bin (or /usr/local/bin for system installs, or PREFIX/bin) is on PATH. When installing as root, choose a trusted system-owned prefix accessible to desktop users. Development builds can invoke the companion in target/debug or target/release directly; no checkout or username is embedded in the copied prompt.
 
-Maintainers: run the **Build installers** workflow manually or with a version tag matching Cargo.toml. Publish artifacts and checksums only after native verification. No release is published automatically.
+Maintainers: **Build installers** runs on pushes to main and can also be started manually. Releases from main publish only after the audit and every native installer job succeed. Each release is named RTerm # followed by the short commit ID. Its tag uses the full commit ID. Enable release immutability in GitHub repository Settings > General > Releases before publishing. The workflow uploads all installers and verified checksums to a draft first and checks the immutable flag after publication. Existing releases are never overwritten.
 
 ## Build and run
 

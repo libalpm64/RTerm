@@ -160,12 +160,43 @@ pub async fn request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn private_test_dir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("rterm-test-")
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
+    #[test]
+    fn rejects_public_and_symlinked_socket_directories() {
+        let dir = private_test_dir();
+        let public = dir.path().join("public");
+        fs::create_dir(&public).unwrap();
+        fs::set_permissions(&public, fs::Permissions::from_mode(0o755)).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(dir.path(), &alias).unwrap();
+        for parent in [public, alias] {
+            let name = parent.join("agent.sock");
+            for create in [false, true] {
+                assert_eq!(
+                    private_parent(&name, create).unwrap_err().kind(),
+                    io::ErrorKind::PermissionDenied
+                );
+            }
+        }
+        let name = dir.path().join("new-private").join("agent.sock");
+        private_parent(&name, true).unwrap();
+        let meta = fs::symlink_metadata(name.parent().unwrap()).unwrap();
+        assert_eq!(meta.uid(), uid());
+        assert_eq!(meta.mode() & 0o077, 0);
+    }
+
     #[tokio::test]
     async fn local_socket_round_trip_and_exclusive_listener() {
-        let dir = tempfile::Builder::new()
-            .prefix("rterm-test-")
-            .tempdir_in("/tmp")
-            .unwrap();
+        let dir = private_test_dir();
         let name = dir.path().join("agent.sock");
         let name = name.to_str().unwrap();
         let listener = listen(name).unwrap();
