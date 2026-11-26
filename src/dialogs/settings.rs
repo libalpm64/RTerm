@@ -149,6 +149,7 @@ impl Settings {
         password: &mut String,
         existing_vault: bool,
         show_tunnel: impl FnOnce(&mut egui::Ui),
+        show_vault: impl FnOnce(&mut egui::Ui),
     ) {
         let pages = [
             "Terminal",
@@ -220,7 +221,10 @@ impl Settings {
                 0 => self.terminal_page(ui, t),
                 1 => self.appearance_page(ui, t),
                 2 => self.connection_page(ui, t),
-                3 => self.security_page(ui, t, password, existing_vault),
+                3 => {
+                    self.security_page(ui, t, password, existing_vault);
+                    show_vault(ui);
+                }
                 4 => self.sftp_page(ui, t),
                 _ => {
                     self.ai_page(ui, t);

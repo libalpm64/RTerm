@@ -1,5 +1,14 @@
 # Usage and development
 
+## Vault backup and restore
+
+Open **Settings → Security → Encrypted vault backups** on Windows, Linux or macOS. Apply any pending settings before starting a backup.
+
+- **Export vault:** Unlock the vault, select Export vault and choose a new .rterm-vault filename. The file is an exact encrypted copy of the saved vault; it includes saved sessions, stored SSH keys, stored AI audit history and Secure MCP Tunnel credentials. The original master password is required to open it. Existing destination files are never overwritten.
+- **Import vault:** Close other RTerm windows and remote tabs, finish pending operations, and select Import vault. Choose a .rterm-vault or compatible version-2 vault.dat file and enter its original master password. Import replaces, rather than merges, the saved vault. If a vault already exists, unlock it first. RTerm authenticates the chosen backup, saves the previous encrypted vault as vault-before-import-*.rterm-vault in the configuration directory, then replaces the vault and locks the screen. Unlock using the imported vault's master password. The agent is stopped and tunnel auto-connect disabled; re-enable it after reviewing the restored profile.
+
+The 128 MiB backup limit applies to both operations. Backup files are sensitive even though they are encrypted; store them securely and keep the master password separately. App appearance, non-vault settings, command history outside the vault, known hosts, and external SSH key files referenced by path are not included. Review paths and permissions when moving between operating systems. Older automatic backup files remain until you explicitly delete them.
+
 ## Installation
 
 The repository includes native installer recipes and a **Build installers** GitHub Actions workflow. It builds both matching binaries from the same commit.

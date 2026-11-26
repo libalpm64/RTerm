@@ -1,6 +1,6 @@
 use crate::models::{AgentAuditEntry, Connection, Profile, SshConfig, SshKey};
 use std::collections::VecDeque;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use chacha20poly1305::XChaCha20Poly1305;
@@ -149,6 +149,122 @@ pub(crate) fn get_config_dir() -> std::path::PathBuf {
 
 pub(crate) fn vault_exists() -> bool {
     get_config_dir().join("vault.dat").exists()
+}
+
+// Backups use the existing encrypted vault format, not a plaintext export.
+const MAX_VAULT_BACKUP: u64 = 128 * 1024 * 1024;
+
+fn read_vault_backup(path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::metadata(path).map_err(|e| format!("Open vault: {e}"))?;
+    if !metadata.is_file() || metadata.len() > MAX_VAULT_BACKUP {
+        return Err("Vault backup must be a regular file no larger than 128 MiB".into());
+    }
+    let file = std::fs::File::open(path).map_err(|e| format!("Open vault: {e}"))?;
+    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+        return Err("Vault backup must be a regular file".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_VAULT_BACKUP + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Read vault: {e}"))?;
+    if bytes.len() as u64 > MAX_VAULT_BACKUP {
+        return Err("Vault backup exceeds 128 MiB".into());
+    }
+    if bytes.len() < 46 || &bytes[..4] != VAULT_MAGIC {
+        return Err("Not an RTerm encrypted vault".into());
+    }
+    if u16::from_le_bytes([bytes[4], bytes[5]]) != VAULT_VERSION {
+        return Err("Unsupported vault backup version".into());
+    }
+    Ok(bytes)
+}
+
+fn write_new_backup(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let directory = path.parent().ok_or("Missing backup directory")?;
+    let mut file = tempfile::NamedTempFile::new_in(directory).map_err(|e| e.to_string())?;
+    file.write_all(bytes)
+        .and_then(|()| file.as_file().sync_all())
+        .map_err(|e| e.to_string())?;
+    file.persist_noclobber(path)
+        .map_err(|e| format!("Cannot create vault backup (choose a new filename): {e}"))?;
+    Ok(())
+}
+
+pub(crate) fn export_vault(destination: &Path, key: &VaultKey) -> Result<(), String> {
+    export_vault_at(&get_config_dir().join("vault.dat"), destination, key)
+}
+
+fn export_vault_at(path: &Path, destination: &Path, key: &VaultKey) -> Result<(), String> {
+    let _lock = lock_storage(path)?;
+    let bytes = read_vault_backup(path)?;
+    decode_vault(&bytes, key)?;
+    write_new_backup(destination, &bytes)
+}
+
+pub(crate) struct VaultBackup {
+    bytes: Vec<u8>,
+}
+
+impl VaultBackup {
+    pub(crate) fn read(path: &Path, password: &str) -> Result<Self, String> {
+        let bytes = read_vault_backup(path)?;
+        decode_vault(&bytes, &VaultKey::derive(password))?;
+        Ok(Self { bytes })
+    }
+}
+
+pub(crate) fn import_vault(
+    backup: VaultBackup,
+    current_key: Option<&VaultKey>,
+    replace: bool,
+) -> Result<Option<PathBuf>, String> {
+    import_vault_at(&get_config_dir(), backup, current_key, replace)
+}
+
+fn import_vault_at(
+    directory: &Path,
+    backup: VaultBackup,
+    current_key: Option<&VaultKey>,
+    replace: bool,
+) -> Result<Option<PathBuf>, String> {
+    let path = directory.join("vault.dat");
+    let _lock = lock_storage(&path)?;
+    let previous = if path.exists() {
+        if !replace {
+            return Err("An existing vault must be explicitly replaced".into());
+        }
+        let key = current_key.ok_or("Unlock the existing vault before replacing it")?;
+        let bytes = read_vault_backup(&path)?;
+        decode_vault(&bytes, key)?;
+        let mut file = tempfile::Builder::new()
+            .prefix("vault-before-import-")
+            .suffix(".rterm-vault")
+            .tempfile_in(directory)
+            .map_err(|e| e.to_string())?;
+        file.write_all(&bytes)
+            .and_then(|()| file.as_file().sync_all())
+            .map_err(|e| e.to_string())?;
+        let (_, saved) = file.keep().map_err(|e| e.to_string())?;
+        Some((bytes, saved))
+    } else {
+        None
+    };
+    write_atomic(&path, &backup.bytes)?;
+    if let Err(error) = save_settings_at(
+        &directory.join("settings.json"),
+        &[
+            ("vault_enabled", "1".into()),
+            ("ai_tunnel_autoconnect", "0".into()),
+        ],
+    ) {
+        let rollback = match &previous {
+            Some((bytes, _)) => write_atomic(&path, bytes),
+            None => std::fs::remove_file(&path).map_err(|e| e.to_string()),
+        };
+        rollback.map_err(|e| format!("Vault settings failed: {error}; rollback failed: {e}"))?;
+        return Err(error);
+    }
+    Ok(previous.map(|(_, saved)| saved))
 }
 
 pub(crate) fn save_vault(
@@ -631,6 +747,125 @@ mod tests {
         std::fs::write(&path, b"invalid json").unwrap();
         assert!(save_settings_at(&path, &[("font_size", "14".into())]).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"invalid json");
+    }
+
+    #[test]
+    fn vault_backup_roundtrip_preserves_encrypted_contents_and_previous_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.dat");
+        let exported = dir.path().join("portable.rterm-vault");
+        let destination = dir.path().join("restored");
+        let key = VaultKey::derive("fixture backup password");
+        let previous_key = VaultKey([9; 32]);
+        update_vault(&source, &key, true, |vault| {
+            vault.profiles.push(Profile {
+                name: "Backup session".into(),
+                connection: Connection::Local {
+                    shell: "bash".into(),
+                },
+            });
+            vault.keys.push(SshKey {
+                name: "Fixture key".into(),
+                private_key: "fixture private key".into(),
+                public_key: "fixture public key".into(),
+                key_type: "ed25519".into(),
+            });
+            vault.openai_tunnel = Some(crate::tunnel::Profile {
+                id: "tunnel_0123456789abcdef0123456789abcdef".into(),
+                api_key: "sk-fixture-runtime-key".into(),
+                client: PathBuf::new(),
+            });
+        })
+        .unwrap();
+        export_vault_at(&source, &exported, &key).unwrap();
+        let bytes = std::fs::read(&exported).unwrap();
+        assert_eq!(bytes, std::fs::read(&source).unwrap());
+        assert!(!bytes.windows(19).any(|w| w == b"fixture private key"));
+        assert!(!bytes.windows(22).any(|w| w == b"sk-fixture-runtime-key"));
+        assert!(export_vault_at(&source, &exported, &key).is_err());
+        assert!(export_vault_at(&source, &source, &key).is_err());
+        assert!(VaultBackup::read(&exported, "incorrect").is_err());
+
+        let backup = || VaultBackup::read(&exported, "fixture backup password").unwrap();
+        assert!(
+            import_vault_at(&destination, backup(), None, false)
+                .unwrap()
+                .is_none()
+        );
+        let restored = destination.join("vault.dat");
+        assert_eq!(std::fs::read(&restored).unwrap(), bytes);
+        let vault = decode_vault(&std::fs::read(&restored).unwrap(), &key).unwrap();
+        assert_eq!(vault.profiles[0].name, "Backup session");
+        assert_eq!(vault.keys[0].private_key, "fixture private key");
+        assert_eq!(
+            vault.openai_tunnel.unwrap().api_key,
+            "sk-fixture-runtime-key"
+        );
+        let settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(destination.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["vault_enabled"], "1");
+        assert_eq!(settings["ai_tunnel_autoconnect"], "0");
+
+        let previous = encode_vault(&Vault::default(), &previous_key).unwrap();
+        write_atomic(&restored, &previous).unwrap();
+        assert!(import_vault_at(&destination, backup(), Some(&previous_key), false).is_err());
+        assert!(import_vault_at(&destination, backup(), None, true).is_err());
+        assert!(import_vault_at(&destination, backup(), Some(&key), true).is_err());
+        assert_eq!(std::fs::read(&restored).unwrap(), previous);
+        let saved = import_vault_at(&destination, backup(), Some(&previous_key), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(std::fs::read(saved).unwrap(), previous);
+        assert_eq!(std::fs::read(&restored).unwrap(), bytes);
+        assert!(decode_vault(&std::fs::read(restored).unwrap(), &previous_key).is_err());
+    }
+
+    #[test]
+    fn vault_import_rejects_invalid_files_and_rolls_back_on_settings_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("incoming.rterm-vault");
+        let key = VaultKey([7; 32]);
+        let mut bytes = encode_vault(&Vault::default(), &key).unwrap();
+        std::fs::write(&file, b"not a vault").unwrap();
+        assert!(read_vault_backup(&file).is_err());
+        bytes[4..6].copy_from_slice(&999u16.to_le_bytes());
+        std::fs::write(&file, &bytes).unwrap();
+        assert!(read_vault_backup(&file).is_err());
+        bytes[4..6].copy_from_slice(&VAULT_VERSION.to_le_bytes());
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&file, &bytes).unwrap();
+        assert!(decode_vault(&read_vault_backup(&file).unwrap(), &key).is_err());
+        let original = encode_vault(&Vault::default(), &key).unwrap();
+        let replacement = encode_vault(&Vault::default(), &VaultKey([8; 32])).unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(&settings, b"invalid settings").unwrap();
+        let path = dir.path().join("vault.dat");
+        assert!(
+            import_vault_at(
+                dir.path(),
+                VaultBackup {
+                    bytes: replacement.clone()
+                },
+                None,
+                false
+            )
+            .is_err()
+        );
+        assert!(!path.exists());
+        write_atomic(&path, &original).unwrap();
+        assert!(
+            import_vault_at(
+                dir.path(),
+                VaultBackup { bytes: replacement },
+                Some(&key),
+                true
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(path).unwrap(), original);
+        assert_eq!(std::fs::read(settings).unwrap(), b"invalid settings");
     }
 
     #[test]

@@ -14,6 +14,7 @@ Rterm is a lightweight terminal emulator built with Rust and egui. I built this 
 * SSH key manager with key generation and import
 * SSH agent support
 * Vault encryption for stored sessions and keys (XChaCha20-Poly1305)
+* Import and export password-protected encrypted vault backups across platforms
 * Automatic lock screen
 * Local and remote directory browsing
 * File actions and bulk selection

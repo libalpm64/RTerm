@@ -29,6 +29,15 @@ pub(crate) enum Dialog {
     About,
     Exit,
     ResetVault,
+    ImportVault {
+        path: std::path::PathBuf,
+        password: zeroize::Zeroizing<String>,
+        replace: bool,
+    },
+    VaultNotice {
+        imported: bool,
+        backup: Option<std::path::PathBuf>,
+    },
     DeleteProfile(usize),
     RenameTab {
         tab: u64,
@@ -62,6 +71,11 @@ impl Dialog {
             Self::About => "About Rterm",
             Self::Exit => "Exit Rterm?",
             Self::ResetVault => "Reset vault",
+            Self::ImportVault { .. } => "Import vault",
+            Self::VaultNotice { imported: true, .. } => "Import vault",
+            Self::VaultNotice {
+                imported: false, ..
+            } => "Export vault",
             Self::DeleteProfile(_) => "Delete Session",
             Self::RenameTab { .. } => "Rename Tab",
             Self::Files { action, .. } => match action {
@@ -119,9 +133,46 @@ impl App {
                         let can_connect = draft.on("vault_enabled")
                             && crate::agent::Mode::parse(draft.get("ai_access")) != crate::agent::Mode::Disabled;
                         let mut connect = false;
-                        draft.show(ui, t, password, storage::vault_exists(), |ui| {
-                            connect = tunnel.show(ui, t, self.vault_password.is_some(), can_connect, self.tunnel_profile.as_ref(), self.openai_tunnel.as_ref());
+                        let existing_vault = storage::vault_exists();
+                        let unlocked = self.vault_password.is_some();
+                        let mut export = false;
+                        let mut import = false;
+                        draft.show(ui, t, password, existing_vault, |ui| {
+                            connect = tunnel.show(ui, t, unlocked, can_connect, self.tunnel_profile.as_ref(), self.openai_tunnel.as_ref());
+                        }, |ui| {
+                            ui.add_space(16.0);
+                            ui.separator();
+                            ui.label(crate::i18n::tr(ui, "Encrypted vault backups"));
+                            ui.horizontal_wrapped(|ui| {
+                                export = ui.add_enabled(unlocked && existing_vault,
+                                    egui::Button::new(crate::i18n::tr(ui, "Export vault"))).clicked();
+                                import = ui.add_enabled(!existing_vault || unlocked,
+                                    egui::Button::new(crate::i18n::tr(ui, "Import vault"))).clicked();
+                            });
+                            if existing_vault && !unlocked {
+                                ui.label(crate::i18n::tr(ui, "Unlock the existing vault to export or replace it."));
+                            }
                         });
+                        if export && let Some(path) = rfd::FileDialog::new()
+                            .add_filter("RTerm vault", &["rterm-vault"])
+                            .set_file_name("backup.rterm-vault")
+                            .save_file() {
+                            match self.export_vault(&path) {
+                                Ok(()) => self.dialog = Some(Dialog::VaultNotice { imported: false, backup: Some(path) }),
+                                Err(error) => { self.fail(error); return false; }
+                            }
+                            return true;
+                        }
+                        if import && let Some(path) = rfd::FileDialog::new()
+                            .add_filter("RTerm vault", &["rterm-vault", "dat"])
+                            .pick_file() {
+                            self.dialog = Some(Dialog::ImportVault {
+                                path,
+                                password: zeroize::Zeroizing::new(String::new()),
+                                replace: existing_vault,
+                            });
+                            return true;
+                        }
                         if connect {
                             let result = self.save_settings_dialog(draft.clone(), password, tunnel, context)
                                 .and_then(|()| {
@@ -158,6 +209,48 @@ impl App {
                             Choice::Cancel => true,
                             Choice::None => false,
                         }
+                    }
+                    Dialog::ImportVault { path, password, replace } => {
+                        ui.label(path.display().to_string());
+                        ui.add_space(12.0);
+                        ui.label(crate::i18n::tr(ui, "Import replaces saved sessions and keys. Close other RTerm windows and remote tabs first."));
+                        if *replace {
+                            ui.colored_label(t.yellow, crate::i18n::tr(ui, "The current encrypted vault will be backed up before replacement."));
+                        }
+                        ui.add_space(12.0);
+                        form_field(ui, t, "Backup password", password, "Password", true);
+                        match footer(ui, t, Some("Cancel"), "Import vault", *replace) {
+                            Choice::Yes => {
+                                if password.is_empty() {
+                                    self.fail(crate::i18n::tr(ui, "Enter the backup's master password"));
+                                    return false;
+                                }
+                                match self.import_vault(path, password, *replace) {
+                                    Ok(backup) => {
+                                        self.dialog = Some(Dialog::VaultNotice { imported: true, backup });
+                                        true
+                                    }
+                                    Err(error) => { self.fail(error); false }
+                                }
+                            }
+                            Choice::Cancel => true,
+                            Choice::None => false,
+                        }
+                    }
+                    Dialog::VaultNotice { imported, backup } => {
+                        ui.label(crate::i18n::tr(ui, if *imported {
+                            "Vault imported. Unlock with the backup's master password."
+                        } else {
+                            "Encrypted vault exported."
+                        }));
+                        if let Some(path) = backup {
+                            ui.add_space(8.0);
+                            if *imported {
+                                ui.label(crate::i18n::tr(ui, "Previous vault backup:"));
+                            }
+                            ui.label(path.display().to_string());
+                        }
+                        footer(ui, t, None, "OK", false) == Choice::Yes
                     }
                     Dialog::ResetVault => {
                         ui.label(

@@ -429,6 +429,41 @@ impl App {
         }
     }
 
+    pub(crate) fn export_vault(&self, destination: &std::path::Path) -> Result<(), String> {
+        let key = self
+            .vault_key
+            .as_ref()
+            .ok_or("Unlock the vault before exporting it")?;
+        storage::export_vault(destination, key)
+    }
+
+    pub(crate) fn import_vault(
+        &mut self,
+        path: &std::path::Path,
+        password: &str,
+        replace: bool,
+    ) -> Result<Option<std::path::PathBuf>, String> {
+        // Pending connection callbacks can save old profiles after unlocking.
+        // Require remote tabs to be closed instead of silently disconnecting them.
+        if self.terminals.iter().any(|term| term.kind != Kind::Local)
+            || !self.pending.is_empty()
+            || !self.local_profiles.is_empty()
+        {
+            return Err(
+                "Close remote tabs and finish pending operations before importing a vault".into(),
+            );
+        }
+        let backup = storage::VaultBackup::read(path, password)?;
+        self.stop_agent();
+        let previous = storage::import_vault(backup, self.vault_key.as_ref(), replace)?;
+        self.settings.set("vault_enabled", "1".into());
+        self.settings.set("ai_tunnel_autoconnect", "0".into());
+        self.forget_unlocked_vault();
+        self.lock();
+        self.lock_form = Default::default();
+        Ok(previous)
+    }
+
     pub(crate) fn create_vault(&mut self, password: &str) -> Result<(), String> {
         let key = storage::VaultKey::derive(password);
         storage::save_vault(&self.profiles, &self.vault_keys, &key, true)?;
