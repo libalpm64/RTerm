@@ -52,7 +52,7 @@ impl Activity {
         entries
     }
 
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     pub(super) fn saved(&self) -> &VecDeque<AgentAuditEntry> {
         &self.saved
     }

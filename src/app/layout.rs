@@ -1048,12 +1048,10 @@ impl eframe::App for App {
             if let Some(create) = response
                 .inner
                 .or_else(|| response.should_close().then_some(false))
+                && let Some(setup) = self.desktop_shortcut.take()
+                && let Err(error) = setup.choose(create)
             {
-                if let Some(setup) = self.desktop_shortcut.take() {
-                    if let Err(error) = setup.choose(create) {
-                        self.message = Some(format!("Desktop shortcut setup: {error}"));
-                    }
-                }
+                self.message = Some(format!("Desktop shortcut setup: {error}"));
             }
         }
     }
