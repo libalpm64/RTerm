@@ -17,8 +17,16 @@ pub(crate) struct Settings {
     page: usize,
 }
 
-const DEFAULTS: [(&str, &str); 38] = [
+pub(super) enum SettingsSection {
+    VaultBackups,
+    Import,
+    Tunnel,
+}
+
+const DEFAULTS: &[(&str, &str)] = &[
     ("language", "auto"),
+    #[cfg(target_os = "macos")]
+    ("interface_scale", "100"),
     ("font_size", "13"),
     ("bottom_font_size", ""),
     ("cursor_style", "block"),
@@ -58,9 +66,21 @@ const DEFAULTS: [(&str, &str); 38] = [
     ("ai_tunnel_autoconnect", "0"),
 ];
 
+#[cfg(target_os = "macos")]
+const INTERFACE_SCALES: &[(&str, &str)] = &[
+    ("100", "100%"),
+    ("110", "110%"),
+    ("125", "125%"),
+    ("150", "150%"),
+];
+
 impl Settings {
     pub(crate) fn open_ai_page(&mut self) {
-        self.page = 5;
+        self.page = 6;
+    }
+
+    pub(super) fn open_security_page(&mut self) {
+        self.page = 3;
     }
     pub(crate) fn load() -> Self {
         Self::from_store(storage::load_setting)
@@ -68,13 +88,21 @@ impl Settings {
 
     fn from_store(lookup: impl Fn(&str) -> Option<String>) -> Self {
         let mut values: BTreeMap<&'static str, String> = DEFAULTS
-            .into_iter()
+            .iter()
+            .copied()
             .map(|(key, default)| (key, lookup(key).unwrap_or_else(|| default.into())))
             .collect();
         values.insert(
             "language",
             crate::i18n::preference(&values["language"]).into(),
         );
+        #[cfg(target_os = "macos")]
+        if !INTERFACE_SCALES
+            .iter()
+            .any(|&(scale, _)| scale == values["interface_scale"])
+        {
+            values.insert("interface_scale", "100".into());
+        }
         Self { values, page: 0 }
     }
 
@@ -99,6 +127,11 @@ impl Settings {
             .unwrap_or(25)
             .min(70)
     }
+    #[cfg(target_os = "macos")]
+    pub(crate) fn interface_scale(&self) -> f32 {
+        f32::from(self.get("interface_scale").parse::<u8>().unwrap_or(100)) / 100.0
+    }
+
     pub(crate) fn set(&mut self, key: &'static str, value: String) {
         self.values.insert(key, value);
     }
@@ -148,14 +181,14 @@ impl Settings {
         t: Theme,
         password: &mut String,
         existing_vault: bool,
-        show_tunnel: impl FnOnce(&mut egui::Ui),
-        show_vault: impl FnOnce(&mut egui::Ui),
+        show_section: impl FnOnce(&mut egui::Ui, SettingsSection),
     ) {
         let pages = [
             "Terminal",
             "Appearance",
             "Connection",
             "Security",
+            "Import",
             "SFTP",
             "AI",
         ];
@@ -175,6 +208,15 @@ impl Settings {
                 ui.id().with(("settings-category", index)),
                 Sense::click(),
             );
+            let label = crate::i18n::tr(ui, title);
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::SelectableLabel,
+                    true,
+                    self.page == index,
+                    label,
+                )
+            });
             if response.clicked() {
                 self.page = index;
             }
@@ -193,7 +235,7 @@ impl Settings {
             theme::label(
                 ui,
                 row.shrink2(vec2(12.0, 0.0)),
-                crate::i18n::tr(ui, title),
+                label,
                 t.chrome_font(12.0),
                 if self.page == index { t.text } else { t.muted },
                 egui::Align2::LEFT_CENTER,
@@ -223,15 +265,28 @@ impl Settings {
                 2 => self.connection_page(ui, t),
                 3 => {
                     self.security_page(ui, t, password, existing_vault);
-                    show_vault(ui);
+                    show_section(ui, SettingsSection::VaultBackups);
                 }
-                4 => self.sftp_page(ui, t),
+                4 => show_section(ui, SettingsSection::Import),
+                5 => self.sftp_page(ui, t),
                 _ => {
                     self.ai_page(ui, t);
                     ui.separator();
                     ui.collapsing(
                         crate::i18n::tr(ui, "Advanced · OpenAI Secure MCP Tunnel"),
                         |ui| {
+                            if crate::agent::Mode::parse(self.get("ai_access"))
+                                == crate::agent::Mode::Disabled
+                            {
+                                ui.label(
+                                    RichText::new(crate::i18n::tr(
+                                        ui,
+                                        "Enable Agent Access before setting up the tunnel.",
+                                    ))
+                                    .color(t.muted),
+                                );
+                                return;
+                            }
                             ui.add_enabled_ui(self.on("vault_enabled"), |ui| {
                                 self.flag(
                                     ui,
@@ -240,7 +295,7 @@ impl Settings {
                                     "ai_tunnel_autoconnect",
                                 );
                             });
-                            show_tunnel(ui);
+                            show_section(ui, SettingsSection::Tunnel);
                         },
                     );
                 }
@@ -305,6 +360,17 @@ impl Settings {
 
     fn appearance_page(&mut self, ui: &mut egui::Ui, t: Theme) {
         section(ui, t, "WORKSPACE");
+        #[cfg(target_os = "macos")]
+        self.choice(
+            ui,
+            t,
+            (
+                "Interface Scale",
+                "Adjust the size of menus, panels, and text",
+            ),
+            "interface_scale",
+            INTERFACE_SCALES,
+        );
         self.choice(
             ui,
             t,
@@ -646,7 +712,12 @@ impl App {
     ) -> Result<(), String> {
         settings.normalize_numbers(&self.settings)?;
         let profile = if settings.on("vault_enabled") {
-            tunnel.profile(self.tunnel_profile.as_ref())?
+            if crate::agent::Mode::parse(settings.get("ai_access")) == crate::agent::Mode::Disabled
+            {
+                self.tunnel_profile.clone()
+            } else {
+                tunnel.profile(self.tunnel_profile.as_ref())?
+            }
         } else {
             settings.set("ai_audit_vault", "0".into());
             settings.set("ai_tunnel_autoconnect", "0".into());

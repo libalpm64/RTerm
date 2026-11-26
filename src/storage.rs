@@ -520,6 +520,25 @@ pub(crate) fn save_profiles(profiles: &[Profile]) -> Result<(), String> {
     write_atomic(&get_config_dir().join("sessions.json"), &bytes)
 }
 
+pub(crate) fn import_vault_profiles(
+    key: &VaultKey,
+    incoming: Vec<Profile>,
+) -> Result<(Vec<Profile>, usize), String> {
+    import_vault_profiles_at(&get_config_dir().join("vault.dat"), key, incoming)
+}
+
+fn import_vault_profiles_at(
+    path: &Path,
+    key: &VaultKey,
+    incoming: Vec<Profile>,
+) -> Result<(Vec<Profile>, usize), String> {
+    let mut added = 0;
+    let vault = update_vault(path, key, false, |vault| {
+        added = crate::session_import::append_unique(&mut vault.profiles, incoming);
+    })?;
+    Ok((vault.profiles, added))
+}
+
 pub(crate) fn delete_vault() -> Result<(), String> {
     let path = get_config_dir().join("vault.dat");
     let _lock = lock_storage(&path)?;
@@ -733,6 +752,56 @@ pub(crate) fn remove_profiles() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_ssh_credentials_are_written_only_to_an_existing_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.dat");
+        let export = dir.path().join("hosts_export_test.csv");
+        std::fs::write(&export, "Label,Hostname/IP,Protocol,Username,Password,KeyPath,Passphrase\nImported,test.example,ssh,alice,fixture-netcatty-password,/test/key,fixture-key-passphrase\n").unwrap();
+        let incoming = || crate::session_import::read(&export).unwrap().profiles;
+        let key = VaultKey([42; 32]);
+        assert!(import_vault_profiles_at(&path, &key, incoming()).is_err());
+        assert!(!path.exists());
+        update_vault(&path, &key, true, |vault| {
+            vault.profiles.push(Profile {
+                name: "Existing profile".into(),
+                connection: Connection::Local {
+                    shell: String::new(),
+                },
+            });
+        })
+        .unwrap();
+        assert_eq!(
+            import_vault_profiles_at(&path, &key, incoming()).unwrap().1,
+            1
+        );
+        assert_eq!(
+            import_vault_profiles_at(&path, &key, incoming()).unwrap().1,
+            0
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(
+            !bytes
+                .windows(b"fixture-netcatty-password".len())
+                .any(|window| window == b"fixture-netcatty-password")
+        );
+        assert!(!dir.path().join("sessions.json").exists());
+        let reopened = decode_vault(&bytes, &key).unwrap();
+        assert_eq!(reopened.profiles.len(), 2);
+        assert_eq!(reopened.profiles[0].name, "Existing profile");
+        let Connection::Ssh { config, .. } = &reopened.profiles[1].connection else {
+            panic!("Expected SSH profile");
+        };
+        assert_eq!(
+            config.password.as_deref(),
+            Some("fixture-netcatty-password")
+        );
+        assert_eq!(
+            config.key_passphrase.as_deref(),
+            Some("fixture-key-passphrase")
+        );
+    }
 
     #[test]
     fn settings_updates_preserve_other_keys_and_corrupt_files() {

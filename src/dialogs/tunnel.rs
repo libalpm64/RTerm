@@ -59,7 +59,6 @@ impl Draft {
         ui: &mut egui::Ui,
         theme: Theme,
         unlocked: bool,
-        can_connect: bool,
         saved: Option<&tunnel::Profile>,
         running: Option<&tunnel::Running>,
     ) -> bool {
@@ -71,7 +70,10 @@ impl Draft {
             ui.hyperlink_to("Guide", tunnel::GUIDE);
         });
         if !unlocked {
-            ui.label("Unlock the vault to configure the tunnel.");
+            ui.label(crate::i18n::tr(
+                ui,
+                "Unlock the vault to configure the tunnel.",
+            ));
             return false;
         }
         ui.add_space(6.0);
@@ -155,10 +157,10 @@ impl Draft {
             .horizontal_wrapped(|ui| {
                 let connect = ui
                     .add_enabled(
-                        can_connect && !self.remove && has_credentials,
+                        !self.remove && has_credentials,
                         egui::Button::new("Apply and Connect"),
                     )
-                    .on_disabled_hover_text("Enable Agent Access and enter the tunnel credentials.")
+                    .on_disabled_hover_text("Enter the tunnel credentials.")
                     .clicked();
                 match running.map(tunnel::Running::status) {
                     Some(tunnel::Status::Ready) => {

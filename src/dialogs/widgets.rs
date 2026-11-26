@@ -186,13 +186,9 @@ pub(super) fn toggle(ui: &mut egui::Ui, label: &str, value: &mut bool, t: Theme)
         *value = !*value;
         response.mark_changed();
     }
+    let label = crate::i18n::tr(ui, label);
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::Checkbox,
-            ui.is_enabled(),
-            *value,
-            crate::i18n::tr(ui, label),
-        )
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *value, label)
     });
     let background = if *value {
         t.accent

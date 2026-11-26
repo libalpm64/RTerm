@@ -13,6 +13,7 @@ mod settings;
 mod tunnel;
 mod widgets;
 
+use settings::SettingsSection;
 use widgets::{DIALOG_INSET, form_field};
 
 pub(crate) use connect::ConnectForm;
@@ -25,6 +26,7 @@ pub(crate) enum Dialog {
         draft: Settings,
         password: String,
         tunnel: tunnel::Draft,
+        session_import_summary: Option<crate::session_import::Summary>,
     },
     About,
     Exit,
@@ -61,6 +63,7 @@ impl Dialog {
             draft: settings.clone(),
             password: String::new(),
             tunnel: tunnel::Draft::new(profile),
+            session_import_summary: None,
         }
     }
 
@@ -103,7 +106,9 @@ impl App {
         if let Some(mut dialog) = self.dialog.take() {
             let response = modal("rterm-dialog", t).show(context, |ui| {
                 let width = if matches!(dialog, Dialog::Settings { .. }) {
-                    (context.content_rect().width() - 60.0).clamp(520.0, 710.0)
+                    let available = context.content_rect().width();
+                    let room = (available - 2.0 * f32::from(DIALOG_INSET) - 2.0).max(1.0);
+                    (available - 60.0).clamp(520.0, 710.0).min(room)
                 } else {
                     478.0
                 };
@@ -129,30 +134,66 @@ impl App {
                             Choice::None => false,
                         }
                     }
-                    Dialog::Settings { draft, password, tunnel } => {
-                        let can_connect = draft.on("vault_enabled")
-                            && crate::agent::Mode::parse(draft.get("ai_access")) != crate::agent::Mode::Disabled;
+                    Dialog::Settings { draft, password, tunnel, session_import_summary } => {
                         let mut connect = false;
                         let existing_vault = storage::vault_exists();
                         let unlocked = self.vault_password.is_some();
+                        let tunnel_vault_ready = unlocked && draft.on("vault_enabled");
                         let mut export = false;
                         let mut import = false;
-                        draft.show(ui, t, password, existing_vault, |ui| {
-                            connect = tunnel.show(ui, t, unlocked, can_connect, self.tunnel_profile.as_ref(), self.openai_tunnel.as_ref());
-                        }, |ui| {
-                            ui.add_space(16.0);
-                            ui.separator();
-                            ui.label(crate::i18n::tr(ui, "Encrypted vault backups"));
-                            ui.horizontal_wrapped(|ui| {
-                                export = ui.add_enabled(unlocked && existing_vault,
-                                    egui::Button::new(crate::i18n::tr(ui, "Export vault"))).clicked();
-                                import = ui.add_enabled(!existing_vault || unlocked,
-                                    egui::Button::new(crate::i18n::tr(ui, "Import vault"))).clicked();
-                            });
-                            if existing_vault && !unlocked {
-                                ui.label(crate::i18n::tr(ui, "Unlock the existing vault to export or replace it."));
+                        let mut import_sessions = false;
+                        let mut open_security = false;
+                        let can_import_sessions = self.can_import_sessions() && draft.on("vault_enabled");
+                        draft.show(ui, t, password, existing_vault, |ui, section| match section {
+                            SettingsSection::Tunnel => {
+                                connect = tunnel.show(ui, t, tunnel_vault_ready, self.tunnel_profile.as_ref(), self.openai_tunnel.as_ref());
+                            }
+                            SettingsSection::VaultBackups => {
+                                ui.add_space(16.0);
+                                ui.separator();
+                                ui.label(crate::i18n::tr(ui, "Encrypted vault backups"));
+                                ui.horizontal_wrapped(|ui| {
+                                    export = ui.add_enabled(unlocked && existing_vault,
+                                        egui::Button::new(crate::i18n::tr(ui, "Export vault"))).clicked();
+                                    import = ui.add_enabled(!existing_vault || unlocked,
+                                        egui::Button::new(crate::i18n::tr(ui, "Import vault"))).clicked();
+                                });
+                                if existing_vault && !unlocked {
+                                    ui.label(crate::i18n::tr(ui, "Unlock the existing vault to export or replace it."));
+                                }
+                            }
+                            SettingsSection::Import => {
+                                ui.label(RichText::new(crate::i18n::tr(ui, "External imports require a vault password.")).color(t.muted));
+                                ui.add_space(6.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    import_sessions = ui.add_enabled(can_import_sessions,
+                                        egui::Button::new(crate::i18n::tr(ui, "Import Sessions…"))).clicked();
+                                    if !can_import_sessions {
+                                        open_security = ui.link(crate::i18n::tr(ui, "Open Security settings")).clicked();
+                                    }
+                                });
+                                if let Some(summary) = session_import_summary {
+                                    ui.add_space(6.0);
+                                    ui.label(crate::i18n::format(ui, "Detected {format}", &[("format", summary.format)]));
+                                    ui.label(crate::i18n::format(ui, "Added {added} • Duplicates {duplicates} • Skipped {skipped}", &[
+                                        ("added", &summary.added.to_string()),
+                                        ("duplicates", &summary.duplicates.to_string()),
+                                        ("skipped", &summary.skipped.to_string()),
+                                    ]));
+                                }
                             }
                         });
+                        if open_security {
+                            draft.open_security_page();
+                            context.request_repaint();
+                        }
+                        if import_sessions {
+                            match self.import_sessions() {
+                                Ok(Some(summary)) => *session_import_summary = Some(summary),
+                                Ok(None) => {},
+                                Err(error) => self.fail(crate::i18n::tr(ui, &error)),
+                            }
+                        }
                         if export && let Some(path) = rfd::FileDialog::new()
                             .add_filter("RTerm vault", &["rterm-vault"])
                             .set_file_name("backup.rterm-vault")

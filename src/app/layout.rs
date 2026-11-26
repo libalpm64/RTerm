@@ -1664,7 +1664,15 @@ mod tests {
             };
             assert_eq!(crate::i18n::current(&context), expected, "{code}");
             let _ = context.run(Default::default(), |ctx| {
-                for key in ["Settings", "Apply", "Cancel", "Language", "Appearance"] {
+                for key in [
+                    "Settings",
+                    "Apply",
+                    "Cancel",
+                    "Language",
+                    "Appearance",
+                    "Interface Scale",
+                    "Adjust the size of menus, panels, and text",
+                ] {
                     let label = crate::i18n::text(ctx, key);
                     if expected != "en" {
                         assert_ne!(label, key, "{code}: {key}");
@@ -1680,9 +1688,26 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn interface_scale_applies_at_startup_and_when_settings_change() {
+        let context = egui::Context::default();
+        let mut settings = Settings::benchmark_defaults();
+        settings.set("interface_scale", "125".into());
+        let mut app = App::with_settings(&context, settings, false);
+        let _ = context.run(Default::default(), |_| {});
+        assert_eq!(context.zoom_factor(), 1.25);
+
+        app.settings.set("interface_scale", "100".into());
+        app.apply_settings(&context);
+        let _ = context.run(Default::default(), |_| {});
+        assert_eq!(context.zoom_factor(), 1.0);
+    }
+
     #[test]
     fn workspace_and_dialogs_have_unique_widget_ids() {
         let context = egui::Context::default();
+        context.enable_accesskit();
         context.options_mut(|options| options.warn_on_id_clash = true);
         let mut app = App::with_settings(&context, Settings::benchmark_defaults(), false);
         let options = app.settings.terminal();
@@ -1725,7 +1750,7 @@ mod tests {
             key_type: "ed25519".into(),
         });
         check(&mut app, &mut frame);
-        for page in 0..6 {
+        for page in 0..7 {
             let mut settings = app.settings.clone();
             settings.test_set_page(page);
             app.dialog = Some(Dialog::settings(&settings, None));

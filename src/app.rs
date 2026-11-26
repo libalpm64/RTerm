@@ -123,8 +123,10 @@ impl App {
     }
 
     fn with_settings(context: &egui::Context, settings: Settings, restore_sessions: bool) -> Self {
-        // RTerm owns terminal zoom; egui must not resize the entire UI.
+        // Keep the keyboard zoom shortcuts scoped to the terminal.
         context.options_mut(|options| options.zoom_with_keyboard = false);
+        #[cfg(target_os = "macos")]
+        context.set_zoom_factor(settings.interface_scale());
         crate::i18n::set(
             context,
             if restore_sessions {
@@ -519,6 +521,8 @@ impl App {
         // Any committed AI-policy change invalidates existing credentials/grants.
         self.stop_agent();
         self.apply_language(context);
+        #[cfg(target_os = "macos")]
+        context.set_zoom_factor(self.settings.interface_scale());
         self.theme = Theme::dark();
         self.theme.apply(context);
         self.highlighter = Highlighter::new(
@@ -838,6 +842,57 @@ impl App {
 
     fn show_connect(&mut self) {
         self.dialog = Some(Dialog::connect(ConnectForm::new(&self.settings)));
+    }
+
+    pub(crate) fn can_import_sessions(&self) -> bool {
+        self.settings.on("vault_enabled")
+            && self.vault_key.is_some()
+            && self
+                .vault_password
+                .as_ref()
+                .is_some_and(|password| !password.is_empty())
+    }
+
+    pub(crate) fn import_sessions(
+        &mut self,
+    ) -> Result<Option<crate::session_import::Summary>, String> {
+        let key = self
+            .vault_key
+            .as_ref()
+            .filter(|_| self.can_import_sessions())
+            .ok_or("Enable and unlock your RTerm vault to import sessions.")?;
+        let downloads = storage::default_download_dir();
+        let mut picker = rfd::FileDialog::new();
+        if downloads.is_dir() {
+            picker = picker.set_directory(&downloads);
+        }
+        if let Some(path) = crate::session_import::latest_export(&downloads)
+            && let Some(name) = path.file_name().and_then(|name| name.to_str())
+        {
+            picker = picker.set_file_name(name);
+        }
+        let Some(path) = picker.pick_file() else {
+            return Ok(None);
+        };
+        let import = crate::session_import::read(&path)?;
+        let total = import.profiles.len();
+        let added = if total > 0 {
+            let (profiles, added) = storage::import_vault_profiles(key, import.profiles)?;
+            self.profiles = profiles;
+            if added > 0 {
+                self.sessions_sidebar.get_or_insert(220.0);
+                self.filter.clear();
+            }
+            added
+        } else {
+            0
+        };
+        Ok(Some(crate::session_import::Summary {
+            format: import.format,
+            added,
+            duplicates: total - added,
+            skipped: import.skipped,
+        }))
     }
 
     fn run_action(&mut self, action: Action, context: &egui::Context) {

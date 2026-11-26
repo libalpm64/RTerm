@@ -1,5 +1,11 @@
 # Usage and development
 
+## Import sessions
+
+In RTerm, open **File → Settings → Security**, enable the vault, set a master password, and click **Apply**. With the vault unlocked, open **Settings → Import → Import Sessions…** and select an export. RTerm detects the format from the file contents. The importer currently supports the CSV export from Netcatty’s **Hosts** view and suggests the most recent Netcatty download when it finds one. This workflow supports macOS, Windows, and Linux.
+
+RTerm adds direct SSH and Telnet profiles to the encrypted vault and preserves existing duplicates. SSH passwords, key-file references, and passphrases included in the CSV are imported. For file-based keys, the key file must be available at the saved path on the receiving machine. Netcatty’s CSV can contain plaintext credentials. Secure Enclave keys remain device-bound and can be used through RTerm’s SSH agent option if an agent exposes them. Groups, tags, and Telnet login credentials are omitted. Rows with a proxy or jump host in the export, unsupported protocols, or invalid fields are counted as skipped.
+
 ## Vault backup and restore
 
 Open **Settings → Security → Encrypted vault backups** on Windows, Linux or macOS. Apply any pending settings before starting a backup.

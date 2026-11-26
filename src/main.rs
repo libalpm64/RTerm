@@ -21,6 +21,7 @@ mod host_keys;
 mod i18n;
 mod mcp;
 mod models;
+mod session_import;
 mod storage;
 mod terminal;
 mod theme;
