@@ -162,7 +162,7 @@ jobs:
         with:
           persist-credentials: false
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxrandr-dev libgl1-mesa-dev libegl1-mesa-dev libudev-dev libdbus-1-dev pkg-config desktop-file-utils shellcheck curl jq unzip zip libglib2.0-bin fontconfig fonts-noto-cjk
-      - run: shellcheck -x run.sh packaging/*.sh packaging/linux/*.sh packaging/macos/*.sh
+      - run: shellcheck -x run.sh packaging/fetch_tunnel_client.sh packaging/test_fetch_tunnel_client.sh packaging/publish.sh packaging/linux/*.sh packaging/macos/*.sh
       - run: bash packaging/linux/test_install.sh
       - uses: ./.github/actions/check-rust
       - uses: actions/download-artifact@v4

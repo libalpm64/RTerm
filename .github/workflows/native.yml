@@ -26,6 +26,6 @@ jobs:
       - run: cargo build --release --locked --bins
       - if: runner.os == 'Linux'
         run: |
-          shellcheck -x run.sh packaging/*.sh packaging/linux/*.sh packaging/macos/*.sh
+          shellcheck -x run.sh packaging/fetch_tunnel_client.sh packaging/test_fetch_tunnel_client.sh packaging/publish.sh packaging/linux/*.sh packaging/macos/*.sh
           bash packaging/linux/test_install.sh
           bash packaging/test_fetch_tunnel_client.sh
