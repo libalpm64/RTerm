@@ -19,6 +19,8 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y jq curl zip unzip
       - run: bash packaging/test_fetch_tunnel_client.sh
       - name: Resolve latest stable OpenAI tunnel-client
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: bash packaging/fetch_tunnel_client.sh --resolve target/tunnel-release/manifest.json
       - uses: actions/upload-artifact@v4
         with:

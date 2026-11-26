@@ -7,15 +7,19 @@ root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
 export FIXTURE_ROOT=$root
 mkdir "$root/bin" "$root/archives"
-unset RTERM_TUNNEL_MANIFEST
+unset RTERM_TUNNEL_MANIFEST GH_TOKEN
 cat > "$root/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
 set -eu
 out=
 url=
+auth=
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -o) out=$2; shift 2;;
+        --header)
+            if [[ $2 == @- ]]; then auth=$(cat); fi
+            shift 2;;
         https://*) url=$1; shift;;
         *) shift;;
     esac
@@ -23,8 +27,13 @@ done
 printf '%s\n' "$url" >> "$FIXTURE_ROOT/calls"
 case "$url" in
     https://api.github.com/repos/openai/tunnel-client/releases/latest)
+        if [[ -f $FIXTURE_ROOT/require-auth && $auth != 'Authorization: Bearer fixture-token' ]]; then
+            echo 'curl: (22) The requested URL returned error: 403' >&2
+            exit 22
+        fi
         cat "$FIXTURE_ROOT/release.json";;
     https://github.com/openai/tunnel-client/releases/download/*)
+        [[ -z $auth ]] || exit 1
         cp "$FIXTURE_ROOT/archives/${url##*/}" "$out";;
     *) exit 1;;
 esac
@@ -66,6 +75,14 @@ bash "$fetch" --resolve "$root/latest.json"
 [[ $(jq -r .version "$root/old.json") == v0.0.99 ]]
 [[ $(jq -r .version "$root/latest.json") == v0.1.0 ]]
 [[ $(grep -c '^https://api.github.com/' "$root/calls") == 2 ]]
+touch "$root/require-auth"
+reject bash "$fetch" --resolve "$root/unauthenticated.json"
+grep -q 'set GH_TOKEN' "$root/rejected.log"
+[[ ! -e $root/unauthenticated.json ]]
+export GH_TOKEN=fixture-token
+bash "$fetch" --resolve "$root/authenticated.json"
+cmp "$root/latest.json" "$root/authenticated.json"
+# Leave the token set for the following asset tests; the mock rejects leaked headers.
 cp "$root/release.json" "$root/valid.json"
 for filter in '.assets |= map(select(.name | contains("darwin-arm64") | not))' \
     '.assets[0].digest = null' '.assets[0].browser_download_url = "https://example.org/other.zip"' \

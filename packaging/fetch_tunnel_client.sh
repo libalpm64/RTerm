@@ -10,9 +10,24 @@ download() {
     curl --proto '=https' --proto-redir '=https' --fail --location \
         --silent --show-error --retry 3 --connect-timeout 15 --max-time 180 "$@"
 }
+release_metadata() {
+    # Authenticate only the fixed GitHub API endpoint, never asset downloads.
+    # Read the header from stdin so the token is not a curl command argument.
+    local -a args=(--max-redirs 0 --header 'Accept: application/vnd.github+json'
+        --header 'X-GitHub-Api-Version: 2022-11-28' --header 'Cache-Control: no-cache')
+    if [[ -n ${GH_TOKEN:-} ]]; then
+        printf 'Authorization: Bearer %s\n' "$GH_TOKEN" |
+            download "${args[@]}" --header @- "$latest"
+    else
+        download "${args[@]}" "$latest"
+    fi
+}
 resolve() {
-    download --header 'Accept: application/vnd.github+json' \
-        --header 'Cache-Control: no-cache' "$latest" |
+    local metadata
+    if ! metadata=$(release_metadata); then
+        fail "GitHub release lookup failed. Check API access and rate limits; set GH_TOKEN for authenticated requests."
+    fi
+    printf '%s\n' "$metadata" |
         jq -e --arg repository "$repository" '
         if .draft != false or .prerelease != false or
             (.tag_name | type != "string" or (test("^v[0-9]+\\.[0-9]+\\.[0-9]+$") | not))
