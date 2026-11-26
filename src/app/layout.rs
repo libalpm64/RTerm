@@ -1308,7 +1308,18 @@ mod tests {
                 Err(error) => panic!("{error}"),
             }
         };
+        // Accepted sockets can inherit O_NONBLOCK on BSD/macOS. The
+        // listener uses nonblocking accept, but this fixture uses bounded
+        // blocking reads and writes on the connected stream.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         stream.write_all(b"READY> ").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
         while app.terminals[0].status().1 != "Ln 1, Col 8" {
             app.poll(&context);
             assert!(
@@ -1359,9 +1370,6 @@ mod tests {
             eframe::App::raw_input_hook(&mut app, &context, &mut raw);
             assert_eq!(app.terminal_navigation.len(), 4);
             let _ = context.run(raw, |ctx| eframe::App::update(&mut app, ctx, &mut frame));
-            stream
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
             let mut got = vec![0; expected.len()];
             stream.read_exact(&mut got).unwrap();
             assert_eq!(got, expected);

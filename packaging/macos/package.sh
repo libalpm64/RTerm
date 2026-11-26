@@ -4,13 +4,13 @@ bin_dir=${1:?Release binary directory}
 version=${2:?Version}
 arch=${3:?Architecture}
 out=${4:-dist}
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=packaging/common.sh
 . "$here/../common.sh"
 prepare_package
 case "$arch" in arm64) cpu=arm64;; x64) cpu=x86_64;; *) echo "Unsupported macOS architecture" >&2; exit 1;; esac
 for file in rterm rterm-agent; do
-    lipo -verify_arch "$cpu" "$bin_dir/$file"
+    lipo "$bin_dir/$file" -verify_arch "$cpu"
 done
 root="$stage/root"
 app="$root/Applications/RTerm.app"

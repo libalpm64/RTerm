@@ -3,7 +3,7 @@ set -eu
 bin_dir=${1:?Release binary directory}
 version=${2:?Version}
 out=${3:-dist}
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=packaging/common.sh
 . "$here/../common.sh"
 prepare_package

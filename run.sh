@@ -1,4 +1,4 @@
 #!/usr/bin/env sh
 set -eu
-CDPATH= cd -- "$(dirname -- "$0")"
+CDPATH='' cd -- "$(dirname -- "$0")"
 exec cargo run --locked -- "$@"

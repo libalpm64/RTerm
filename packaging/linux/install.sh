@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install a matching desktop/CLI pair from the Linux portable archive.
 set -eu
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 for file in rterm rterm-agent rterm.desktop rterm.png licenses/Inter-OFL.txt licenses/JetBrainsMono-OFL.txt licenses/alacritty-LICENSE-APACHE licenses/THIRD-PARTY-LICENSES.html; do
     if [ ! -f "$here/$file" ] || [ ! -r "$here/$file" ]; then
         printf 'Incomplete RTerm archive: missing %s\n' "$file" >&2
@@ -39,7 +39,10 @@ exec_line="Exec=\"$exec_path\""
 # The spec also disallows '=' in the executable token. For these paths,
 # pass the filename as $0 to a constant shell command, never as shell code.
 case "$prefix" in
-    *%*|*=*) exec_line=$(printf '%s "%s"' 'Exec=/bin/sh -c "exec \\"\\$0\\""' "$exec_path");;
+    *%*|*=*)
+        # The desktop launcher must pass a literal $0 to the child shell.
+        # shellcheck disable=SC2016
+        exec_line=$(printf '%s "%s"' 'Exec=/bin/sh -c "exec \\"\\$0\\""' "$exec_path");;
 esac
 stage=$(mktemp -d)
 trap 'rm -f "$stage/rterm.desktop"; rmdir "$stage"' EXIT
@@ -66,7 +69,9 @@ fi
 # Keep the prefix copy for installed-build detection, and register the same
 # desktop ID in XDG. Compare directories by identity, not spelling.
 install -m 644 -T "$stage/rterm.desktop" "$prefix/share/applications/rterm.desktop"
-if ! [ "$prefix/share/applications" -ef "$data_home/applications" ]; then
+prefix_identity=$(stat -Lc '%d:%i' -- "$prefix/share/applications")
+data_identity=$(stat -Lc '%d:%i' -- "$data_home/applications")
+if [ "$prefix_identity" != "$data_identity" ]; then
     install -m 644 -T "$stage/rterm.desktop" "$data_home/applications/rterm.desktop"
 fi
 echo "Installed RTerm and rterm-agent in $prefix/bin."
