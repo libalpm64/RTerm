@@ -483,15 +483,14 @@ fn local_folder_creation_uses_current_directory_and_never_overwrites() {
     let directory = app.explorer.local.path.clone();
     assert!(app.can_create_local_folder());
     app.new_local_folder();
-    let Some(Dialog::NewLocalFolder {
-        directory: captured,
-        name,
-    }) = app.dialog.take()
-    else {
-        panic!("local folder dialog should open without an SSH connection");
-    };
-    assert_eq!(captured, directory);
-    assert!(name.is_empty());
+    let draft = app
+        .explorer
+        .folder_draft
+        .take()
+        .expect("local folder draft");
+    assert_eq!(draft.destination, Destination::Local(directory.clone()));
+    assert!(draft.name.is_empty());
+    assert!(app.dialog.is_none());
     for invalid in [
         "",
         " ",
@@ -612,14 +611,112 @@ fn local_folder_plus_works_in_expanded_compact_and_docked_views() {
                 ],
             );
         }
-        let Some(Dialog::NewLocalFolder {
-            directory: captured,
-            name,
-        }) = app.dialog.take()
-        else {
-            panic!("local folder button not working at width {width}, docked {docked}");
-        };
-        assert_eq!(captured, directory);
-        assert!(name.is_empty());
+        let draft = app.explorer.folder_draft.as_ref().unwrap_or_else(|| {
+            panic!("local folder button not working at width {width}, docked {docked}")
+        });
+        assert_eq!(draft.destination, Destination::Local(directory.clone()));
+        assert!(draft.name.is_empty());
+        assert!(context.memory(|memory| memory.has_focus(draft.editor_id())));
+        assert!(app.dialog.is_none());
+        let name = format!("Folder at {width}");
+        render(&mut app, vec![egui::Event::Text(name.clone())]);
+        assert_eq!(app.explorer.folder_draft.as_ref().unwrap().name, name);
+        assert!(
+            !directory.join(&name).exists(),
+            "draft must not create a folder before Enter"
+        );
+        render(
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(
+            app.explorer.folder_draft.is_none(),
+            "Enter should commit the draft"
+        );
+        assert!(directory.join(&name).is_dir());
+        // The same editor can be cancelled without creating a directory.
+        app.new_local_folder();
+        render(&mut app, vec![]);
+        render(&mut app, vec![egui::Event::Text("cancelled folder".into())]);
+        render(
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: Some(egui::Key::Escape),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.explorer.folder_draft.is_none(), "Escape must cancel");
+        assert!(!directory.join("cancelled folder").exists());
+        assert!(
+            app.explorer
+                .local
+                .entries
+                .iter()
+                .any(|entry| entry.directory && entry.name == name)
+        );
     }
+}
+
+#[test]
+fn inline_folder_validation_keeps_editor_and_navigation_discards_draft() {
+    let context = egui::Context::default();
+    let mut app = App::test_fixture(&context);
+    let temp = tempfile::tempdir().unwrap();
+    app.explorer.load_local(temp.path().to_owned());
+    let dir = app.explorer.local.path.clone();
+    std::fs::create_dir(dir.join("existing")).unwrap();
+    app.explorer.refresh_local();
+    app.new_local_folder();
+    let render = |app: &mut App, events| {
+        context.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(240.0, 600.0))),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| app.explorer_panel(ui, ui.max_rect()));
+            },
+        )
+    };
+    let enter = || egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: Some(egui::Key::Enter),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    render(&mut app, vec![]);
+    render(
+        &mut app,
+        vec![egui::Event::Text("existing".into()), enter()],
+    );
+    let draft = app
+        .explorer
+        .folder_draft
+        .as_ref()
+        .expect("duplicate name should remain editable");
+    assert_eq!(draft.name, "existing");
+    assert!(draft.error.is_some());
+    assert!(app.dialog.is_none() && app.message.is_none());
+    render(&mut app, vec![]);
+    assert!(context.memory(|memory| {
+        memory.has_focus(app.explorer.folder_draft.as_ref().unwrap().editor_id())
+    }));
+    // Re-entering the same name does not overwrite anything.
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    app.explorer.load_local(dir.join("existing"));
+    assert!(app.explorer.folder_draft.is_none());
+    assert_eq!(std::fs::read_dir(dir.join("existing")).unwrap().count(), 0);
 }

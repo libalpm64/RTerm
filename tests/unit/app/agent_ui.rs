@@ -2038,15 +2038,18 @@ fn sftp_only_authenticates_without_shell_and_transfers_files() {
     let id = app.active_ssh().unwrap();
     pump(&mut app, &|app| app.can_create_sftp_folder());
     app.new_sftp_folder();
-    let Some(Dialog::NewSftpFolder {
-        id: folder_id,
-        directory,
-        ..
-    }) = app.dialog.take()
+    let draft = app
+        .explorer
+        .folder_draft
+        .as_ref()
+        .expect("SFTP inline folder draft");
+    let crate::explorer::Destination::Remote(folder_id, directory) = draft.destination.clone()
     else {
-        panic!("Folder action should open the folder dialog");
+        panic!("SFTP folder destination");
     };
     assert_eq!(folder_id, id);
+    assert!(draft.name.is_empty());
+    assert!(app.dialog.is_none());
     assert!(app.create_sftp_folder(id, &directory, "../escape").is_err());
     assert!(app.create_sftp_folder(id, &directory, " ").is_err());
     assert!(
@@ -2055,24 +2058,66 @@ fn sftp_only_authenticates_without_shell_and_transfers_files() {
     );
     let name = "New fixture folder";
     let path = crate::backend::join_remote(&directory, name);
-    app.create_sftp_folder(id, &directory, name).unwrap();
+    let render_folder = |app: &mut App, events| {
+        context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| app.explorer_workspace(ui, ui.max_rect()));
+            },
+        )
+    };
+    render_folder(&mut app, vec![]);
+    render_folder(&mut app, vec![egui::Event::Text(name.into())]);
+    assert_eq!(app.explorer.folder_draft.as_ref().unwrap().name, name);
+    assert!(!files.lock().unwrap().contains_key(&format!("{path}/")));
+    render_folder(
+        &mut app,
+        vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: Some(egui::Key::Enter),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    assert!(app.explorer.folder_draft.as_ref().unwrap().pending);
     pump(&mut app, &|app| {
         files.lock().unwrap().contains_key(&format!("{path}/"))
             && app.pending.is_empty()
             && app.can_create_sftp_folder()
     });
-    app.create_sftp_folder(id, &directory, name).unwrap();
-    pump(&mut app, &|app| app.message.is_some());
-    app.message = None;
+    assert!(app.explorer.folder_draft.is_none());
+    app.new_sftp_folder();
+    app.explorer.folder_draft.as_mut().unwrap().name = name.into();
+    app.confirm_folder_draft();
+    pump(&mut app, &|app| {
+        app.explorer
+            .folder_draft
+            .as_ref()
+            .is_some_and(|draft| draft.error.is_some() && !draft.pending)
+    });
+    assert!(app.message.is_none());
     assert!(files.lock().unwrap().contains_key(&format!("{path}/")));
+    app.explorer.folder_draft.as_mut().unwrap().name = "Retry folder".into();
+    app.confirm_folder_draft();
+    pump(&mut app, &|app| {
+        app.explorer.folder_draft.is_none() && app.pending.is_empty()
+    });
     app.toggle_file_workspace();
     assert!(!app.explorer.expanded);
     pump(&mut app, &|app| app.can_create_sftp_folder());
     app.new_sftp_folder();
-    assert!(matches!(
-        app.dialog.take(),
-        Some(Dialog::NewSftpFolder { .. })
-    ));
+    assert!(app.explorer.folder_draft.is_some());
+    assert!(app.dialog.is_none());
     app.toggle_file_workspace();
     let temp = crate::storage::test_private_tempdir();
     let shared = temp.path().join("shared");

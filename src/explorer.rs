@@ -25,6 +25,8 @@ pub(crate) struct Explorer {
     pub(crate) expanded: bool,
     hover_folder: Option<(Destination, Instant)>,
     split_fraction: f32,
+    pub(crate) folder_draft: Option<FolderDraft>,
+    folder_serial: u64,
 }
 
 struct Listing<T> {
@@ -151,12 +153,15 @@ impl Explorer {
             expanded: false,
             hover_folder: None,
             split_fraction: 0.5,
+            folder_draft: None,
+            folder_serial: 0,
         };
         explorer.load_local(storage::home_dir());
         explorer
     }
 
     pub(crate) fn accept_initial_listing(&mut self, id: u32, path: String, entries: Vec<Entry>) {
+        self.cancel_folder_on_side(true);
         self.remote_id = Some(id);
         self.request += 1;
         self.loading = false;
@@ -173,12 +178,36 @@ impl Explorer {
         self.load_local(self.local.path.clone());
     }
 
+    fn cancel_folder_on_side(&mut self, remote: bool) {
+        if self
+            .folder_draft
+            .as_ref()
+            .is_some_and(|draft| draft.remote() == remote)
+        {
+            self.folder_draft = None;
+        }
+    }
+
+    pub(crate) fn folder_editing(&self, context: &egui::Context) -> bool {
+        self.folder_draft.as_ref().is_some_and(|draft| {
+            !draft.pending && context.memory(|memory| memory.has_focus(draft.editor_id()))
+        })
+    }
+
     fn load_local(&mut self, path: PathBuf) {
         let result = std::fs::canonicalize(&path)
             .and_then(|path| list_local(&path).map(|entries| (path, entries)));
         match result {
-            Ok((path, entries)) => self.local.replace(path, entries),
-            Err(error) => self.local.error = Some(error.to_string()),
+            Ok((path, entries)) => {
+                if path != self.local.path {
+                    self.cancel_folder_on_side(false);
+                }
+                self.local.replace(path, entries);
+            }
+            Err(error) => {
+                self.cancel_folder_on_side(false);
+                self.local.error = Some(error.to_string());
+            }
         }
     }
 }
@@ -207,10 +236,37 @@ impl Target {
 #[derive(Clone)]
 struct DragFiles(Vec<Target>);
 
-#[derive(Clone, PartialEq, Eq)]
-enum Destination {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Destination {
     Local(PathBuf),
     Remote(u32, String),
+}
+
+// This is only a visual draft, never a real listing entry or transfer target.
+// Commit exactly one MKDIR/create_dir when the user presses Enter.
+pub(crate) struct FolderDraft {
+    pub(crate) destination: Destination,
+    pub(crate) name: String,
+    serial: u64,
+    focus: bool,
+    pub(crate) pending: bool,
+    pub(crate) error: Option<String>,
+}
+
+impl FolderDraft {
+    fn remote(&self) -> bool {
+        matches!(self.destination, Destination::Remote(..))
+    }
+
+    fn editor_id(&self) -> egui::Id {
+        egui::Id::new(("inline-folder-name", self.serial))
+    }
+}
+
+enum FolderEdit {
+    None,
+    Confirm,
+    Cancel,
 }
 
 fn can_drop(files: &DragFiles, destination: &Destination) -> bool {
@@ -344,6 +400,7 @@ enum SelectionAction {
 impl App {
     pub(crate) fn activate_remote(&mut self, id: Option<u32>) {
         if self.explorer.remote_id != id {
+            self.explorer.cancel_folder_on_side(true);
             self.explorer.remote = Listing::new(".".into());
             self.explorer.remote_id = id;
             self.explorer.request += 1;
@@ -362,6 +419,9 @@ impl App {
     }
 
     fn load_remote(&mut self, id: u32, path: String) {
+        if self.explorer.remote_id != Some(id) || self.explorer.remote.path != path {
+            self.explorer.cancel_folder_on_side(true);
+        }
         self.explorer.loading = true;
         self.explorer.request += 1;
         let request = self.explorer.request;
@@ -377,10 +437,19 @@ impl App {
                 app.explorer.loading = false;
                 match result {
                     Ok(Reply::Files { path, entries }) => {
+                        if app.explorer.remote.path != path {
+                            app.explorer.cancel_folder_on_side(true);
+                        }
                         app.explorer.remote.replace(path, entries)
                     }
-                    Err(error) => app.explorer.remote.error = Some(error),
-                    _ => app.explorer.remote.error = Some("Invalid SFTP listing".into()),
+                    Err(error) => {
+                        app.explorer.cancel_folder_on_side(true);
+                        app.explorer.remote.error = Some(error);
+                    }
+                    _ => {
+                        app.explorer.cancel_folder_on_side(true);
+                        app.explorer.remote.error = Some("Invalid SFTP listing".into());
+                    }
                 }
             },
         );
@@ -412,12 +481,64 @@ impl App {
             && self.explorer.local.path.is_absolute()
     }
 
+    fn begin_folder_draft(&mut self, destination: Destination) {
+        if let Some(draft) = &mut self.explorer.folder_draft {
+            if draft.pending {
+                return;
+            }
+            if draft.destination == destination {
+                draft.focus = true;
+                return;
+            }
+        }
+        self.explorer.folder_serial = self.explorer.folder_serial.wrapping_add(1);
+        self.explorer.folder_draft = Some(FolderDraft {
+            destination,
+            name: String::new(),
+            serial: self.explorer.folder_serial,
+            focus: true,
+            pending: false,
+            error: None,
+        });
+        self.focus_file_editor();
+    }
+
     fn new_local_folder(&mut self) {
         if self.can_create_local_folder() {
-            self.dialog = Some(Dialog::NewLocalFolder {
-                directory: self.explorer.local.path.clone(),
-                name: String::new(),
-            });
+            self.begin_folder_draft(Destination::Local(self.explorer.local.path.clone()));
+        }
+    }
+
+    pub(crate) fn confirm_folder_draft(&mut self) {
+        let Some(draft) = self
+            .explorer
+            .folder_draft
+            .as_ref()
+            .filter(|draft| !draft.pending)
+        else {
+            return;
+        };
+        let destination = draft.destination.clone();
+        let name = draft.name.clone();
+        let result = match destination {
+            Destination::Local(directory) => {
+                let result = self.create_local_folder(&directory, &name);
+                if result.is_ok() {
+                    self.explorer.folder_draft = None;
+                }
+                result
+            }
+            Destination::Remote(id, directory) => {
+                self.explorer.folder_draft.as_mut().unwrap().pending = true;
+                self.create_sftp_folder(id, &directory, &name)
+            }
+        };
+        if let Err(error) = result
+            && let Some(draft) = &mut self.explorer.folder_draft
+        {
+            draft.pending = false;
+            draft.focus = true;
+            draft.error = Some(error);
         }
     }
 
@@ -434,7 +555,7 @@ impl App {
         }
         let name = safe_name(name)?;
         // The listing holds a canonical path. Do not follow a replacement
-        // symlink to a different directory after the dialog has been opened.
+        // symlink to a different directory after the inline editor has been opened.
         let current = std::fs::canonicalize(directory)
             .map_err(|error| format!("{}: {error}", directory.display()))?;
         if current != directory {
@@ -462,11 +583,10 @@ impl App {
             return;
         }
         if let Some(id) = self.explorer.remote_id {
-            self.dialog = Some(Dialog::NewSftpFolder {
-                id,
-                directory: self.explorer.remote.path.clone(),
-                name: String::new(),
-            });
+            self.begin_folder_draft(Destination::Remote(id, self.explorer.remote.path.clone()));
+            // The main File Manager button must also reveal the editor in
+            // compact mode when the Local tab was selected.
+            self.explorer.remote_active = true;
         }
     }
 
@@ -486,6 +606,16 @@ impl App {
             return Err("Enter a folder name".into());
         }
         safe_name(name)?;
+        let serial = self
+            .explorer
+            .folder_draft
+            .as_ref()
+            .filter(|draft| {
+                draft.pending
+                    && draft.destination == Destination::Remote(id, directory.to_owned())
+                    && draft.name == name
+            })
+            .map(|draft| draft.serial);
         self.request(
             Command::Sftp {
                 id,
@@ -494,10 +624,34 @@ impl App {
                     name: name.to_owned(),
                 },
             },
-            move |app, result| match result {
-                Ok(Reply::Done) => app.refresh_remote_if(id),
-                Err(error) => app.fail(error),
-                _ => app.fail("Invalid SFTP response"),
+            move |app, result| {
+                let matching = app
+                    .explorer
+                    .folder_draft
+                    .as_ref()
+                    .is_some_and(|draft| Some(draft.serial) == serial);
+                match result {
+                    Ok(Reply::Done) => {
+                        if matching {
+                            app.explorer.folder_draft = None;
+                        }
+                        app.refresh_remote_if(id);
+                    }
+                    result => {
+                        let error = match result {
+                            Err(error) => error,
+                            _ => "Invalid SFTP response".into(),
+                        };
+                        if matching {
+                            let draft = app.explorer.folder_draft.as_mut().unwrap();
+                            draft.pending = false;
+                            draft.focus = true;
+                            draft.error = Some(error);
+                        } else {
+                            app.fail(error);
+                        }
+                    }
+                }
             },
         );
         Ok(())
@@ -828,6 +982,7 @@ impl App {
             self.explorer.remote_active
         };
         if show_remote != self.explorer.remote_active {
+            self.explorer.folder_draft = None;
             self.explorer.remote_active = show_remote;
             if show_remote {
                 self.activate_remote(self.active_ssh());
@@ -855,11 +1010,15 @@ impl App {
 
     fn new_folder_button(&mut self, ui: &mut egui::Ui, slot: Rect, label: &str, remote: bool) {
         let t = self.theme;
-        let enabled = if remote {
+        let enabled = (if remote {
             self.can_create_sftp_folder()
         } else {
             self.can_create_local_folder()
-        };
+        }) && self
+            .explorer
+            .folder_draft
+            .as_ref()
+            .is_none_or(|draft| !draft.pending);
         if enabled {
             if theme::icon_button(ui, slot, label, Icon::FolderAdd, t).clicked() {
                 if remote {
@@ -971,6 +1130,7 @@ impl App {
             && theme::icon_button(ui, icon_slot(header, 0), "Hide Filer", Icon::Close, t).clicked()
         {
             self.sidebar = None;
+            self.explorer.folder_draft = None;
         }
         if docked
             && theme::icon_button(ui, icon_slot(header, 2), "Expand Filer", Icon::Expand, t)
@@ -1212,6 +1372,15 @@ impl App {
                 )))
             }
         };
+        let draft_here = self.explorer.folder_draft.as_ref().is_some_and(|draft| {
+            if remote {
+                remote_id.is_some_and(|id| {
+                    draft.destination == Destination::Remote(id, remote_path.clone())
+                })
+            } else {
+                draft.destination == Destination::Local(local_path.clone())
+            }
+        });
         let date_sort = if remote {
             self.explorer.remote.date_sort
         } else {
@@ -1419,6 +1588,10 @@ impl App {
             }
             response.on_hover_text(crate::i18n::tr(ui, "Go to parent folder"));
         }
+        let mut folder_edit = FolderEdit::None;
+        if draft_here && let Some(draft) = &mut self.explorer.folder_draft {
+            folder_edit = inline_folder_row(&mut child, t, draft, enabled);
+        }
         theme::compact_list((bounds.bottom() - child.cursor().top()).max(0.0)).show_rows(
             &mut child,
             18.0,
@@ -1597,6 +1770,18 @@ impl App {
                 }
             },
         );
+        match folder_edit {
+            FolderEdit::Confirm => {
+                self.confirm_folder_draft();
+                ui.ctx().request_repaint();
+                return;
+            }
+            FolderEdit::Cancel => {
+                self.explorer.folder_draft = None;
+                ui.ctx().request_repaint();
+            }
+            FolderEdit::None => {}
+        }
         if enabled
             && drop_destination.is_none()
             && ui.rect_contains_pointer(bounds)
@@ -1886,6 +2071,114 @@ fn short_local(path: &Path) -> String {
     } else {
         path.display().to_string()
     }
+}
+
+// Pin the draft just below the parent row, outside the virtualized scroll
+// area. It remains visible even when the directory has thousands of entries.
+fn inline_folder_row(
+    ui: &mut egui::Ui,
+    t: theme::Theme,
+    draft: &mut FolderDraft,
+    enabled: bool,
+) -> FolderEdit {
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+    theme::band(ui, row, t.hover, None);
+    theme::icon(
+        ui,
+        Rect::from_center_size(pos2(row.left() + 10.0, row.center().y), vec2(12.0, 12.0)),
+        Icon::Folder,
+        t.yellow,
+    );
+    let field = row
+        .with_min_x(row.left() + 19.0)
+        .with_max_x((row.right() - 4.0).max(row.left() + 20.0));
+    if draft.pending {
+        theme::label(
+            ui,
+            field,
+            &format!("{}  ·  {}", draft.name, crate::i18n::tr(ui, "Creating…")),
+            t.chrome_font(11.0),
+            t.muted,
+            Align2::LEFT_CENTER,
+        );
+        return FolderEdit::None;
+    }
+    if !enabled {
+        // A refresh may temporarily disable editing. Do not submit to a
+        // directory whose listing has not finished loading.
+        return FolderEdit::None;
+    }
+    let id = draft.editor_id();
+    let initial = std::mem::take(&mut draft.focus);
+    if initial {
+        ui.memory_mut(|memory| memory.request_focus(id));
+    }
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("folder-name-editor")
+            .max_rect(field)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    child.set_clip_rect(ui.clip_rect().intersect(field));
+    child.visuals_mut().text_cursor.preview = false;
+    let response = egui::TextEdit::singleline(&mut draft.name)
+        .id(id)
+        .font(t.chrome_font(11.0))
+        .text_color(t.text)
+        .hint_text(crate::i18n::tr(ui, "New Folder"))
+        .frame(false)
+        .margin(egui::Margin::ZERO)
+        .desired_width(field.width())
+        .min_size(field.size())
+        .vertical_align(egui::Align::Center)
+        .show(&mut child)
+        .response;
+    if initial {
+        response.request_focus();
+    }
+    if response.changed() {
+        draft.error = None;
+    }
+    ui.painter().rect_stroke(
+        field,
+        0.0,
+        Stroke::new(
+            1.0_f32,
+            if draft.error.is_some() {
+                t.red
+            } else {
+                t.accent
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    if let Some(error) = &draft.error {
+        let (rect, response) =
+            ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
+        theme::label(
+            ui,
+            rect.shrink2(vec2(4.0, 0.0)),
+            error,
+            t.chrome_font(10.0),
+            t.red,
+            Align2::LEFT_CENTER,
+        );
+        response.on_hover_text(error);
+    }
+    if !initial && (response.has_focus() || response.lost_focus()) {
+        if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            response.surrender_focus();
+            return FolderEdit::Cancel;
+        }
+        if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+            response.surrender_focus();
+            return FolderEdit::Confirm;
+        }
+    }
+    if !initial && !response.has_focus() {
+        return FolderEdit::Cancel;
+    }
+    FolderEdit::None
 }
 
 // Keep the address field in its own fixed rectangle. A long path must never

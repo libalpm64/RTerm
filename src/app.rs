@@ -605,6 +605,7 @@ impl App {
         }
         self.stop_agent();
         self.transfer_conflicts.clear();
+        self.explorer.folder_draft = None;
         self.dialog = None;
         self.message = None;
         self.keys = KeyManager::default();
@@ -667,6 +668,11 @@ impl App {
             self.new_local();
         }
     }
+    pub(crate) fn focus_file_editor(&mut self) {
+        self.focus_terminal = false;
+        self.bottom_request_focus = false;
+    }
+
     pub(crate) fn focus_terminal_after_dialog(&mut self) {
         self.bottom_request_focus = self.bottom_open && self.bottom_focus;
         self.focus_terminal =
@@ -923,6 +929,7 @@ impl App {
             self.splits.select(self.active, tab);
         }
         if self.active != Some(tab) {
+            self.explorer.folder_draft = None;
             self.explorer.expanded = sftp;
         }
         if sftp {
@@ -1023,6 +1030,7 @@ impl App {
     }
 
     pub(crate) fn toggle_file_workspace(&mut self) {
+        self.explorer.folder_draft = None;
         self.explorer.expanded = !self.explorer.expanded;
         if self.explorer.expanded {
             self.explorer.remote_active = true;
@@ -1175,6 +1183,7 @@ impl App {
                 self.focus_terminal_after_dialog();
             }
             Action::Explorer => {
+                self.explorer.folder_draft = None;
                 self.sidebar = if self.sidebar.is_some() {
                     None
                 } else {
@@ -1487,6 +1496,9 @@ impl App {
     }
 
     fn shortcuts(&mut self, context: &egui::Context) {
+        if self.explorer.folder_editing(context) {
+            return;
+        }
         if self.file_workspace_active() {
             if context.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, Key::N)) {
                 self.new_local();

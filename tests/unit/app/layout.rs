@@ -151,17 +151,15 @@ fn folder_creation_button_works_in_fullscreen_and_docked_sftp() {
                 ],
             );
         }
-        let Some(Dialog::NewSftpFolder {
-            id,
-            directory,
-            name,
-        }) = app.dialog.take()
-        else {
-            panic!("folder button must open the dialog, expanded={expanded}");
-        };
-        assert_eq!(id, 42);
-        assert_eq!(directory, "/fixture");
-        assert!(name.is_empty());
+        let draft = app.explorer.folder_draft.take().unwrap_or_else(|| {
+            panic!("folder button must open inline editor, expanded={expanded}")
+        });
+        assert_eq!(
+            draft.destination,
+            crate::explorer::Destination::Remote(42, "/fixture".into())
+        );
+        assert!(draft.name.is_empty());
+        assert!(app.dialog.is_none());
     }
 }
 

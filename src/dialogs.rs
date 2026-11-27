@@ -54,15 +54,6 @@ pub(crate) enum Dialog {
         entries: Vec<Target>,
         folder: String,
     },
-    NewLocalFolder {
-        directory: std::path::PathBuf,
-        name: String,
-    },
-    NewSftpFolder {
-        id: u32,
-        directory: String,
-        name: String,
-    },
     TransferConflict {
         conflict: crate::backend::ConflictPrompt,
         remember: bool,
@@ -104,8 +95,6 @@ impl Dialog {
                 FileAction::Info => "Info",
             },
             Self::Download { .. } => "Select download folder",
-            Self::NewLocalFolder { .. } => "New Local Folder",
-            Self::NewSftpFolder { .. } => "New Folder",
             Self::TransferConflict { .. } => "Destination already exists",
             Self::Key(key) => key.title(),
         }
@@ -403,34 +392,6 @@ impl App {
                                 }
                             }
                             Choice::Cancel => true,
-                            Choice::None => false,
-                        }
-                    }
-                    Dialog::NewLocalFolder { directory, name } => {
-                        ui.label(crate::i18n::tr(ui, "Destination Folder"));
-                        ui.add(egui::Label::new(directory.display().to_string()).wrap());
-                        ui.add_space(8.0);
-                        form_field(ui, t, "Folder name", name, "New Folder", false);
-                        match footer(ui, t, Some("Cancel"), "Create", false) {
-                            Choice::Cancel => true,
-                            Choice::Yes => match self.create_local_folder(directory, name) {
-                                Ok(()) => true,
-                                Err(error) => { self.fail(error); false }
-                            },
-                            Choice::None => false,
-                        }
-                    }
-                    Dialog::NewSftpFolder { id, directory, name } => {
-                        ui.label(crate::i18n::tr(ui, "Destination Folder"));
-                        ui.add(egui::Label::new(directory.as_str()).wrap());
-                        ui.add_space(8.0);
-                        form_field(ui, t, "Folder name", name, "New Folder", false);
-                        match footer(ui, t, Some("Cancel"), "Create", false) {
-                            Choice::Cancel => true,
-                            Choice::Yes => match self.create_sftp_folder(*id, directory, name) {
-                                Ok(()) => true,
-                                Err(error) => { self.fail(error); false }
-                            },
                             Choice::None => false,
                         }
                     }

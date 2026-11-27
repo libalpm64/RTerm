@@ -1469,6 +1469,11 @@ impl eframe::App for App {
         }
         self.enforce_idle_lock(context);
         self.service_backend_and_agent(context);
+        if !self.file_interaction_allowed()
+            || (self.show_keys || (!self.file_workspace_active() && self.sidebar.is_none()))
+        {
+            self.explorer.folder_draft = None;
+        }
         if context.input(|input| input.viewport().close_requested()) && !self.exit_confirmed {
             context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.request_exit(context);
