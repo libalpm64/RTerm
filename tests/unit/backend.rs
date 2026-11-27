@@ -33,6 +33,7 @@ fn ssh_input_waits_for_shell_writer_and_preserves_order() {
         scrollback: 100,
         copy_on_select: false,
         line_numbers: true,
+        free_type: false,
     };
     let mut terminal = Terminal::new(1, "SSH startup".into(), Kind::Ssh, &options);
     let id = 124;
@@ -80,6 +81,7 @@ fn fullscreen_viewport_fits_and_retries_remote_resize() {
         scrollback: 100,
         copy_on_select: false,
         line_numbers: true,
+        free_type: false,
     };
     let mut terminal = Terminal::new(1, "Resize".into(), Kind::Ssh, &options);
     terminal.endpoint = Some(id);
@@ -102,6 +104,8 @@ fn fullscreen_viewport_fits_and_retries_remote_resize() {
                         &backend,
                         &options,
                         &highlighter,
+                        false,
+                        false,
                         false,
                         None,
                         None,

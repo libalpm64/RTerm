@@ -315,5 +315,13 @@
   "Forget {count} trusted hosts?": "{count} 件のホストの信頼を解除しますか？",
   "These hosts will require verification on their next connection.": "次回接続時にこれらのホストの確認が必要になります。",
   "Existing SSH connections will remain open.": "既存の SSH 接続は維持されます。",
-  "And {count} more": "ほか {count} 件"
+  "And {count} more": "ほか {count} 件",
+  "Remove from Split": "分割表示から外す",
+  "Single Pane": "単一ペイン",
+  "Split Down": "下に分割",
+  "Split Down (New Terminal)": "下に分割（新規 terminal）",
+  "Split Right": "右に分割",
+  "Split Right (New Terminal)": "右に分割（新規 terminal）",
+  "Free Type Mode": "自由入力モード",
+  "Use the mouse to edit echoed shell commands": "マウスで表示されたシェルコマンドを編集する"
 }

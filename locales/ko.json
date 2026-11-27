@@ -315,5 +315,13 @@
   "Forget {count} trusted hosts?": "신뢰된 호스트 {count}개의 신뢰를 해제하시겠습니까?",
   "These hosts will require verification on their next connection.": "다음 연결 시 이 호스트를 다시 확인해야 합니다.",
   "Existing SSH connections will remain open.": "기존 SSH 연결은 유지됩니다.",
-  "And {count} more": "외 {count}개"
+  "And {count} more": "외 {count}개",
+  "Remove from Split": "분할 보기에서 제거",
+  "Single Pane": "단일 창",
+  "Split Down": "아래로 분할",
+  "Split Down (New Terminal)": "아래로 분할 (새 terminal)",
+  "Split Right": "오른쪽으로 분할",
+  "Split Right (New Terminal)": "오른쪽으로 분할 (새 terminal)",
+  "Free Type Mode": "자유 입력 모드",
+  "Use the mouse to edit echoed shell commands": "마우스로 화면에 표시된 셸 명령 편집"
 }

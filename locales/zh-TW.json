@@ -315,5 +315,13 @@
   "Forget {count} trusted hosts?": "取消信任 {count} 個主機？",
   "These hosts will require verification on their next connection.": "下次連線時需要重新驗證這些主機。",
   "Existing SSH connections will remain open.": "現有 SSH 連線將保持開啟。",
-  "And {count} more": "以及其他 {count} 個"
+  "And {count} more": "以及其他 {count} 個",
+  "Remove from Split": "從分割檢視中移除",
+  "Single Pane": "單一窗格",
+  "Split Down": "向下分割",
+  "Split Down (New Terminal)": "向下分割（新增 terminal）",
+  "Split Right": "向右分割",
+  "Split Right (New Terminal)": "向右分割（新增 terminal）",
+  "Free Type Mode": "自由輸入模式",
+  "Use the mouse to edit echoed shell commands": "使用滑鼠編輯已回顯的 shell 命令"
 }

@@ -315,5 +315,13 @@
   "Forget {count} trusted hosts?": "Забыть доверенные хосты ({count})?",
   "These hosts will require verification on their next connection.": "Эти хосты потребуется проверить при следующем подключении.",
   "Existing SSH connections will remain open.": "Текущие SSH подключения останутся открытыми.",
-  "And {count} more": "И ещё {count}"
+  "And {count} more": "И ещё {count}",
+  "Remove from Split": "Убрать из разделённого вида",
+  "Single Pane": "Одна панель",
+  "Split Down": "Разделить вниз",
+  "Split Down (New Terminal)": "Разделить вниз (новый terminal)",
+  "Split Right": "Разделить вправо",
+  "Split Right (New Terminal)": "Разделить вправо (новый terminal)",
+  "Free Type Mode": "Режим свободного ввода",
+  "Use the mouse to edit echoed shell commands": "Редактировать отображаемые команды оболочки мышью"
 }

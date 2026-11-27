@@ -1013,6 +1013,13 @@ fn local_agent_approval_expiry_and_ssh_output() {
     pump(&mut app, &context, |app| app.agent_sessions().len() == 2);
     let new_id = opened["session_id"].as_u64().unwrap() as u32;
     let (new_endpoint, _) = app.agent_endpoint(new_id).unwrap();
+    let first_endpoint = app.agent_endpoint(id).unwrap();
+    app.split_existing(tab, splits::Direction::Right);
+    assert!(app.splits.contains(tab) && app.splits.contains(new_tab));
+    assert_eq!(app.agent_endpoint(id), Some(first_endpoint));
+    assert_eq!(app.agent_endpoint(new_id), Some((new_endpoint, new_tab)));
+    assert_eq!(app.terminals.len(), 2);
+
     let command = post(
         &app,
         json!({"action":"execute","session_id":new_id,"command":"must-ask","operation_id":"auto-open-command"}),
@@ -1101,6 +1108,7 @@ fn local_agent_approval_expiry_and_ssh_output() {
             app.agent_endpoint(session_id).map(|(_, tab)| tab)
         );
         assert_eq!(count.load(Ordering::Relaxed), before_exec);
+        assert!(app.splits.contains(tab) && app.splits.contains(new_tab));
         app.resolve_agent_permission(true);
         while !call.is_finished() {
             assert!(!eframe::App::native_background_update(&mut app, &context).1);
@@ -1394,6 +1402,7 @@ fn local_agent_approval_expiry_and_ssh_output() {
             .endpoint,
         Some(new_endpoint)
     );
+    assert!(app.splits.contains(tab) && app.splits.contains(new_tab));
     app.settings.set("ai_interactive", "0".into());
     let stable_id = execute(&app, "still the same session");
     pump(&mut app, &context, |_| stable_id.is_finished());

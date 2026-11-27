@@ -315,5 +315,13 @@
   "Forget {count} trusted hosts?": "Забути довірені хости ({count})?",
   "These hosts will require verification on their next connection.": "Ці хости потрібно буде перевірити під час наступного підключення.",
   "Existing SSH connections will remain open.": "Поточні SSH з’єднання залишаться відкритими.",
-  "And {count} more": "І ще {count}"
+  "And {count} more": "І ще {count}",
+  "Remove from Split": "Прибрати з розділеного вигляду",
+  "Single Pane": "Одна панель",
+  "Split Down": "Розділити вниз",
+  "Split Down (New Terminal)": "Розділити вниз (новий terminal)",
+  "Split Right": "Розділити праворуч",
+  "Split Right (New Terminal)": "Розділити праворуч (новий terminal)",
+  "Free Type Mode": "Режим вільного введення",
+  "Use the mouse to edit echoed shell commands": "Редагувати відображені команди оболонки мишею"
 }

@@ -123,6 +123,22 @@ On first connection, compare the displayed SHA-256 fingerprint with the server's
 
 **SSH Keys → Known Hosts…** opens a resizable, searchable table of trusted hosts. Search by host, port, key type or fingerprint; multiple search words must all match. Click column headings to sort, or click a hostname or checkbox to select a row. Hover over a truncated value to see it in full, and select one host to copy its fingerprint. **Select matching** selects only the current search results. Changing the search or refreshing clears the selection. **Forget selected** asks for confirmation before removing any keys. The removal compares every selected key to the current trust store and writes the batch atomically; if any selected key has changed or disappeared, none are removed. Existing SSH connections remain open, but forgotten keys must be verified on the next connection. The list loads once when opened, refreshes after local trust changes, and renders only visible rows. Use **Refresh** to see changes made by another RTerm instance. The host-key verification policy and existing storage format are unchanged.
 
+## Split terminal view
+
+Use **View → Split Right (New Terminal)** or **Split Down (New Terminal)** to start a new local terminal beside or below the focused terminal. To display an existing SSH, local, Telnet or serial session instead, right-click its tab and choose **Split Right** or **Split Down**. Splits can be nested, with up to four visible main panes.
+
+Click a pane to focus it; keyboard input goes to that pane only, and session-specific controls follow the active session. Scroll over a pane to browse its output independently. Drag a divider to resize its adjacent panes. Selecting an existing tab that is not visible replaces only the focused pane; the other panes remain visible. Drag a session tab onto a pane to place it there. Dropping a visible session on another visible session swaps their positions without reconnecting either one.
+
+Use the pane header's remove button, the tab's **Remove from Split** action, or **View → Single Pane** to change the layout without disconnecting sessions. Closing a session tab still disconnects it. When the workspace is too small, only the focused pane is shown until enough space is available again. Split layouts last for the current application run. Main terminals share the configured font size; the bottom shell retains its own font setting.
+
+## Free Type Mode and application mouse support
+
+**View → Free Type Mode** (also in **Settings → Terminal**) enables mouse editing of a verified, echoed command in a bracketed-paste-capable single-line shell editor such as Bash/Readline. Click within the command to move its caret, drag to select text, type to replace the selection, or drag the selected text to a new position on the same command line. These actions send editing input to the actual shell; they do not modify screen pixels or execute the command. Press Enter explicitly to run it.
+
+RTerm only edits known printable ASCII input that matches the current visible command. It does not guess editing operations for password prompts, scrollback, wrapped lines, completion/history text it cannot verify, or unknown application modes.
+
+Applications that enable xterm mouse tracking receive clicks, button drags, releases, and wheel events using their negotiated SGR, UTF-8, or legacy encoding. For Vim/Neovim, enable `set mouse=a`; for terminal Emacs, enable `xterm-mouse-mode`. Each application determines its own editing and text-drag behavior. Hold Shift to select terminal output or open the terminal context menu instead of passing the mouse to an application. Free Type Mode can be disabled independently of application mouse tracking.
+
 ## Terminal command navigation
 
 **Session → Previous Command** and **Next Command** jump to OSC 133 shell markers. The shortcuts are **Alt+Shift+Up** and **Alt+Shift+Down**. Command markers show a duration and a success or failure glyph in the line-number gutter. Hover over a marker for the exit code. AI Activity reports the elapsed time from the isolated execution channel and its SSH exit status.
@@ -191,3 +207,7 @@ To isolate the cost of the window and renderer from the application and shell, u
   See `vendor/eframe/RTerm-PATCH.md` for the patch provenance and limitations.
 
 The bundled fonts are distributed under their respective SIL Open Font Licenses in `assets/`.
+
+### Bash prompt cursor after resizing
+
+Bash 5.3 with older bundled Readline 8.3 patches can misplace its caret inside a colored prompt after a terminal narrows enough to wrap that prompt and then widens again. This occurs independently of RTerm. GNU Bash patch `bash53-020` (Readline patch 6) corrects prompt wrap calculations on resize. Use an updated shell when available; RTerm continues to honor cursor movement sequences rather than overriding application cursor positions. The opt-in test `bash_prompt_survives_repeated_resolution_changes` checks the affected shell behavior.

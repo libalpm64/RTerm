@@ -128,6 +128,7 @@ async fn ssh_unicode_typing_ime_and_paste_round_trip() {
         scrollback: 100,
         copy_on_select: false,
         line_numbers: false,
+        free_type: false,
     };
     let mut terminal = Terminal::new(1, "Unicode fixture".into(), Kind::Ssh, &options);
     let id = 7;
@@ -182,6 +183,8 @@ async fn ssh_unicode_typing_ime_and_paste_round_trip() {
                         &options,
                         &highlighter,
                         true,
+                        true,
+                        false,
                         None,
                         None,
                     );

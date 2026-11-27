@@ -315,5 +315,13 @@
   "Forget {count} trusted hosts?": "Dimenticare {count} host attendibili?",
   "These hosts will require verification on their next connection.": "Questi host dovranno essere verificati alla prossima connessione.",
   "Existing SSH connections will remain open.": "Le connessioni SSH esistenti resteranno aperte.",
-  "And {count} more": "E altri {count}"
+  "And {count} more": "E altri {count}",
+  "Remove from Split": "Rimuovi dalla vista divisa",
+  "Single Pane": "Riquadro singolo",
+  "Split Down": "Dividi in basso",
+  "Split Down (New Terminal)": "Dividi in basso (nuovo terminal)",
+  "Split Right": "Dividi a destra",
+  "Split Right (New Terminal)": "Dividi a destra (nuovo terminal)",
+  "Free Type Mode": "Modalità di digitazione libera",
+  "Use the mouse to edit echoed shell commands": "Usa il mouse per modificare i comandi della shell visualizzati"
 }

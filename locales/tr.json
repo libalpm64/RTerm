@@ -315,5 +315,13 @@
   "Forget {count} trusted hosts?": "{count} güvenilen ana makine unutulsun mu?",
   "These hosts will require verification on their next connection.": "Bu ana makineler bir sonraki bağlantıda doğrulanacak.",
   "Existing SSH connections will remain open.": "Mevcut SSH bağlantıları açık kalacak.",
-  "And {count} more": "Ve {count} tane daha"
+  "And {count} more": "Ve {count} tane daha",
+  "Remove from Split": "Bölünmüş görünümden kaldır",
+  "Single Pane": "Tek bölme",
+  "Split Down": "Aşağı böl",
+  "Split Down (New Terminal)": "Aşağı böl (yeni terminal)",
+  "Split Right": "Sağa böl",
+  "Split Right (New Terminal)": "Sağa böl (yeni terminal)",
+  "Free Type Mode": "Serbest yazma modu",
+  "Use the mouse to edit echoed shell commands": "Görüntülenen kabuk komutlarını fareyle düzenle"
 }

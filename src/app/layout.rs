@@ -14,6 +14,8 @@ impl App {
         let mut activity = None;
         let mut reconnect = None;
         let mut close_group = None;
+        let mut split = None;
+        let mut hide = None;
         let mut reorder = None;
         let mut add = false;
         let mut child = ui.new_child(
@@ -81,6 +83,13 @@ impl App {
                                 tab.x_range(),
                                 tab.top() + 1.0,
                                 Stroke::new(2.0_f32, t.accent.gamma_multiply(selected)),
+                            );
+                        }
+                        if !active && !self.show_keys && self.splits.contains(terminal.tab) {
+                            ui.painter().hline(
+                                tab.x_range(),
+                                tab.bottom() - 1.0,
+                                Stroke::new(1.0_f32, t.accent.gamma_multiply(0.55)),
                             );
                         }
                         let color = if terminal.closed {
@@ -153,6 +162,30 @@ impl App {
                             }
                             if ui.button(crate::i18n::tr(ui, "Duplicate")).clicked() {
                                 duplicate = Some(terminal.tab);
+                                ui.close();
+                            }
+                            if !self.show_keys
+                                && self.active != Some(terminal.tab)
+                                && !self.splits.contains(terminal.tab)
+                                && self.splits.can_split()
+                                && self.active.is_some()
+                            {
+                                for (label, direction) in [
+                                    ("Split Right", splits::Direction::Right),
+                                    ("Split Down", splits::Direction::Down),
+                                ] {
+                                    if ui.button(crate::i18n::tr(ui, label)).clicked() {
+                                        split = Some((terminal.tab, direction));
+                                        ui.close();
+                                    }
+                                }
+                            }
+                            if self.splits.contains(terminal.tab)
+                                && ui
+                                    .button(crate::i18n::tr(ui, "Remove from Split"))
+                                    .clicked()
+                            {
+                                hide = Some(terminal.tab);
                                 ui.close();
                             }
                             if terminal.kind == Kind::Ssh
@@ -233,7 +266,7 @@ impl App {
                     }
                 });
             });
-        if ui.input(|input| input.pointer.any_released()) {
+        if ui.input(|input| input.pointer.any_released()) && ui.rect_contains_pointer(rect) {
             self.drag_tab = None;
         }
         if let Some((from, to)) = reorder
@@ -246,6 +279,12 @@ impl App {
         }
         if let Some(id) = select {
             self.activate(id);
+        }
+        if let Some((tab, direction)) = split {
+            self.split_existing(tab, direction);
+        }
+        if let Some(tab) = hide {
+            self.hide_pane(tab);
         }
         if let Some(tab) = activity {
             self.open_agent_activity(Some(tab));
@@ -484,23 +523,26 @@ impl App {
             return;
         }
         let body = rect.with_min_y(header.bottom());
-        if let Some(tab) = self.bottom_shell.as_ref().map(|term| term.tab) {
-            self.wheel_zoom(ui, body, tab);
-        }
         let input = self.dialog.is_none()
             && self.message.is_none()
             && !self.host_trust.blocking()
+            && !self.agent.blocks_terminal_input()
             && !egui::Popup::is_any_open(ui.ctx())
             && ui.memory(|memory| memory.allows_interaction(ui.layer_id()));
+        if input && let Some(tab) = self.bottom_shell.as_ref().map(|term| term.tab) {
+            self.wheel_zoom(ui, body, tab);
+        }
         let options = self.bottom_options();
         let preview = self
             .bottom_shell
             .as_ref()
             .and_then(|term| self.zoom_preview(term.tab));
         if let Some(term) = &mut self.bottom_shell {
-            if self.bottom_request_focus && input {
-                ui.memory_mut(|memory| memory.request_focus(ui.id().with(("terminal", term.tab))));
+            let request_focus = self.bottom_request_focus && input;
+            if request_focus {
                 self.bottom_request_focus = false;
+                self.bottom_focus = true;
+                self.focus_terminal = false;
             } else if self.bottom_request_focus && self.dialog.is_none() && self.message.is_none() {
                 // egui retains the just-closed modal layer for one more frame.
                 // Do not consume a focus request until the workspace can interact.
@@ -512,18 +554,18 @@ impl App {
                 &self.backend,
                 &options,
                 &self.highlighter,
+                input && self.bottom_focus,
                 input,
+                request_focus,
                 preview,
                 None, // Wallpaper is exclusive to the main terminal tabs.
             );
-            if response.has_focus() || response.clicked() {
-                self.bottom_focus = true;
-            }
+            let action = terminal_menu(term.context_menu(&response), t);
             self.remember_history(history);
             if let Some(error) = error {
                 self.fail(error);
             }
-            if let Some(action) = terminal_menu(egui::Popup::context_menu(&response), t) {
+            if let Some(action) = action {
                 self.bottom_focus = true;
                 self.run_action(action, ui.ctx());
             }
@@ -534,6 +576,9 @@ impl App {
         let tabs = top_band(rect, 23.0);
         self.tab_bar(ui, tabs);
         if self.show_keys {
+            if ui.input(|input| input.pointer.any_released()) {
+                self.drag_tab = None;
+            }
             self.key_panel(ui, rect.with_min_y(tabs.bottom()));
 
             return;
@@ -541,16 +586,83 @@ impl App {
         let toolbar = top_band(rect.with_min_y(tabs.bottom()), 22.0);
         self.toolbar(ui, toolbar);
         let body = rect.with_min_y(toolbar.bottom());
-        if let Some(tab) = self.active {
-            self.wheel_zoom(ui, body, tab);
+        let input = self.dialog.is_none()
+            && self.message.is_none()
+            && !self.host_trust.blocking()
+            && !self.agent.blocks_terminal_input()
+            && !egui::Popup::is_any_open(ui.ctx())
+            && ui.memory(|memory| memory.allows_interaction(ui.layer_id()));
+        let mut panes = self.splits.layout(ui, body, self.active, self.theme, input);
+        if self.splits.divider_interacted {
+            self.focus_terminal_after_dialog();
+        }
+        // A tab dropped on an existing pane replaces it, or swaps the two
+        // visible sessions. Neither case creates another transport.
+        if ui.input(|input| input.pointer.any_released())
+            && let Some(tab) = self.drag_tab.take()
+            && input
+            && self.terminals.iter().any(|term| term.tab == tab)
+            && let Some(&(target, _)) = panes
+                .iter()
+                .find(|(_, rect)| ui.rect_contains_pointer(*rect))
+        {
+            let swap = self.splits.contains(tab);
+            self.splits.place(target, tab);
+            self.activate(tab);
+            for (id, _) in &mut panes {
+                if *id == target {
+                    *id = tab;
+                } else if swap && *id == tab {
+                    *id = target;
+                }
+            }
+        }
+        let split = panes.len() > 1;
+        let header = |rect: Rect| top_band(rect, 22.0);
+        let hide_button = |rect: Rect| {
+            let bar = header(rect);
+            Rect::from_min_size(
+                pos2(bar.right() - 24.0, bar.top()),
+                vec2(24.0, bar.height()),
+            )
+        };
+        let terminal_rect = |rect: Rect| {
+            if split {
+                rect.with_min_y(header(rect).bottom())
+            } else {
+                rect
+            }
+        };
+        // Decide the keyboard owner before drawing any terminal. In particular,
+        // a click and text arriving in one frame must not be handled by two PTYs.
+        if input
+            && ui.input(|input| input.pointer.any_pressed() || input.pointer.any_click())
+            && let Some(&(tab, _)) = panes.iter().find(|(_, rect)| {
+                ui.rect_contains_pointer(*rect)
+                    && !(split && ui.rect_contains_pointer(hide_button(*rect)))
+            })
+        {
+            self.activate(tab);
+        }
+        if input {
+            for &(tab, rect) in &panes {
+                if ui.rect_contains_pointer(terminal_rect(rect)) {
+                    self.wheel_zoom(ui, terminal_rect(rect), tab);
+                    break;
+                }
+            }
         }
         let options = self.settings.terminal();
         let mut startup_failure = None;
-        // All queued local tabs share the measured main pane dimensions, even
-        // when the user switches to another tab before a shell starts.
+        // Start queued transports at the actual pane size. Hidden tabs still
+        // start at the normal workspace size, as before.
         for term in &mut self.terminals {
-            term.prepare_remote(ui, body, &options);
-            if let Err(error) = term.prepare_local(ui, body, &options, &self.backend) {
+            let bounds = panes
+                .iter()
+                .find(|(tab, _)| *tab == term.tab)
+                .map_or(body, |(_, rect)| terminal_rect(*rect));
+            term.prepare_remote(ui, bounds, &options);
+            if let Err(error) = term.prepare_local(ui, bounds, &options, &self.backend) {
                 term.mark_closed();
                 term.receive(format!("Could not start the shell: {error}\r\n").as_bytes());
                 self.local_profiles.remove(&term.tab);
@@ -560,60 +672,127 @@ impl App {
         if let Some(error) = startup_failure {
             self.fail(error);
         }
-        if let Some(index) = self
-            .terminals
-            .iter()
-            .position(|item| Some(item.tab) == self.active)
-        {
-            let options = self.settings.terminal();
-            let input = self.dialog.is_none()
-                && self.message.is_none()
-                && !self.host_trust.blocking()
-                && !egui::Popup::is_any_open(ui.ctx())
-                && ui.memory(|memory| memory.allows_interaction(ui.layer_id()));
-            if self.focus_terminal && input {
-                ui.memory_mut(|memory| {
-                    memory.request_focus(ui.id().with(("terminal", self.terminals[index].tab)))
-                });
+        if !panes.is_empty() {
+            let input = input && self.message.is_none();
+            let request_focus = self.focus_terminal && input && self.active.is_some();
+            if request_focus {
                 self.focus_terminal = false;
                 self.bottom_focus = false;
             } else if self.focus_terminal && self.dialog.is_none() && self.message.is_none() {
                 ui.ctx().request_repaint();
             }
-            let preview = self.zoom_preview(self.terminals[index].tab);
-            let (response, history, error) = self.terminals[index].show(
-                ui,
-                body,
-                &self.backend,
-                &options,
-                &self.highlighter,
-                input,
-                preview,
-                self.wallpaper.as_ref(),
-            );
-            if self.terminals[index].kind != Kind::Local
-                && self.terminals[index].endpoint.is_none()
-                && self.terminals[index].starting()
-            {
-                // A fixed-size UI label is independent of terminal zoom and
-                // never enters the grid or the saved command history.
-                theme::label(
+            let keyboard_owner = self.active.filter(|_| !self.bottom_focus);
+            let mut action = None;
+            let mut hide = None;
+            let clip = ui.clip_rect();
+            for (tab, pane) in panes {
+                let Some(index) = self.terminals.iter().position(|term| term.tab == tab) else {
+                    continue;
+                };
+                ui.set_clip_rect(clip.intersect(pane));
+                let bounds = terminal_rect(pane);
+                if split {
+                    let bar = header(pane);
+                    let focused = self.active == Some(tab) && !self.bottom_focus;
+                    theme::band(
+                        ui,
+                        bar,
+                        if focused {
+                            self.theme.hover
+                        } else {
+                            self.theme.bar
+                        },
+                        Some(self.theme.border),
+                    );
+                    if focused {
+                        ui.painter().hline(
+                            bar.x_range(),
+                            bar.top() + 0.5,
+                            Stroke::new(2.0_f32, self.theme.accent),
+                        );
+                    }
+                    let name =
+                        crate::agent_upload::literal_text(self.terminals[index].name.as_bytes());
+                    theme::label(
+                        ui,
+                        bar.with_min_x(bar.left() + 8.0)
+                            .with_max_x(bar.right() - 26.0),
+                        &name,
+                        self.theme.chrome_font(11.0),
+                        if focused {
+                            self.theme.text
+                        } else {
+                            self.theme.muted
+                        },
+                        Align2::LEFT_CENTER,
+                    );
+                    let button = hide_button(pane);
+                    if input {
+                        let response = ui
+                            .push_id(("hide-pane", tab), |ui| {
+                                theme::icon_button(
+                                    ui,
+                                    button,
+                                    "Remove from Split",
+                                    Icon::Close,
+                                    self.theme,
+                                )
+                            })
+                            .inner;
+                        if response.clicked() {
+                            hide = Some(tab);
+                        }
+                    } else {
+                        theme::icon(
+                            ui,
+                            Rect::from_center_size(button.center(), vec2(14.0, 14.0)),
+                            Icon::Close,
+                            self.theme.dim,
+                        );
+                    }
+                }
+                let preview = self.zoom_preview(tab);
+                let (response, history, error) = self.terminals[index].show(
                     ui,
-                    Rect::from_center_size(body.center(), vec2(body.width(), 24.0)),
-                    crate::i18n::tr(ui, "Connecting…"),
-                    self.theme.chrome_font(12.0),
-                    self.theme.muted,
-                    Align2::CENTER_CENTER,
+                    bounds,
+                    &self.backend,
+                    &options,
+                    &self.highlighter,
+                    input && self.message.is_none() && keyboard_owner == Some(tab),
+                    input && self.message.is_none(),
+                    request_focus && keyboard_owner == Some(tab),
+                    preview,
+                    self.wallpaper.as_ref(),
                 );
+                if self.terminals[index].kind != Kind::Local
+                    && self.terminals[index].endpoint.is_none()
+                    && self.terminals[index].starting()
+                {
+                    theme::label(
+                        ui,
+                        Rect::from_center_size(bounds.center(), vec2(bounds.width(), 24.0)),
+                        crate::i18n::tr(ui, "Connecting…"),
+                        self.theme.chrome_font(12.0),
+                        self.theme.muted,
+                        Align2::CENTER_CENTER,
+                    );
+                }
+                ui.set_clip_rect(clip);
+                self.remember_history(history);
+                if let Some(error) = error {
+                    self.fail(error);
+                }
+                if self.active == Some(tab)
+                    && let Some(selected) =
+                        terminal_menu(self.terminals[index].context_menu(&response), self.theme)
+                {
+                    action = Some(selected);
+                }
             }
-            if response.has_focus() || response.clicked() {
-                self.bottom_focus = false;
+            if let Some(tab) = hide {
+                self.hide_pane(tab);
             }
-            self.remember_history(history);
-            if let Some(error) = error {
-                self.fail(error);
-            }
-            if let Some(action) = terminal_menu(egui::Popup::context_menu(&response), self.theme) {
+            if let Some(action) = action {
                 self.bottom_focus = false;
                 self.run_action(action, ui.ctx());
             }
@@ -813,8 +992,9 @@ impl App {
             .memory(|memory| memory.focused())
             .and_then(|id| context.data(|data| data.get_temp::<u64>(id)));
         let valid = tab.is_some_and(|tab| {
-            (!self.show_keys && self.active == Some(tab))
+            (!self.show_keys && !self.bottom_focus && self.active == Some(tab))
                 || (self.bottom_open
+                    && self.bottom_focus
                     && self
                         .bottom_shell
                         .as_ref()
@@ -933,6 +1113,7 @@ impl eframe::App for App {
             && self.message.is_none()
             && !self.locked
             && !self.host_trust.blocking()
+            && !self.agent.blocks_terminal_input()
         {
             self.shortcuts(context);
         }
@@ -1033,6 +1214,24 @@ impl eframe::App for App {
                         self.theme,
                         "resize-right",
                     );
+                }
+                if self.bottom_open
+                    && self.dialog.is_none()
+                    && self.message.is_none()
+                    && !self.host_trust.blocking()
+                    && !self.agent.blocks_terminal_input()
+                    && !egui::Popup::is_any_open(context)
+                    && ui.memory(|memory| memory.allows_interaction(ui.layer_id()))
+                    && (self.bottom_request_focus
+                        || (ui.input(|input| {
+                            input.pointer.any_pressed() || input.pointer.any_click()
+                        }) && ui.rect_contains_pointer(bottom.with_min_y(bottom.top() + 23.0))))
+                {
+                    // Resolve both requested and pointer-driven bottom focus
+                    // before any main terminal can process this frame's keys.
+                    self.bottom_focus = true;
+                    self.bottom_request_focus = true;
+                    self.focus_terminal = false;
                 }
                 self.center(
                     ui,

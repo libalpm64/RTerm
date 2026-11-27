@@ -20,6 +20,8 @@ use crate::backend::{Backend, BackendEvent, Events, InputError, next_session_id}
 use crate::{highlight::Highlighter, storage::home_dir};
 
 mod commands;
+mod free_type;
+mod mouse;
 
 pub(crate) fn elapsed_label(elapsed: Duration) -> String {
     let seconds = elapsed.as_secs();
@@ -213,6 +215,10 @@ pub(crate) struct Terminal {
     pending_user_input: Cell<bool>,
     scroll_remainder: f32,
     drag_anchor: Option<egui::Pos2>,
+    cursor_activity: f64,
+    was_focused: bool,
+    free_type: free_type::FreeType,
+    mouse: mouse::Mouse,
 }
 
 #[derive(Clone, Copy)]
@@ -222,6 +228,7 @@ pub(crate) struct TerminalOptions {
     pub(crate) scrollback: usize,
     pub(crate) copy_on_select: bool,
     pub(crate) line_numbers: bool,
+    pub(crate) free_type: bool,
 }
 
 impl Terminal {
@@ -261,6 +268,10 @@ impl Terminal {
             pending_user_input: Cell::new(false),
             scroll_remainder: 0.0,
             drag_anchor: None,
+            cursor_activity: 0.0,
+            was_focused: false,
+            free_type: Default::default(),
+            mouse: Default::default(),
         }
     }
 
@@ -384,6 +395,8 @@ impl Terminal {
         }
         self.finish_shell_command(None);
         self.closed = true;
+        self.free_type = Default::default();
+        self.mouse = Default::default();
         self.ssh_size = None;
         self.pending_input.get_mut().clear();
         self.pending_user_input.set(false);
@@ -703,6 +716,8 @@ impl Terminal {
         options: &TerminalOptions,
         highlighter: &Highlighter,
         allow_input: bool,
+        allow_pointer: bool,
+        request_focus: bool,
         preview_font: Option<f32>,
         wallpaper: Option<&crate::background::Wallpaper>,
     ) -> (egui::Response, Vec<String>, Option<String>) {
@@ -744,7 +759,19 @@ impl Terminal {
             scrollbar,
             size: visible_size,
         } = layout;
-        let response = ui.interact(rect, id, Sense::click_and_drag());
+        let response = ui.interact(
+            viewport,
+            id,
+            if allow_pointer {
+                if allow_input {
+                    Sense::click_and_drag()
+                } else {
+                    Sense::CLICK | Sense::DRAG
+                }
+            } else {
+                Sense::hover()
+            },
+        );
         let size = committed_size;
         if size != self.size {
             if size.cols != self.size.cols || size.rows != self.size.rows {
@@ -781,15 +808,16 @@ impl Terminal {
             (0usize, 0usize)
         };
         let preview_offset = vec2(first_column as f32 * cell.x, first_row as f32 * cell.y);
-        if allow_input {
-            if (response.clicked() || response.drag_started()) && !response.has_focus() {
-                response.request_focus();
-            }
-            if preview_font.is_none()
+        if allow_pointer && preview_font.is_none() {
+            if !self.application_mouse(ui, &response, rect, cell, backend)
                 && (!fullscreen || self.grid.mode().contains(TermMode::ALT_SCREEN))
             {
-                self.pointer(ui, &response, cell, options.copy_on_select, backend);
+                self.pointer(ui, &response, rect, cell, options, backend);
             }
+        } else {
+            self.mouse.suppress_menu = false;
+            self.free_cancel_drag();
+            self.drag_anchor = None;
         }
         // Paint one continuous image across the pane, including the scroll
         // track. Keep the grid and zoom-preview geometry independent of it.
@@ -800,6 +828,12 @@ impl Terminal {
                     .unwrap_or(Color32::BLACK)
                     == Color32::BLACK
         });
+        if wallpaper.is_none() {
+            let bg = self.grid.colors()[NamedColor::Background]
+                .map(rgb)
+                .unwrap_or(Color32::BLACK);
+            ui.painter().rect_filled(viewport, 0.0, bg);
+        }
         if let Some(wallpaper) = wallpaper {
             let painter = ui.painter().with_clip_rect(viewport);
             painter.rect_filled(viewport, 0.0, Color32::BLACK);
@@ -809,12 +843,25 @@ impl Terminal {
             self.scrollbar(
                 ui,
                 scrollbar,
-                allow_input && preview_font.is_none(),
+                allow_pointer && preview_font.is_none(),
                 wallpaper.is_some(),
             );
         }
+        // Register the terminal and its scrollbar before requesting focus. Egui
+        // can otherwise surrender focus on a click outside the text rectangle
+        // (e.g. a pane header, line-number gutter, or scroll track).
+        if allow_input && (request_focus || response.clicked() || response.drag_started()) {
+            response.request_focus();
+        }
+        let focused = allow_input && response.has_focus();
+        if focused
+            && (!self.was_focused || request_focus || ui.input(|input| !input.events.is_empty()))
+        {
+            self.cursor_activity = ui.input(|input| input.time);
+        }
+        self.was_focused = focused;
         let mut history = Vec::new();
-        if allow_input && response.has_focus() {
+        if focused {
             // The eframe raw-input hook uses this marker to keep terminal
             // navigation out of egui's begin-pass focus traversal.
             ui.ctx().data_mut(|data| data.insert_temp(id, self.tab));
@@ -848,6 +895,23 @@ impl Terminal {
             // Keep the event order, but send all input from this frame together.
             // A burst of Text/IME events must not fill one channel slot per character.
             let mut input_bytes = Vec::new();
+            let mut caret = if options.free_type
+                && self.grid.mode().contains(TermMode::BRACKETED_PASTE)
+                && !self
+                    .grid
+                    .mode()
+                    .intersects(TermMode::ALT_SCREEN | TermMode::MOUSE_MODE)
+            {
+                self.free_type
+                    .caret
+                    .or_else(|| self.editable_line().map(|line| line.caret))
+                    .filter(|&i| {
+                        i <= self.input_line.len() && free_type::plain_text(&self.input_line)
+                    })
+            } else {
+                None
+            };
+            let mut replace_selection = options.free_type && self.grid.selection.is_some();
             for event in events {
                 match event {
                     egui::Event::Copy => {
@@ -855,6 +919,7 @@ impl Terminal {
                             self.copy(ui.ctx());
                         } else if ui.input(|input| input.modifiers.ctrl && !input.modifiers.shift) {
                             self.input_line.clear();
+                            caret = None;
                             input_bytes.push(3);
                         }
                     }
@@ -862,17 +927,46 @@ impl Terminal {
                         if ui.input(|input| input.modifiers.ctrl && !input.modifiers.shift) =>
                     {
                         self.input_line.clear();
+                        caret = None;
                         input_bytes.push(24);
                     }
                     egui::Event::Paste(text) => {
+                        if options.free_type && free_type::plain_text(&text) {
+                            if replace_selection {
+                                caret = self.free_delete_selection(&mut input_bytes).or(caret);
+                                replace_selection = false;
+                            }
+                            if let Some(at) = caret {
+                                self.input_line.insert_str(at, &text);
+                                caret = Some(at + text.len());
+                            } else if self.grid.mode().contains(TermMode::BRACKETED_PASTE) {
+                                self.input_line.push_str(&text);
+                            }
+                            self.input_line
+                                .truncate(self.input_line.floor_char_boundary(4096));
+                            caret = caret.filter(|&at| at <= self.input_line.len());
+                        } else {
+                            caret = None;
+                        }
                         input_bytes.extend(self.paste_bytes(&text));
                     }
                     egui::Event::Text(text) | egui::Event::Ime(egui::ImeEvent::Commit(text))
                         if !text.is_empty() =>
                     {
-                        self.input_line.push_str(&text);
+                        if replace_selection && free_type::plain_text(&text) {
+                            caret = self.free_delete_selection(&mut input_bytes).or(caret);
+                            replace_selection = false;
+                        }
+                        if let Some(at) = caret.filter(|_| free_type::plain_text(&text)) {
+                            self.input_line.insert_str(at, &text);
+                            caret = Some(at + text.len());
+                        } else {
+                            self.input_line.push_str(&text);
+                            caret = None;
+                        }
                         self.input_line
                             .truncate(self.input_line.floor_char_boundary(4096));
+                        caret = caret.filter(|&at| at <= self.input_line.len());
                         input_bytes.extend(text.into_bytes());
                     }
                     egui::Event::Key {
@@ -881,23 +975,75 @@ impl Terminal {
                         modifiers,
                         ..
                     } => {
-                        if key == Key::Enter && !self.input_line.trim().is_empty() {
+                        if replace_selection
+                            && matches!(key, Key::Backspace | Key::Delete)
+                            && !modifiers.ctrl
+                            && !modifiers.alt
+                        {
+                            replace_selection = false;
+                            if let Some(at) = self.free_delete_selection(&mut input_bytes) {
+                                caret = Some(at);
+                                continue;
+                            }
+                        }
+                        if key_bytes(key, modifiers, *self.grid.mode(), self.kind).is_some() {
+                            replace_selection = false;
+                        }
+                        if key == Key::Enter {
                             // Only retain text echoed by the shell. Hidden password input stays out of history.
-                            let point = self.grid.grid().cursor.point;
-                            let row = &self.grid.grid()[point.line];
-                            let visible = (0..point.column.0)
-                                .map(|col| row[Column(col)].c)
-                                .collect::<String>();
-                            if visible.ends_with(&self.input_line) {
-                                history.push(self.input_line.trim().to_owned());
+                            if !self.input_line.trim().is_empty() {
+                                let point = self.grid.grid().cursor.point;
+                                let row = &self.grid.grid()[point.line];
+                                let visible = (0..point.column.0)
+                                    .map(|col| row[Column(col)].c)
+                                    .collect::<String>();
+                                if visible.ends_with(&self.input_line)
+                                    || self.editable_line().is_some()
+                                {
+                                    history.push(self.input_line.trim().to_owned());
+                                }
                             }
                             self.input_line.clear();
-                        } else if key == Key::Backspace {
-                            self.input_line.pop();
+                            caret = None;
+                        } else if key == Key::Backspace && !modifiers.ctrl && !modifiers.alt {
+                            if let Some(at) = caret {
+                                if at > 0 {
+                                    self.input_line.remove(at - 1);
+                                    caret = Some(at - 1);
+                                }
+                            } else {
+                                self.input_line.pop();
+                            }
+                        } else if key == Key::Delete && !modifiers.ctrl && !modifiers.alt {
+                            if let Some(at) = caret
+                                && at < self.input_line.len()
+                            {
+                                self.input_line.remove(at);
+                            }
+                        } else if !modifiers.ctrl && !modifiers.alt && !modifiers.shift {
+                            caret = caret.map(|at| match key {
+                                Key::ArrowLeft => at.saturating_sub(1),
+                                Key::ArrowRight => (at + 1).min(self.input_line.len()),
+                                Key::Home => 0,
+                                Key::End => self.input_line.len(),
+                                _ => at,
+                            });
+                            if matches!(
+                                key,
+                                Key::Tab | Key::Escape | Key::ArrowUp | Key::ArrowDown | Key::Enter
+                            ) {
+                                caret = None;
+                                if matches!(key, Key::ArrowUp | Key::ArrowDown) {
+                                    self.input_line.clear();
+                                }
+                            }
                         } else if !matches!(key, Key::Space)
                             && (modifiers.ctrl || matches!(key, Key::ArrowUp | Key::ArrowDown))
                         {
                             self.input_line.clear();
+                            caret = None;
+                        } else if modifiers.alt || modifiers.shift {
+                            caret = None;
                         }
                         if let Some(bytes) = key_bytes(key, modifiers, *self.grid.mode(), self.kind)
                         {
@@ -907,13 +1053,33 @@ impl Terminal {
                     _ => {}
                 }
             }
+            self.input_line
+                .truncate(self.input_line.floor_char_boundary(4096));
+            self.free_type.caret = caret.filter(|&at| at <= self.input_line.len());
             if !input_bytes.is_empty() {
                 self.reset_command_selection();
                 self.input(backend, input_bytes, &mut error);
             }
         }
+        // Match the grid's background and current-line band in the margin;
+        // a black gap between the gutter and grid looked like a stray border.
+        let margin = rect.with_min_x(gutter.map_or(viewport.left(), |r| r.right()));
+        let margin = margin.with_max_x(rect.left());
+        let grid = self.grid.grid();
+        if focused && !fullscreen && grid.display_offset() == 0 && !self.closed {
+            let y = rect.top() + grid.cursor.point.line.0 as f32 * cell.y - preview_offset.y;
+            ui.painter().with_clip_rect(margin).rect_filled(
+                Rect::from_min_size(pos2(margin.left(), y), vec2(margin.width(), cell.y)),
+                0.0,
+                if wallpaper.is_some() {
+                    Color32::from_rgba_unmultiplied(21, 21, 29, 140)
+                } else {
+                    super::theme::color(0x15151d)
+                },
+            );
+        }
         if let Some(gutter) = gutter {
-            self.paint_line_numbers(ui, gutter, cell.y, font.size, first_row);
+            self.paint_line_numbers(ui, gutter, cell.y, font.size, first_row, focused);
         } else if !fullscreen {
             let left = rect.left() - 7.0;
             let offset = self.grid.grid().display_offset() as i32;
@@ -923,23 +1089,13 @@ impl Terminal {
                 self.paint_command_mark(ui, area, Line(row as i32 - offset));
             }
         }
-        {
-            ui.painter().rect_filled(
-                Rect::from_min_max(
-                    pos2(gutter.map_or(viewport.left(), |r| r.right()), rect.top()),
-                    pos2(rect.left(), rect.bottom()),
-                ),
-                0.0,
-                Color32::BLACK,
-            );
-        }
         self.paint(
             ui,
             rect,
             cell,
             &font,
             highlighter,
-            response.has_focus() && allow_input,
+            focused,
             preview_offset,
             wallpaper.is_some(),
         );
@@ -958,7 +1114,11 @@ impl Terminal {
         let response = ui.interact(
             rect,
             ui.id().with(("terminal-scrollbar", self.tab)),
-            Sense::click_and_drag(),
+            if allow_input {
+                Sense::CLICK | Sense::DRAG
+            } else {
+                Sense::hover()
+            },
         );
         if allow_input
             && history > 0
@@ -1000,6 +1160,7 @@ impl Terminal {
         row_height: f32,
         font_size: f32,
         first_row: usize,
+        focused: bool,
     ) {
         let painter = ui.painter().with_clip_rect(rect);
         painter.rect_filled(rect, 0.0, Color32::BLACK);
@@ -1021,7 +1182,7 @@ impl Terminal {
             if line > cursor && grid[line].is_clear() {
                 continue;
             }
-            if line == cursor && grid.display_offset() == 0 {
+            if focused && line == cursor && grid.display_offset() == 0 {
                 painter.rect_filled(
                     Rect::from_min_size(
                         pos2(rect.left(), rect.top() + y * row_height),
@@ -1043,7 +1204,7 @@ impl Terminal {
                 Align2::RIGHT_CENTER,
                 (first_number + usize::from(row)).to_string(),
                 font.clone(),
-                if line == cursor {
+                if focused && line == cursor {
                     super::theme::color(0xff008f)
                 } else {
                     super::theme::color(0x2b91af)
@@ -1067,11 +1228,15 @@ impl Terminal {
         &mut self,
         ui: &egui::Ui,
         response: &egui::Response,
+        rect: Rect,
         cell: Vec2,
-        copy_on_select: bool,
+        options: &TerminalOptions,
         backend: &Backend,
     ) {
-        if response.hovered() {
+        let copy_on_select = options.copy_on_select;
+        let free_type = options.free_type && !ui.input(|input| input.modifiers.shift);
+        let over_grid = response.hovered() && ui.rect_contains_pointer(rect);
+        if over_grid {
             // The terminal already has line-based scrolling. Egui's generic
             // easing spreads a wheel notch across several frames and makes SSH
             // scrollback feel delayed even though the history is entirely local.
@@ -1099,34 +1264,38 @@ impl Terminal {
             }
             ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
         }
+        let size = self.size;
+        let offset = self.grid.grid().display_offset();
         let locate = |position: egui::Pos2| {
-            let delta = position - response.rect.min;
+            let delta = position - rect.min;
             let row = (delta.y / cell.y)
                 .floor()
-                .clamp(0.0, self.size.rows.saturating_sub(1) as f32) as usize;
+                .clamp(0.0, size.rows.saturating_sub(1) as f32) as usize;
             let column = (delta.x / cell.x)
                 .floor()
-                .clamp(0.0, self.size.cols.saturating_sub(1) as f32)
-                as usize;
+                .clamp(0.0, size.cols.saturating_sub(1) as f32) as usize;
             let side = if (delta.x / cell.x).fract() < 0.5 {
                 Side::Left
             } else {
                 Side::Right
             };
             (
-                viewport_to_point(
-                    self.grid.grid().display_offset(),
-                    Point::new(row, Column(column)),
-                ),
+                viewport_to_point(offset, Point::new(row, Column(column))),
                 side,
             )
         };
-        if response.hovered() && ui.input(|input| input.pointer.primary_pressed()) {
+        if over_grid && ui.input(|input| input.pointer.primary_pressed()) {
             self.drag_anchor = response
                 .interact_pointer_pos()
                 .or_else(|| ui.input(|input| input.pointer.press_origin()));
+            if free_type && let Some(pos) = self.drag_anchor {
+                self.free_drag_begin(locate(pos).0);
+            } else {
+                self.free_cancel_drag();
+            }
         }
-        if response.double_clicked() || response.triple_clicked() {
+        if over_grid && (response.double_clicked() || response.triple_clicked()) {
+            self.free_cancel_drag();
             if let Some(position) = response.interact_pointer_pos() {
                 let (point, side) = locate(position);
                 let kind = if response.triple_clicked() {
@@ -1139,7 +1308,11 @@ impl Terminal {
                     self.copy(ui.ctx());
                 }
             }
-        } else if response.dragged_by(egui::PointerButton::Primary) {
+        } else if self.drag_anchor.is_some() && response.dragged_by(egui::PointerButton::Primary) {
+            if free_type && self.free_dragging() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                return;
+            }
             if let Some(position) = response.interact_pointer_pos() {
                 let (point, side) = locate(position);
                 if response.drag_started() || self.grid.selection.is_none() {
@@ -1151,10 +1324,30 @@ impl Terminal {
                     selection.update(point, side);
                 }
             }
-        } else if response.drag_stopped() && copy_on_select {
-            self.copy(ui.ctx());
-        } else if response.clicked() {
-            self.grid.selection = None;
+        } else if response.drag_stopped() {
+            if free_type && self.free_dragging() {
+                if let Some(position) = response
+                    .interact_pointer_pos()
+                    .filter(|pos| rect.contains(*pos))
+                {
+                    let (point, side) = locate(position);
+                    self.free_drag_drop(point, side, backend);
+                }
+                self.free_cancel_drag();
+            } else if self.drag_anchor.is_some() && copy_on_select {
+                self.copy(ui.ctx());
+            }
+            self.drag_anchor = None;
+        } else if response.clicked_by(egui::PointerButton::Primary) {
+            self.drag_anchor = None;
+            self.free_cancel_drag();
+            if over_grid {
+                self.grid.selection = None;
+                if free_type && let Some(position) = response.interact_pointer_pos() {
+                    let (point, side) = locate(position);
+                    self.free_click(point, side, backend);
+                }
+            }
         }
     }
 
@@ -1189,12 +1382,12 @@ impl Terminal {
         if !wallpaper {
             painter.rect_filled(rect, 0.0, bg);
         }
-        let active_line = if content.display_offset == 0 && !self.fullscreen_layout && !self.closed
-        {
-            Some(content.cursor.point.line)
-        } else {
-            None
-        };
+        let active_line =
+            if focused && content.display_offset == 0 && !self.fullscreen_layout && !self.closed {
+                Some(content.cursor.point.line)
+            } else {
+                None
+            };
         let line_bg = if wallpaper {
             Color32::from_rgba_unmultiplied(21, 21, 29, 140)
         } else {
@@ -1214,7 +1407,7 @@ impl Terminal {
             );
         }
         let blink = self.grid.cursor_style().blinking && focused && !self.closed;
-        let now = ui.input(|input| input.time);
+        let now = (ui.input(|input| input.time) - self.cursor_activity).max(0.0);
         if blink {
             ui.ctx()
                 .request_repaint_after(Duration::from_secs_f64(0.55 - now % 0.55));
@@ -1295,7 +1488,8 @@ impl Terminal {
             let is_cursor = !holding_alternate
                 && indexed.point == content.cursor.point
                 && !self.closed
-                && show_cursor;
+                && show_cursor
+                && content.display_offset == 0;
             if is_cursor && content.cursor.shape == CursorShape::Block && focused {
                 background = cursor_color;
                 foreground = bg;
@@ -1377,7 +1571,7 @@ impl Terminal {
                         painter.rect_stroke(
                             bounds,
                             0.0,
-                            Stroke::new(1.0_f32, cursor_color),
+                            Stroke::new(1.0_f32, cursor_color.gamma_multiply(0.4)),
                             egui::StrokeKind::Inside,
                         );
                     }

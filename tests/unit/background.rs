@@ -153,6 +153,8 @@ fn terminal_keeps_wallpaper_in_normal_and_alternate_screens() {
                         &options,
                         &highlighter,
                         false,
+                        false,
+                        false,
                         preview,
                         background,
                     );

@@ -34,6 +34,7 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("scrollback", "2000"),
     ("bell_enabled", "0"),
     ("copy_on_select", "1"),
+    ("free_type", "1"),
     ("line_numbers", "1"),
     ("background_enabled", "0"),
     ("background_path", ""),
@@ -168,6 +169,7 @@ impl Settings {
             scrollback,
             copy_on_select: self.on("copy_on_select"),
             line_numbers: self.on("line_numbers"),
+            free_type: self.on("free_type"),
         }
     }
 
@@ -351,6 +353,15 @@ impl Settings {
             t,
             ("Copy on Select", "Copy selected text to the clipboard"),
             "copy_on_select",
+        );
+        self.flag(
+            ui,
+            t,
+            (
+                "Free Type Mode",
+                "Use the mouse to edit echoed shell commands",
+            ),
+            "free_type",
         );
     }
 

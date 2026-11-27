@@ -11,6 +11,7 @@ fn terminal() -> Terminal {
             scrollback: 100,
             copy_on_select: false,
             line_numbers: true,
+            free_type: false,
         },
     )
 }

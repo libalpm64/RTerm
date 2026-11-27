@@ -11,6 +11,7 @@ fn terminal_keeps_focus_for_tab_and_repeating_arrows() {
         scrollback: 100,
         copy_on_select: false,
         line_numbers: false,
+        free_type: false,
     };
     let mut term = Terminal::new(1, "Test".into(), Kind::Local, &options);
     let (input, receive) = mpsc::sync_channel(128);
@@ -37,7 +38,18 @@ fn terminal_keeps_focus_for_tab_and_repeating_arrows() {
                         ui.memory_mut(|m| m.request_focus(id));
                     }
                     let area = Rect::from_min_size(pos2(0.0, 80.0), vec2(600.0, 400.0));
-                    term.show(ui, area, &backend, &options, &highlighter, true, None, None);
+                    term.show(
+                        ui,
+                        area,
+                        &backend,
+                        &options,
+                        &highlighter,
+                        true,
+                        true,
+                        false,
+                        None,
+                        None,
+                    );
                     let _ = ui.interact(
                         Rect::from_min_size(pos2(0.0, 490.0), vec2(100.0, 24.0)),
                         ui.id().with("below"),
@@ -84,6 +96,7 @@ fn input_bursts_are_batched_and_retried_in_order() {
         scrollback: 100,
         copy_on_select: false,
         line_numbers: false,
+        free_type: false,
     };
     let mut term = Terminal::new(1, "Test".into(), Kind::Local, &options);
     let (input, receive) = mpsc::sync_channel(1);
@@ -113,6 +126,8 @@ fn input_bursts_are_batched_and_retried_in_order() {
                     &options,
                     &highlighter,
                     true,
+                    true,
+                    false,
                     None,
                     None,
                 );
@@ -168,6 +183,7 @@ fn scrollback_frame_profile() {
         scrollback: 100_000,
         copy_on_select: false,
         line_numbers: true,
+        free_type: false,
     };
     let mut terminal = Terminal::new(1, "Profile".into(), Kind::Ssh, &options);
     let render = |terminal: &mut Terminal, highlighter: &Highlighter, scroll: bool| {
@@ -198,6 +214,8 @@ fn scrollback_frame_profile() {
                         &options,
                         highlighter,
                         true,
+                        true,
+                        false,
                         None,
                         None,
                     );
@@ -252,6 +270,7 @@ fn zoom_preview_scales_text_without_resizing_grid() {
         scrollback: 1000,
         copy_on_select: false,
         line_numbers: true,
+        free_type: false,
     };
     let highlighter = Highlighter::new(false, "");
     let mut terminal = Terminal::new(1, "Preview".into(), Kind::Local, &options);
@@ -269,6 +288,8 @@ fn zoom_preview_scales_text_without_resizing_grid() {
                         &backend,
                         options,
                         &highlighter,
+                        false,
+                        false,
                         false,
                         preview,
                         None,
@@ -309,6 +330,7 @@ fn resize_round_trip_preserves_shell_lines() {
         scrollback: 1000,
         copy_on_select: false,
         line_numbers: true,
+        free_type: false,
     };
     let highlighter = Highlighter::new(false, "");
     let mut terminal = Terminal::new(1, "Resize".into(), Kind::Local, &options);
@@ -326,6 +348,8 @@ fn resize_round_trip_preserves_shell_lines() {
                         &backend,
                         options,
                         &highlighter,
+                        false,
+                        false,
                         false,
                         None,
                         None,
@@ -361,6 +385,7 @@ fn native_pty_connects_shell_input_and_output() {
         scrollback: 100,
         copy_on_select: false,
         line_numbers: false,
+        free_type: false,
     };
     let mut terminal = Terminal::new(1, "Test".into(), Kind::Local, &options);
     terminal.queue_local(shell, false);
@@ -442,4 +467,99 @@ fn native_pty_connects_shell_input_and_output() {
         "PTY did not return the marker: {}",
         String::from_utf8_lossy(&output)
     );
+}
+
+#[test]
+fn prompt_cursor_survives_narrow_then_wide_grid_reflow() {
+    let options = TerminalOptions {
+        font: 22.0,
+        cursor: CursorStyle::default(),
+        scrollback: 100,
+        copy_on_select: false,
+        line_numbers: true,
+        free_type: true,
+    };
+    let prompt = "guest@local-fedora:~$ ";
+    for initial_cols in 2..=80 {
+        let mut term = Terminal::new(1, "Prompt".into(), Kind::Local, &options);
+        term.reset_empty_grid(
+            PtySize {
+                rows: 24,
+                cols: initial_cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            &options,
+        );
+        term.receive(b"\x1b[1;32mLocal Terminal\x1b[0m\r\n\x1b[?2004h");
+        term.receive(b"\x1b[0m\x1b[1;32mguest@local-fedora\x1b[0m:\x1b[1;32m~\x1b[0m$ ");
+        term.grid.resize(Size(PtySize {
+            rows: 24,
+            cols: 35,
+            pixel_width: 0,
+            pixel_height: 0,
+        }));
+        term.size.cols = 35;
+        assert!(
+            term.visible_line_is(prompt.trim_end()),
+            "prompt missing after reflow from {initial_cols}"
+        );
+        let point = term.grid.grid().cursor.point;
+        assert_eq!(
+            point.column.0,
+            prompt.len(),
+            "cursor reflow from {initial_cols}, point {point:?}"
+        );
+        term.receive(b"x");
+        assert!(
+            term.visible_line_is(&format!("{prompt}x")),
+            "first character after reflow from {initial_cols}"
+        );
+    }
+}
+
+#[test]
+fn prompt_cursor_survives_resolution_round_trip() {
+    let options = TerminalOptions {
+        font: 20.0,
+        cursor: CursorStyle::default(),
+        scrollback: 100,
+        copy_on_select: false,
+        line_numbers: true,
+        free_type: true,
+    };
+    let prompt = "guest@local-fedora:~$ ";
+    let size = |cols, rows| PtySize {
+        cols,
+        rows,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+    for start in [24, 35, 72, 80] {
+        for narrow in 2..=80 {
+            for height in [1, 2, 5, 12, 24, 35] {
+                let mut term = Terminal::new(1, "Prompt".into(), Kind::Local, &options);
+                term.reset_empty_grid(size(start, 24), &options);
+                term.receive(b"Local Terminal\r\n\x1b[?2004hguest@local-fedora:~$ ");
+                term.grid.resize(Size(size(narrow, height)));
+                term.grid.resize(Size(size(35, 24)));
+                term.size = size(35, 24);
+                let p = term.grid.grid().cursor.point;
+                assert!(
+                    term.visible_line_is(prompt.trim_end()),
+                    "prompt lost: {start} -> {narrow}x{height} -> 35; {p:?}"
+                );
+                assert_eq!(
+                    p.column.0,
+                    prompt.len(),
+                    "cursor: {start} -> {narrow}x{height} -> 35; {p:?}"
+                );
+                term.receive(b"x");
+                assert!(
+                    term.visible_line_is(&format!("{prompt}x")),
+                    "first input: {start} -> {narrow}x{height} -> 35"
+                );
+            }
+        }
+    }
 }

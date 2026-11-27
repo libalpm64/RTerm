@@ -43,6 +43,9 @@ enum Action {
     Explorer,
     Sessions,
     BottomShell,
+    SplitNew(splits::Direction),
+    SinglePane,
+    FreeType(bool),
     Zoom(f32),
     ResetZoom,
     Keys,
@@ -87,6 +90,7 @@ pub(crate) struct App {
     pub(crate) keys: KeyManager,
     pub(crate) explorer: Explorer,
     terminals: Vec<Terminal>,
+    splits: splits::Splits,
     bottom_shell: Option<Terminal>,
     bottom_open: bool,
     bottom_focus: bool,
@@ -212,6 +216,7 @@ impl App {
             keys: KeyManager::default(),
             explorer: Explorer::new(),
             terminals: Vec::new(),
+            splits: Default::default(),
             bottom_shell: None,
             bottom_open: false,
             bottom_focus: false,
@@ -768,6 +773,7 @@ impl App {
 
     fn activate(&mut self, tab: u64) {
         let old_ssh = self.active_ssh();
+        self.splits.select(self.active, tab);
         self.active = Some(tab);
         self.show_keys = false;
         self.focus_terminal = true;
@@ -788,6 +794,11 @@ impl App {
             return;
         };
         let mut terminal = self.terminals.remove(index);
+        let remaining_pane = if self.splits.contains(tab) {
+            self.splits.remove(tab)
+        } else {
+            None
+        };
         self.host_trust.remove_tab(tab);
         if let Some(ssh) = self.ssh_tabs.remove(&tab) {
             self.agent.revoke_session(ssh.session_id);
@@ -803,11 +814,12 @@ impl App {
             drop(self.backend.request(Command::Disconnect(id)));
         }
         if self.active == Some(tab) {
-            self.active = self
-                .terminals
-                .get(index.min(self.terminals.len().saturating_sub(1)))
-                .map(|terminal| terminal.tab);
-            self.focus_terminal = true;
+            self.active = remaining_pane.or_else(|| {
+                self.terminals
+                    .get(index.min(self.terminals.len().saturating_sub(1)))
+                    .map(|terminal| terminal.tab)
+            });
+            self.focus_terminal_after_dialog();
             if self.explorer.remote_active {
                 self.activate_remote(self.active_ssh());
             }
@@ -912,6 +924,7 @@ impl App {
                 if let Some(terminal) = self.selected() {
                     terminal.copy(context);
                 }
+                self.focus_terminal_after_dialog();
             }
             Action::Paste => {
                 let text = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text());
@@ -932,6 +945,7 @@ impl App {
                 if let Some(terminal) = self.selected() {
                     terminal.select_all();
                 }
+                self.focus_terminal_after_dialog();
             }
             Action::Clear => {
                 if let Some(terminal) = self.selected() {
@@ -960,6 +974,22 @@ impl App {
                 }
             }
             Action::BottomShell => self.toggle_bottom_shell(),
+            Action::SplitNew(direction) => self.split_new(direction),
+            Action::SinglePane => self.single_pane(),
+            Action::FreeType(_) => {
+                let value = if self.settings.on("free_type") {
+                    "0"
+                } else {
+                    "1"
+                };
+                self.settings.set("free_type", value.into());
+                if self.persist_history
+                    && let Err(error) = storage::save_settings(&[("free_type", value.into())])
+                {
+                    self.fail(error);
+                }
+                self.focus_terminal_after_dialog();
+            }
             Action::Zoom(delta) => {
                 let tab = self.zoom_target();
                 self.zoom(tab, self.zoom_base(tab) + delta);
@@ -1297,5 +1327,6 @@ mod known_hosts;
 mod layout;
 mod menu;
 mod sessions;
+mod splits;
 mod ssh_reconnect;
 pub(crate) use sessions::{header_label, icon_slot, top_band};
