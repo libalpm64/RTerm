@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::io::{Read, Write};
+use std::ops::Range;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -208,6 +209,7 @@ pub(crate) struct Terminal {
     scrollback: usize,
     input_line: String,
     pending_input: RefCell<Vec<u8>>,
+    paint_scratch: PaintScratch,
     pending_user_input: Cell<bool>,
     scroll_remainder: f32,
     drag_anchor: Option<egui::Pos2>,
@@ -255,6 +257,7 @@ impl Terminal {
             scrollback: options.scrollback,
             input_line: String::new(),
             pending_input: RefCell::new(Vec::new()),
+            paint_scratch: PaintScratch::default(),
             pending_user_input: Cell::new(false),
             scroll_remainder: 0.0,
             drag_anchor: None,
@@ -1157,7 +1160,7 @@ impl Terminal {
 
     #[allow(clippy::too_many_arguments)]
     fn paint(
-        &self,
+        &mut self,
         ui: &egui::Ui,
         rect: Rect,
         cell: Vec2,
@@ -1220,12 +1223,17 @@ impl Terminal {
         // Full-screen applications own their colors; shell semantic rules must
         // not recolor their graphs, counters, and menu text.
         let inspect_text = highlighter.is_active() && !self.fullscreen_layout;
+        let PaintScratch {
+            row_text,
+            offsets,
+            highlights,
+            highlight_colors,
+            run,
+        } = &mut self.paint_scratch;
+        if !inspect_text {
+            highlight_colors.clear();
+        }
         let mut line = None;
-        let mut row_text = String::new();
-        let mut offsets = Vec::new();
-        let mut highlights = Vec::new();
-        let mut highlight_colors = Vec::new();
-        let mut run = AsciiRun::default();
         for indexed in content.display_iter {
             if inspect_text && line != Some(indexed.point.line) {
                 line = Some(indexed.point.line);
@@ -1238,10 +1246,10 @@ impl Terminal {
                     row_text.push(cell.c);
                 }
                 let text = row_text.trim_end();
-                highlighter.ranges_into(text, &mut highlights);
+                highlighter.ranges_into(text, highlights);
                 highlight_colors.clear();
                 highlight_colors.resize(self.size.cols as usize, None);
-                for (range, color) in &highlights {
+                for (range, color) in highlights.iter() {
                     let start = offsets.partition_point(|offset| *offset < range.start);
                     let end = offsets.partition_point(|offset| *offset < range.end);
                     highlight_colors[start..end].fill(Some(*color));
@@ -1478,6 +1486,15 @@ fn terminal_viewport(
 struct AsciiRun {
     text: String,
     start: Option<(Point, egui::Pos2, Color32, bool)>,
+}
+
+#[derive(Default)]
+struct PaintScratch {
+    row_text: String,
+    offsets: Vec<usize>,
+    highlights: Vec<(Range<usize>, Color32)>,
+    highlight_colors: Vec<Option<Color32>>,
+    run: AsciiRun,
 }
 
 impl AsciiRun {
@@ -1855,9 +1872,8 @@ mod tests {
             copy_on_select: false,
             line_numbers: true,
         };
-        let highlighter = Highlighter::new(true, "");
         let mut terminal = Terminal::new(1, "Profile".into(), Kind::Ssh, &options);
-        let render = |terminal: &mut Terminal, scroll: bool| {
+        let render = |terminal: &mut Terminal, highlighter: &Highlighter, scroll: bool| {
             let start = Instant::now();
             let output = context.run(
                 egui::RawInput {
@@ -1883,7 +1899,7 @@ mod tests {
                             ui.max_rect(),
                             &backend,
                             &options,
-                            &highlighter,
+                            highlighter,
                             true,
                             None,
                             None,
@@ -1895,30 +1911,37 @@ mod tests {
             let _ = context.tessellate(output.shapes, output.pixels_per_point);
             (start.elapsed().as_secs_f64() * 1000.0, shapes)
         };
-        render(&mut terminal, false);
+        render(&mut terminal, &Highlighter::new(true, ""), false);
         let line = b"2026-11-25 12:34:56 INFO ssh connection accepted from 192.0.2.1 /var/log/example.log request completed successfully\r\n";
         for _ in 0..101_000 {
             terminal.receive(line);
         }
-        let mut samples = Vec::new();
-        let mut shapes = 0;
-        for frame in 0..70 {
-            let (ms, count) = render(&mut terminal, true);
-            if frame >= 10 {
-                samples.push(ms);
-                shapes += count;
+        for (mode, highlighter) in [
+            ("enabled", Highlighter::new(true, "")),
+            ("disabled", Highlighter::new(false, "")),
+        ] {
+            terminal.grid.scroll_display(Scroll::Bottom);
+            render(&mut terminal, &highlighter, false);
+            let mut samples = Vec::with_capacity(60);
+            let mut shapes = 0;
+            for frame in 0..70 {
+                let (ms, count) = render(&mut terminal, &highlighter, true);
+                if frame >= 10 {
+                    samples.push(ms);
+                    shapes += count;
+                }
             }
+            assert!(terminal.grid.grid().display_offset() > 0);
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "SCROLL_PROFILE mode={mode} median_ms={:.3} p95_ms={:.3} avg_shapes={} history={} offset={}",
+                samples[samples.len() / 2],
+                samples[samples.len() * 95 / 100],
+                shapes / samples.len(),
+                terminal.grid.grid().history_size(),
+                terminal.grid.grid().display_offset()
+            );
         }
-        assert!(terminal.grid.grid().display_offset() > 0);
-        samples.sort_by(f64::total_cmp);
-        println!(
-            "SCROLL_PROFILE median_ms={:.3} p95_ms={:.3} avg_shapes={} history={} offset={}",
-            samples[samples.len() / 2],
-            samples[samples.len() * 95 / 100],
-            shapes / samples.len(),
-            terminal.grid.grid().history_size(),
-            terminal.grid.grid().display_offset()
-        );
     }
 
     #[test]

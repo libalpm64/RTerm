@@ -1430,6 +1430,19 @@ pub(crate) fn remove_profiles() -> Result<(), String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn vault_key_derivation_matches_legacy_argon2_defaults() {
+        let key = VaultKey::derive_with_salt("RTerm vault compatibility check", [0x42; 16]);
+        assert_eq!(
+            key.0,
+            [
+                0x8a, 0x27, 0x2f, 0x47, 0x1a, 0x03, 0xab, 0xbb, 0xe6, 0x7a, 0x31, 0x42, 0x18, 0xb7,
+                0x31, 0x90, 0xd4, 0x4d, 0xf6, 0xc5, 0xb0, 0x20, 0xbb, 0xdf, 0x00, 0x7f, 0xec, 0x7c,
+                0xf9, 0x4f, 0x1f, 0x8c,
+            ]
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn config_parent_requires_a_trusted_owner() {
