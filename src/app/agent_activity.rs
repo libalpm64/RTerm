@@ -52,11 +52,6 @@ impl Activity {
         entries
     }
 
-    #[cfg(test)]
-    pub(super) fn saved(&self) -> &VecDeque<AgentAuditEntry> {
-        &self.saved
-    }
-
     pub(super) fn load(&mut self, mut entries: VecDeque<AgentAuditEntry>) {
         for entry in &mut entries {
             if entry.finished_ms.is_none() {
@@ -116,7 +111,10 @@ impl Activity {
             item.entry.exit_code = code;
             item.entry.duration_ms = duration;
             item.entry.detail = detail;
-            if !matches!(phase, "queued" | "awaiting_approval" | "running") {
+            if !matches!(
+                phase,
+                "queued" | "preparing_upload" | "awaiting_approval" | "running"
+            ) {
                 item.entry.finished_ms = Some(now_ms());
                 item.running = None;
             }
@@ -291,6 +289,7 @@ fn session_label(term: &Terminal) -> String {
 fn outcome(entry: &AgentAuditEntry, theme: Theme) -> (String, Color32) {
     match entry.phase.as_str() {
         "queued" => ("Queued".into(), theme.muted),
+        "preparing_upload" => ("Preparing upload".into(), theme.accent),
         "awaiting_approval" => ("Awaiting approval".into(), theme.yellow),
         "running" => ("Running".into(), theme.accent),
         "completed" => match entry.exit_code {
@@ -522,3 +521,7 @@ impl Viewer {
             });
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/app/agent_activity.rs"]
+mod test_support;

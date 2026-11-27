@@ -1,11 +1,11 @@
-use super::*;
+use super::{known_hosts::KnownHosts, *};
 use crate::host_keys::{Key, Store};
 use std::collections::VecDeque;
 
 pub(super) struct Trust {
     pub(super) store: Store,
     pending: VecDeque<Prompt>,
-    show_hosts: bool,
+    hosts: Option<KnownHosts>,
 }
 
 pub(super) struct Prompt {
@@ -22,7 +22,7 @@ impl Trust {
         Self {
             store: Store::new(persistent),
             pending: VecDeque::new(),
-            show_hosts: false,
+            hosts: None,
         }
     }
 
@@ -31,11 +31,13 @@ impl Trust {
     }
 
     pub(super) fn blocking(&self) -> bool {
-        !self.pending.is_empty() || self.show_hosts
+        !self.pending.is_empty() || self.hosts.is_some()
     }
 
     pub(super) fn open_hosts(&mut self) {
-        self.show_hosts = true;
+        if self.hosts.is_none() {
+            self.hosts = Some(KnownHosts::new(&self.store));
+        }
     }
 }
 
@@ -44,6 +46,9 @@ impl App {
         if self.locked {
             self.finish_host_trust(prompt, false);
         } else {
+            if let Some(hosts) = &mut self.host_trust.hosts {
+                hosts.cancel_confirmation();
+            }
             self.host_trust.pending.push_back(prompt);
         }
     }
@@ -60,6 +65,9 @@ impl App {
             );
             match saved {
                 Ok(()) => {
+                    if let Some(hosts) = &mut self.host_trust.hosts {
+                        hosts.reload(&self.host_trust.store);
+                    }
                     self.start_remote_connection(prompt.tab, prompt.profile, prompt.save);
                     return;
                 }
@@ -74,31 +82,12 @@ impl App {
         self.remote_connection_failed(prompt.tab, message);
     }
 
-    #[cfg(test)]
-    pub(super) fn approve_fixture_host(&mut self) -> bool {
-        let Some(prompt) = self.host_trust.pending.pop_front() else {
-            return false;
-        };
-        assert!(prompt.trusted.is_none());
-        assert!(prompt.presented.fingerprint.starts_with("SHA256:"));
-        self.finish_host_trust(prompt, true);
-        true
-    }
-
-    #[cfg(test)]
-    pub(super) fn deny_fixture_replacement(&mut self, expected: &Key) {
-        let prompt = self.host_trust.pending.pop_front().unwrap();
-        assert!(prompt.trusted.is_some());
-        assert_eq!(&prompt.presented, expected);
-        self.finish_host_trust(prompt, false);
-    }
-
     pub(super) fn show_host_trust(&mut self, context: &egui::Context) {
         if self.locked {
             for prompt in std::mem::take(&mut self.host_trust.pending) {
                 self.finish_host_trust(prompt, false);
             }
-            self.host_trust.show_hosts = false;
+            self.host_trust.hosts = None;
             return;
         }
         if let Some(prompt) = self.host_trust.pending.front() {
@@ -153,48 +142,15 @@ impl App {
                 self.finish_host_trust(prompt, approve);
                 self.focus_terminal_after_dialog();
             }
-        } else if self.host_trust.show_hosts {
-            let entries = self.host_trust.store.list();
-            let response = egui::Modal::new(egui::Id::new("known-ssh-hosts")).show(context, |ui| {
-                ui.set_width(470.0);
-                ui.heading(crate::i18n::tr(ui, "Known SSH Hosts"));
-                let mut forget = None;
-                match entries.as_ref() {
-                    Ok(entries) if entries.is_empty() => {
-                        ui.label(crate::i18n::tr(ui, "No trusted hosts yet."));
-                    }
-                    Ok(entries) => {
-                        egui::ScrollArea::vertical()
-                            .max_height(320.0)
-                            .show(ui, |ui| {
-                                for (host, key) in entries {
-                                    ui.horizontal(|ui| {
-                                        ui.strong(crate::host_keys::display_host(host));
-                                        if ui.small_button(crate::i18n::tr(ui, "Forget")).clicked()
-                                        {
-                                            forget = Some(host.clone());
-                                        }
-                                    });
-                                    ui.monospace(format!("{} {}", key.algorithm, key.fingerprint));
-                                    ui.separator();
-                                }
-                            });
-                    }
-                    Err(error) => {
-                        ui.colored_label(self.theme.red, error);
-                    }
-                }
-                (ui.button(crate::i18n::tr(ui, "Close")).clicked(), forget)
-            });
-            if let (Ok(entries), Some(host)) = (&entries, response.inner.1.as_ref())
-                && let Err(error) = self.host_trust.store.change(host, entries.get(host), None)
-            {
-                self.fail(error);
-            }
-            if response.inner.0 || response.should_close() {
-                self.host_trust.show_hosts = false;
-                self.focus_terminal_after_dialog();
-            }
+        } else if let Some(hosts) = &mut self.host_trust.hosts
+            && hosts.show(context, &mut self.host_trust.store, self.theme)
+        {
+            self.host_trust.hosts = None;
+            self.focus_terminal_after_dialog();
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/app/host_trust.rs"]
+mod test_support;

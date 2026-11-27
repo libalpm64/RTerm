@@ -304,5 +304,16 @@
   "WORKSPACE": "ÇALIŞMA ALANI",
   "Welcome to Rterm": "RTerm’e hoş geldiniz",
   "Zoom In": "Yakınlaştır",
-  "Zoom Out": "Uzaklaştır"
+  "Zoom Out": "Uzaklaştır",
+  "Search host, port, key type or fingerprint": "Ana makine, port, anahtar türü veya parmak izi ara",
+  "Select matching": "Eşleşenleri seç",
+  "Clear selection": "Seçimi temizle",
+  "Copy fingerprint": "Parmak izini kopyala",
+  "Forget selected": "Seçilenleri unut",
+  "{shown} of {total} trusted hosts · {selected} selected": "{total} güvenilen ana makineden {shown} tanesi · {selected} seçili",
+  "No trusted hosts match this search.": "Aramayla eşleşen güvenilen ana makine yok.",
+  "Forget {count} trusted hosts?": "{count} güvenilen ana makine unutulsun mu?",
+  "These hosts will require verification on their next connection.": "Bu ana makineler bir sonraki bağlantıda doğrulanacak.",
+  "Existing SSH connections will remain open.": "Mevcut SSH bağlantıları açık kalacak.",
+  "And {count} more": "Ve {count} tane daha"
 }

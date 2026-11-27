@@ -304,5 +304,16 @@
   "WORKSPACE": "РАБОЧАЯ ОБЛАСТЬ",
   "Welcome to Rterm": "Добро пожаловать в RTerm",
   "Zoom In": "Увеличить",
-  "Zoom Out": "Уменьшить"
+  "Zoom Out": "Уменьшить",
+  "Search host, port, key type or fingerprint": "Поиск по хосту, порту, типу ключа или отпечатку",
+  "Select matching": "Выбрать найденные",
+  "Clear selection": "Снять выделение",
+  "Copy fingerprint": "Копировать отпечаток",
+  "Forget selected": "Забыть выбранные",
+  "{shown} of {total} trusted hosts · {selected} selected": "{shown} из {total} доверенных хостов · выбрано {selected}",
+  "No trusted hosts match this search.": "Доверенные хосты не найдены.",
+  "Forget {count} trusted hosts?": "Забыть доверенные хосты ({count})?",
+  "These hosts will require verification on their next connection.": "Эти хосты потребуется проверить при следующем подключении.",
+  "Existing SSH connections will remain open.": "Текущие SSH подключения останутся открытыми.",
+  "And {count} more": "И ещё {count}"
 }

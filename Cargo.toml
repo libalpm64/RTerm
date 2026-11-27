@@ -51,6 +51,14 @@ winit = { version = "0.30", default-features = false, features = ["wayland-csd-a
 windows = { version = "0.61.3", default-features = false, features = ["Win32_Foundation", "Win32_Graphics_Imaging", "Win32_System_Com"] }
 windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_System_Pipes", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_Globalization"] }
 
+# Keep source locations in application backtraces without spending time and
+# disk space generating full DWARF/PDB information for every dependency.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = 0
+
 [profile.release]
 opt-level = 3
 strip = "symbols"
@@ -58,4 +66,5 @@ lto = "thin"
 codegen-units = 1
 
 [patch.crates-io]
+eframe = { path = "vendor/eframe" }
 pageant = { path = "vendor/pageant" }

@@ -304,5 +304,16 @@
   "WORKSPACE": "작업 공간",
   "Welcome to Rterm": "RTerm에 오신 것을 환영합니다",
   "Zoom In": "확대",
-  "Zoom Out": "축소"
+  "Zoom Out": "축소",
+  "Search host, port, key type or fingerprint": "호스트, 포트, 키 유형 또는 지문 검색",
+  "Select matching": "검색 결과 선택",
+  "Clear selection": "선택 해제",
+  "Copy fingerprint": "지문 복사",
+  "Forget selected": "선택한 호스트 신뢰 해제",
+  "{shown} of {total} trusted hosts · {selected} selected": "신뢰된 호스트 {total}개 중 {shown}개 · {selected}개 선택됨",
+  "No trusted hosts match this search.": "검색 조건에 맞는 신뢰된 호스트가 없습니다.",
+  "Forget {count} trusted hosts?": "신뢰된 호스트 {count}개의 신뢰를 해제하시겠습니까?",
+  "These hosts will require verification on their next connection.": "다음 연결 시 이 호스트를 다시 확인해야 합니다.",
+  "Existing SSH connections will remain open.": "기존 SSH 연결은 유지됩니다.",
+  "And {count} more": "외 {count}개"
 }

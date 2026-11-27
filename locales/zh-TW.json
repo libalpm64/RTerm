@@ -304,5 +304,16 @@
   "WORKSPACE": "工作區",
   "Welcome to Rterm": "歡迎使用 RTerm",
   "Zoom In": "放大",
-  "Zoom Out": "縮小"
+  "Zoom Out": "縮小",
+  "Search host, port, key type or fingerprint": "搜尋主機、連接埠、金鑰類型或指紋",
+  "Select matching": "選取相符項目",
+  "Clear selection": "清除選取",
+  "Copy fingerprint": "複製指紋",
+  "Forget selected": "取消信任所選主機",
+  "{shown} of {total} trusted hosts · {selected} selected": "共 {total} 個受信任主機，顯示 {shown} 個 · 已選 {selected} 個",
+  "No trusted hosts match this search.": "沒有符合搜尋條件的受信任主機。",
+  "Forget {count} trusted hosts?": "取消信任 {count} 個主機？",
+  "These hosts will require verification on their next connection.": "下次連線時需要重新驗證這些主機。",
+  "Existing SSH connections will remain open.": "現有 SSH 連線將保持開啟。",
+  "And {count} more": "以及其他 {count} 個"
 }

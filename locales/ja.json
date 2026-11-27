@@ -304,5 +304,16 @@
   "WORKSPACE": "ワークスペース",
   "Welcome to Rterm": "RTerm へようこそ",
   "Zoom In": "拡大",
-  "Zoom Out": "縮小"
+  "Zoom Out": "縮小",
+  "Search host, port, key type or fingerprint": "ホスト、ポート、鍵の種類、フィンガープリントを検索",
+  "Select matching": "検索結果を選択",
+  "Clear selection": "選択を解除",
+  "Copy fingerprint": "フィンガープリントをコピー",
+  "Forget selected": "選択したホストの信頼を解除",
+  "{shown} of {total} trusted hosts · {selected} selected": "信頼済みホスト {total} 件中 {shown} 件 · {selected} 件選択中",
+  "No trusted hosts match this search.": "検索条件に一致する信頼済みホストがありません。",
+  "Forget {count} trusted hosts?": "{count} 件のホストの信頼を解除しますか？",
+  "These hosts will require verification on their next connection.": "次回接続時にこれらのホストの確認が必要になります。",
+  "Existing SSH connections will remain open.": "既存の SSH 接続は維持されます。",
+  "And {count} more": "ほか {count} 件"
 }

@@ -304,5 +304,16 @@
   "WORKSPACE": "ARBEITSBEREICH",
   "Welcome to Rterm": "Willkommen bei RTerm",
   "Zoom In": "Vergrößern",
-  "Zoom Out": "Verkleinern"
+  "Zoom Out": "Verkleinern",
+  "Search host, port, key type or fingerprint": "Host, Port, Schlüsseltyp oder Fingerabdruck suchen",
+  "Select matching": "Treffer auswählen",
+  "Clear selection": "Auswahl aufheben",
+  "Copy fingerprint": "Fingerabdruck kopieren",
+  "Forget selected": "Ausgewählte vergessen",
+  "{shown} of {total} trusted hosts · {selected} selected": "{shown} von {total} vertrauenswürdigen Hosts · {selected} ausgewählt",
+  "No trusted hosts match this search.": "Keine vertrauenswürdigen Hosts entsprechen der Suche.",
+  "Forget {count} trusted hosts?": "{count} vertrauenswürdige Hosts vergessen?",
+  "These hosts will require verification on their next connection.": "Diese Hosts müssen bei der nächsten Verbindung erneut überprüft werden.",
+  "Existing SSH connections will remain open.": "Bestehende SSH Verbindungen bleiben geöffnet.",
+  "And {count} more": "Und {count} weitere"
 }

@@ -28,6 +28,16 @@ The repository includes native installer recipes and a **Build installers** GitH
 
 Linux packages are built on Ubuntu 24.04 and require compatible glibc and graphics libraries. They are not universal across every Linux distribution. Every RTerm installer bundles the same latest stable, checksum-verified official OpenAI tunnel-client for its target architecture, with upstream license notices. The client is installed beside RTerm on Windows and in the macOS app bundle, or in the private lib/rterm directory on Linux. No separate network download or manual client selection is needed at install time. Hosted CI produces ad-hoc signed macOS and unsigned Windows test packages. See [release builds](#release-builds) for trusted distribution.
 
+The enabled AI agent continues to service requests when the RTerm window is
+minimized or obscured, independently of rendering. Background SSH execution
+does not raise the window. When a request needs interactive approval, RTerm
+selects the appropriate SSH tab for foreground execution and asks the desktop
+to restore and activate its window. Wayland compositors and other window
+managers may refuse focus stealing or show an attention notification instead;
+click that notification or restore RTerm to review the approval. Interactive
+commands still require local approval; background access settings, vault
+locking, cancellation and permission expiry remain in force.
+
 Desktop shortcuts are optional. The Windows installer offers a **Create a desktop shortcut** checkbox (unchecked by default). The Linux portable installer asks when run interactively as a normal user. The macOS PKG and Linux DEB offer a one-time shortcut choice on first launch as the actual desktop user, rather than creating shortcuts in the installing administrator's home. The macOS shortcut links to the installed app; Linux creates an executable desktop launcher in the user's configured desktop directory, if available. Some Linux desktops require manually allowing launch of desktop files. Existing shortcuts are not overwritten by the Unix setup, and declining the offer leaves the desktop unchanged.
 
 Application menu registration is automatic, separate from desktop shortcuts: Windows adds a Start menu entry, macOS installs a Utilities-category app bundle discoverable in Applications and system app search, and Linux registers an XDG desktop entry for GNOME, KDE Plasma and other compatible launchers. The portable Linux installer registers the entry in the user's XDG data directory (or the system local applications directory for elevated installs), with an absolute executable path even when a custom PREFIX is used. Search for **RTerm**, **Terminal**, or **SSH** in the Linux application launcher. Linux registers the bundled RTerm icon with the desktop theme. Dock, taskbar and favorites pinning remain user choices.
@@ -45,6 +55,19 @@ cargo run --locked
 cargo build --release --locked
 cargo test --locked
 ```
+
+Development builds retain application source line tables for backtraces
+and omit dependency debug information to reduce clean build time and disk
+usage. Release optimization (including thin LTO) is unchanged. For a
+development build with full debug information, override the profile:
+
+```sh
+cargo build --locked --config 'profile.dev.debug=2' --config 'profile.dev.package."*".debug=2'
+```
+
+Unit tests and fixtures live in [tests/unit](../tests/README.md), rather
+than inside production source files. Run the normal Cargo test commands
+to execute them.
 
 - **Windows** uses ConPTY for local terminal sessions. Use Windows 10 version 1809 or later and the Visual Studio C++ Build Tools with the default MSVC Rust toolchain.
 - **macOS** uses a Unix PTY. Install the Xcode command-line tools with `xcode-select --install`.
@@ -96,7 +119,9 @@ Verify installs and upgrades and uninstalls plus local terminal and SSH and SFTP
 
 Interactive SSH requests a UTF-8 PTY and the character locale LC_CTYPE=C.UTF-8. The server may decline locale requests or override them in its shell startup files. If non-ASCII input still fails, run `locale charmap` in the remote shell; it should report UTF-8. On Linux, check `locale -a` for an installed UTF-8 locale and configure your remote shell to use it. This does not translate terminal data or change server configuration.
 
-On first connection, compare the displayed SHA-256 fingerprint with the server's fingerprint from a trusted source. **Trust and Connect** remembers the key for that host and port. RTerm checks the key before sending authentication credentials on each connection, including automatic reconnects. A changed key stops the connection and displays both fingerprints. Use **Trust Replacement and Connect** after verifying a planned rotation. **SSH Keys → Known Hosts…** lists trusted fingerprints and lets you forget a key.
+On first connection, compare the displayed SHA-256 fingerprint with the server's fingerprint from a trusted source. **Trust and Connect** remembers the key for that host and port. RTerm checks the key before sending authentication credentials on each connection, including automatic reconnects. A changed key stops the connection and displays both fingerprints. Use **Trust Replacement and Connect** after verifying a planned rotation.
+
+**SSH Keys → Known Hosts…** opens a resizable, searchable table of trusted hosts. Search by host, port, key type or fingerprint; multiple search words must all match. Click column headings to sort, or click a hostname or checkbox to select a row. Hover over a truncated value to see it in full, and select one host to copy its fingerprint. **Select matching** selects only the current search results. Changing the search or refreshing clears the selection. **Forget selected** asks for confirmation before removing any keys. The removal compares every selected key to the current trust store and writes the batch atomically; if any selected key has changed or disappeared, none are removed. Existing SSH connections remain open, but forgotten keys must be verified on the next connection. The list loads once when opened, refreshes after local trust changes, and renders only visible rows. Use **Refresh** to see changes made by another RTerm instance. The host-key verification policy and existing storage format are unchanged.
 
 ## Terminal command navigation
 
@@ -123,7 +148,7 @@ RTerm batches draw updates for applications using DEC mode 2026 and flushes a bu
 
 With **Settings → SFTP → Resume Transfers** on, repeat an interrupted single-file transfer with the same source and destination after reconnecting. RTerm saves checkpoints and keeps the partial file separate until completion. Parallel downloads keep their completed byte ranges and check remote metadata and sampled bytes. Uploads check the local file's hash and sample the staged remote bytes before resuming. RTerm starts a fresh transfer if those checks show a change.
 
-An upload is published using the server's rename operation. If the server refuses to replace an existing target, the completed partial remains available for retry after you resolve the destination conflict. Directory downloads require a new destination directory rather than merging with an existing directory. Directory transfers and AI-approved SFTP uploads do not use single-file transfer recovery.
+An upload is published using the server's rename operation. If the server refuses to replace an existing target, the completed partial remains available for retry after you resolve the destination conflict. Directory downloads require a new destination directory rather than merging with an existing directory. Directory transfers and agent-authorized SFTP uploads do not use single-file transfer recovery.
 
 ## Terminal benchmarks
 
@@ -160,5 +185,9 @@ To isolate the cost of the window and renderer from the application and shell, u
 - `src/terminal.rs` handles PTY input and output, keyboard input, selection, and terminal rendering.
 - `src/backend.rs` routes typed commands. `src/backend/connection.rs` handles address normalization, authentication, and terminal transports. `src/backend/sftp.rs` manages remote files and transfers.
 - `src/storage.rs` handles settings, saved profiles, keys, and vault compatibility.
+- `tests/unit/` contains the unit tests and fixtures, separated from production code.
+- `vendor/eframe/` pins the existing eframe 0.33.3 API with a small native
+  event-loop patch for non-rendering agent service and window activation.
+  See `vendor/eframe/RTerm-PATCH.md` for the patch provenance and limitations.
 
 The bundled fonts are distributed under their respective SIL Open Font Licenses in `assets/`.

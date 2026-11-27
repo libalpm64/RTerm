@@ -85,7 +85,7 @@ pub fn listen(name: &str) -> io::Result<Listener> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(format!("{name}.lock"))?;
     let meta = lock.metadata()?;
-    if !meta.is_file() || meta.uid() != uid() || meta.mode() & 0o077 != 0 {
+    if !meta.is_file() || meta.uid() != uid() || meta.nlink() != 1 || meta.mode() & 0o077 != 0 {
         return Err(denied("Unsafe RTerm IPC lock"));
     }
     lock.try_lock().map_err(|e| {
@@ -158,68 +158,5 @@ pub async fn request(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    fn private_test_dir() -> tempfile::TempDir {
-        tempfile::Builder::new()
-            .prefix("rterm-test-")
-            .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir_in("/tmp")
-            .unwrap()
-    }
-
-    #[test]
-    fn rejects_public_and_symlinked_socket_directories() {
-        let dir = private_test_dir();
-        let public = dir.path().join("public");
-        fs::create_dir(&public).unwrap();
-        fs::set_permissions(&public, fs::Permissions::from_mode(0o755)).unwrap();
-        let alias = dir.path().join("alias");
-        std::os::unix::fs::symlink(dir.path(), &alias).unwrap();
-        for parent in [public, alias] {
-            let name = parent.join("agent.sock");
-            for create in [false, true] {
-                assert_eq!(
-                    private_parent(&name, create).unwrap_err().kind(),
-                    io::ErrorKind::PermissionDenied
-                );
-            }
-        }
-        let name = dir.path().join("new-private").join("agent.sock");
-        private_parent(&name, true).unwrap();
-        let meta = fs::symlink_metadata(name.parent().unwrap()).unwrap();
-        assert_eq!(meta.uid(), uid());
-        assert_eq!(meta.mode() & 0o077, 0);
-    }
-
-    #[tokio::test]
-    async fn local_socket_round_trip_and_exclusive_listener() {
-        let dir = private_test_dir();
-        let name = dir.path().join("agent.sock");
-        let name = name.to_str().unwrap();
-        let listener = listen(name).unwrap();
-        assert!(listen(name).is_err());
-        let server = tokio::spawn(async move {
-            let mut peer = listener.accept().await.unwrap();
-            assert_eq!(read_frame(&mut peer, MAX_REQUEST).await.unwrap(), b"test");
-            write_frame(&mut peer, b"reply", MAX_RESPONSE)
-                .await
-                .unwrap();
-        });
-        assert_eq!(
-            request(
-                name,
-                &std::env::current_exe().unwrap(),
-                b"test",
-                Duration::from_secs(2)
-            )
-            .await
-            .unwrap(),
-            b"reply"
-        );
-        server.await.unwrap();
-        assert!(!Path::new(name).exists());
-    }
-}
+#[path = "../tests/unit/agent_ipc_unix.rs"]
+mod tests;

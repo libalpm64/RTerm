@@ -112,6 +112,7 @@ pub(crate) struct App {
     dock_fraction: f32,
     transfers: BTreeMap<String, Transfer>,
     last_activity: Instant,
+    last_service: Instant,
     exit_confirmed: bool,
     deferred_events: Vec<BackendEvent>,
     highlighter: Highlighter,
@@ -236,6 +237,7 @@ impl App {
             dock_fraction: 0.30,
             transfers: BTreeMap::new(),
             last_activity: Instant::now(),
+            last_service: Instant::now(),
             exit_confirmed: false,
             deferred_events: Vec::new(),
             highlighter,
@@ -1291,6 +1293,7 @@ mod agent_ui;
 #[cfg(feature = "benchmark")]
 pub(crate) mod benchmark;
 mod host_trust;
+mod known_hosts;
 mod layout;
 mod menu;
 mod sessions;

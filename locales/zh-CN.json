@@ -304,5 +304,16 @@
   "WORKSPACE": "工作区",
   "Welcome to Rterm": "欢迎使用 RTerm",
   "Zoom In": "放大",
-  "Zoom Out": "缩小"
+  "Zoom Out": "缩小",
+  "Search host, port, key type or fingerprint": "搜索主机、端口、密钥类型或指纹",
+  "Select matching": "选择匹配项",
+  "Clear selection": "清除选择",
+  "Copy fingerprint": "复制指纹",
+  "Forget selected": "取消信任所选主机",
+  "{shown} of {total} trusted hosts · {selected} selected": "共 {total} 个可信主机，显示 {shown} 个 · 已选 {selected} 个",
+  "No trusted hosts match this search.": "没有符合搜索条件的可信主机。",
+  "Forget {count} trusted hosts?": "取消信任 {count} 个主机？",
+  "These hosts will require verification on their next connection.": "下次连接时需要重新验证这些主机。",
+  "Existing SSH connections will remain open.": "现有 SSH 连接将保持打开。",
+  "And {count} more": "以及其他 {count} 个"
 }

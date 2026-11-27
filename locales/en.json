@@ -304,5 +304,16 @@
   "WORKSPACE": "WORKSPACE",
   "Welcome to Rterm": "Welcome to Rterm",
   "Zoom In": "Zoom In",
-  "Zoom Out": "Zoom Out"
+  "Zoom Out": "Zoom Out",
+  "Search host, port, key type or fingerprint": "Search host, port, key type or fingerprint",
+  "Select matching": "Select matching",
+  "Clear selection": "Clear selection",
+  "Copy fingerprint": "Copy fingerprint",
+  "Forget selected": "Forget selected",
+  "{shown} of {total} trusted hosts · {selected} selected": "{shown} of {total} trusted hosts · {selected} selected",
+  "No trusted hosts match this search.": "No trusted hosts match this search.",
+  "Forget {count} trusted hosts?": "Forget {count} trusted hosts?",
+  "These hosts will require verification on their next connection.": "These hosts will require verification on their next connection.",
+  "Existing SSH connections will remain open.": "Existing SSH connections will remain open.",
+  "And {count} more": "And {count} more"
 }
