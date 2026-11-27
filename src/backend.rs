@@ -15,12 +15,16 @@ use crate::models::{SerialConfig, SshConfig, TelnetConfig};
 mod agent_shell;
 mod connection;
 mod sftp;
+pub(crate) use sftp::transfer_bytes;
 
 pub(crate) use agent_shell::validate as validate_foreground_command;
 #[cfg(test)]
 pub(crate) use connection::AGENT_PAGER_ENV;
 use connection::{SshHandler, Transport, TransportMessage};
-pub(crate) use sftp::{DownloadOptions, Entry, RemoteAction, join_remote, safe_name};
+pub(crate) use sftp::{
+    ConflictBatch, ConflictChoice, ConflictPrompt, DownloadOptions, Entry, RemoteAction,
+    join_remote, safe_name,
+};
 
 static SESSION_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -53,10 +57,13 @@ pub(crate) enum BackendEvent {
         id: String,
         text: String,
         percent: f32,
+        rate_bps: Option<f64>,
         finished: bool,
         error: bool,
     },
+    TransferConflict(ConflictPrompt),
     RemoteChanged(u32),
+    LocalChanged,
 }
 
 #[derive(Clone)]
@@ -340,12 +347,24 @@ enum SshSetup {
 impl Worker {
     async fn run(mut self, mut requests: async_mpsc::Receiver<Request>) {
         let mut setup = tokio::task::JoinSet::new();
+        let mut health = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             let (command, reply) = tokio::select! {
                 request = requests.recv() => match request {
                     Some(request) => request,
                     None => break,
                 },
+                _ = health.tick() => {
+                    let closed: Vec<_> = self.connections.iter().filter_map(|(&id, session)| session.is_closed().then_some(id)).collect();
+                    for id in closed {
+                        self.connections.remove(&id);
+                        self.sftp.close(id);
+                        self.transports.remove(&id);
+                        self.writers.lock().unwrap().remove(&id);
+                        self.events.send_async(BackendEvent::Closed(id)).await;
+                    }
+                    continue;
+                }
                 result = setup.join_next(), if !setup.is_empty() => {
                     if let Some(Ok(result)) = result {
                         self.finish_ssh_setup(result);

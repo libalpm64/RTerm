@@ -22,7 +22,9 @@ use tokio::{
 
 use super::{BackendEvent, BackendResult, Events, Reply, connection::SshHandler};
 
+mod conflicts;
 mod recovery;
+pub(crate) use conflicts::{ConflictBatch, ConflictChoice, ConflictPrompt};
 
 #[derive(Clone)]
 pub(crate) struct Entry {
@@ -35,6 +37,10 @@ pub(crate) struct Entry {
 
 pub(crate) enum RemoteAction {
     List(String),
+    CreateFolder {
+        directory: String,
+        name: String,
+    },
     Rename {
         from: String,
         to: String,
@@ -47,6 +53,12 @@ pub(crate) enum RemoteAction {
         local: PathBuf,
         remote: String,
         resume: Option<String>,
+        batch: ConflictBatch,
+    },
+    UploadTree {
+        local: PathBuf,
+        remote: String,
+        batch: ConflictBatch,
     },
     Download {
         remote: String,
@@ -54,6 +66,7 @@ pub(crate) enum RemoteAction {
         directory: bool,
         options: DownloadOptions,
         resume: Option<String>,
+        batch: ConflictBatch,
     },
 }
 
@@ -197,7 +210,25 @@ impl SessionService {
                 }
                 Ok(Reply::Files { path, entries })
             }
+            RemoteAction::CreateFolder { directory, name } => {
+                if !directory.starts_with('/') {
+                    return Err("Choose an absolute SFTP directory".into());
+                }
+                if name.trim().is_empty() {
+                    return Err("Enter a folder name".into());
+                }
+                let path = join_remote(&directory, safe_name(&name)?);
+                // MKDIR is exclusive: an existing file or directory is never replaced.
+                sftp.create_dir(path).await.map_err(to_error)?;
+                Ok(Reply::Done)
+            }
             RemoteAction::Rename { from, to } => {
+                if from == to {
+                    return Ok(Reply::Done);
+                }
+                if sftp.try_exists(&to).await.map_err(to_error)? {
+                    return Err("Destination already exists".into());
+                }
                 sftp.rename(from, to).await.map_err(to_error)?;
                 Ok(Reply::Done)
             }
@@ -213,15 +244,36 @@ impl SessionService {
                 local,
                 remote,
                 resume,
+                batch,
             } => {
                 let name = file_label(&local);
-                self.transfer(events, format!("{id}:upload:{remote}"), name, async move {
-                    if let Some(peer) = resume {
-                        recovery::upload(&sftp, &local, &remote, &peer).await?;
+                let key = format!("{id}:upload:{}", crate::agent::random_id());
+                let ctx = conflicts::TransferContext::new(events, &key, batch);
+                self.transfer(events, key, name, async move {
+                    let done = conflicts::upload(sftp, local, remote, resume, false, ctx).await?;
+                    Ok(if done {
+                        TransferOutcome::Complete(Some(id))
                     } else {
-                        upload(&sftp, &local, &remote).await?;
-                    }
-                    Ok(Some(id))
+                        TransferOutcome::Skipped
+                    })
+                });
+                Ok(Reply::Done)
+            }
+            RemoteAction::UploadTree {
+                local,
+                remote,
+                batch,
+            } => {
+                let name = file_label(&local);
+                let key = format!("{id}:upload:{}", crate::agent::random_id());
+                let ctx = conflicts::TransferContext::new(events, &key, batch);
+                self.transfer(events, key, name, async move {
+                    let done = conflicts::upload(sftp, local, remote, None, true, ctx).await?;
+                    Ok(if done {
+                        TransferOutcome::Complete(Some(id))
+                    } else {
+                        TransferOutcome::Skipped
+                    })
                 });
                 Ok(Reply::Done)
             }
@@ -231,26 +283,20 @@ impl SessionService {
                 directory,
                 options,
                 resume,
+                batch,
             } => {
-                let key = format!("{id}:download:{}", local.display());
                 let name = file_label(&local);
-                let transfer_events = events.clone();
-                let progress_key = key.clone();
+                let key = format!("{id}:download:{}", crate::agent::random_id());
+                let ctx = conflicts::TransferContext::new(events, &key, batch);
                 self.transfer(events, key, name, async move {
-                    if directory {
-                        download_directory(sftp, remote, local, options).await?;
+                    let done =
+                        conflicts::download(sftp, remote, local, directory, options, resume, ctx)
+                            .await?;
+                    Ok(if done {
+                        TransferOutcome::Complete(None)
                     } else {
-                        download_file(
-                            sftp,
-                            &remote,
-                            &local,
-                            options,
-                            Some((&transfer_events, &progress_key)),
-                            resume.as_deref(),
-                        )
-                        .await?;
-                    }
-                    Ok(None)
+                        TransferOutcome::Skipped
+                    })
                 });
                 Ok(Reply::Done)
             }
@@ -262,7 +308,7 @@ impl SessionService {
         events: &Events,
         id: String,
         name: String,
-        task: impl Future<Output = Result<Option<u32>, String>> + Send + 'static,
+        task: impl Future<Output = Result<TransferOutcome, String>> + Send + 'static,
     ) {
         let slots = self.transfer_slots.clone();
         let events = events.clone();
@@ -281,7 +327,7 @@ impl SessionService {
             )
             .await;
             match task.await {
-                Ok(changed) => {
+                Ok(TransferOutcome::Complete(changed)) => {
                     progress(
                         &events,
                         &id,
@@ -297,12 +343,20 @@ impl SessionService {
                             .await;
                     }
                 }
+                Ok(TransferOutcome::Skipped) => {
+                    progress(&events, &id, format!("Skipped {name}"), 0.0, true, false).await;
+                }
                 Err(error) => {
-                    progress(&events, &id, format!("{name}: {error}"), 100.0, true, true).await
+                    progress(&events, &id, format!("{name}: {error}"), 0.0, true, true).await
                 }
             }
         });
     }
+}
+
+enum TransferOutcome {
+    Complete(Option<u32>),
+    Skipped,
 }
 
 // REALPATH and OPENDIR are independent read-only requests for the same
@@ -337,8 +391,90 @@ async fn progress(
             id: id.into(),
             text,
             percent,
+            rate_bps: None,
             finished,
             error,
+        })
+        .await;
+}
+
+// Report recent application-level payload throughput, not the theoretical
+// link speed. Resumed bytes are not counted as newly transmitted bytes.
+struct UploadMeter<'a> {
+    status: Option<(&'a Events, &'a str)>,
+    name: String,
+    total: u64,
+    previous: u64,
+    sampled_at: Instant,
+}
+
+impl<'a> UploadMeter<'a> {
+    fn new(status: Option<(&'a Events, &'a str)>, name: String, total: u64, offset: u64) -> Self {
+        Self {
+            status,
+            name,
+            total,
+            previous: offset,
+            sampled_at: Instant::now(),
+        }
+    }
+
+    async fn report(&mut self, done: u64, force: bool) {
+        let Some((events, id)) = self.status else {
+            return;
+        };
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.sampled_at);
+        if !force && elapsed < Duration::from_millis(250) {
+            return;
+        }
+        // Don't replace a valid final sample with a second zero-byte sample.
+        if done == self.previous && done != 0 {
+            return;
+        }
+        let rate = done.saturating_sub(self.previous) as f64 / elapsed.as_secs_f64().max(0.001);
+        transfer_rate(
+            events,
+            id,
+            format!(
+                "{} — {} / {}",
+                self.name,
+                transfer_bytes(done as f64),
+                transfer_bytes(self.total as f64)
+            ),
+            (done as f64 * 100.0 / self.total.max(1) as f64).clamp(0.0, 100.0) as f32,
+            rate,
+        )
+        .await;
+        self.previous = done;
+        self.sampled_at = now;
+    }
+}
+
+pub(crate) fn transfer_bytes(bytes: f64) -> String {
+    let mut amount = bytes;
+    for unit in ["B", "KiB", "MiB", "GiB", "TiB"] {
+        if amount < 1024.0 || unit == "TiB" {
+            return if unit == "B" {
+                format!("{amount:.0} {unit}")
+            } else {
+                format!("{amount:.1} {unit}")
+            };
+        }
+        amount /= 1024.0;
+    }
+    unreachable!()
+}
+
+async fn transfer_rate(events: &Events, id: &str, text: String, percent: f32, rate: f64) {
+    events
+        .send_async(BackendEvent::Progress {
+            id: id.into(),
+            text,
+            percent,
+            rate_bps: Some(rate),
+            finished: false,
+            error: false,
         })
         .await;
 }
@@ -354,13 +490,52 @@ fn file_label(path: &Path) -> String {
         .into_owned()
 }
 
-async fn upload(sftp: &SftpSession, local: &Path, remote: &str) -> Result<(), String> {
-    let mut input = tokio::fs::File::open(local).await.map_err(to_error)?;
-    let mut output = sftp.create(remote).await.map_err(to_error)?;
-    tokio::io::copy(&mut input, &mut output)
-        .await
-        .map_err(to_error)?;
-    output.shutdown().await.map_err(to_error)
+// Drag-and-drop uses exclusive destination creation; never silently replace
+// a file, merge an existing directory, or follow symlinks in a source tree.
+async fn upload_tree(
+    sftp: &SftpSession,
+    local: PathBuf,
+    remote: String,
+    ctx: &conflicts::TransferContext,
+) -> Result<(), String> {
+    let root_name = file_label(&local);
+    let mut pending = vec![(local, remote)];
+    let mut count = 0;
+    let mut path_bytes = 0usize;
+    while let Some((local, remote)) = pending.pop() {
+        count += 1;
+        if count > MAX_DIRECTORY_ENTRIES {
+            return Err("Upload directory tree too large".into());
+        }
+        let metadata = checked_interactive_metadata(&local).await?;
+        if metadata.is_dir() {
+            sftp.create_dir(&remote).await.map_err(to_error)?;
+            let mut children = tokio::fs::read_dir(&local).await.map_err(to_error)?;
+            while let Some(child) = children.next_entry().await.map_err(to_error)? {
+                let name = child
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| "Upload path is not Unicode")?;
+                let destination = join_remote(&remote, safe_name(&name)?);
+                path_bytes =
+                    path_bytes.saturating_add(child.path().as_os_str().len() + destination.len());
+                if count + pending.len() >= MAX_DIRECTORY_ENTRIES || path_bytes > 32 * 1024 * 1024 {
+                    return Err("Upload directory tree too large".into());
+                }
+                pending.push((child.path(), destination));
+            }
+        } else if metadata.is_file() {
+            // Folder uploads report the current file's progress and rate.
+            let name = format!(
+                "Uploading {root_name} / {} (current file)",
+                file_label(&local)
+            );
+            conflicts::upload_regular(sftp, &local, &remote, ctx, name).await?;
+        } else {
+            return Err("Upload source must be a regular file or directory".into());
+        }
+    }
+    Ok(())
 }
 
 // The agent path is intentionally separate from the queued interactive
@@ -571,6 +746,66 @@ async fn plan_agent_upload(
             fingerprint: *fingerprint.finalize().as_bytes(),
         },
     ))
+}
+
+// A manual file-picker or drag operation is explicitly initiated by the
+// user. Readable files on shared volumes and in group-owned folders are valid
+// sources. The stricter agent manifest and ownership checks below still apply
+// to all autonomous uploads.
+async fn checked_interactive_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
+    if !path.is_absolute() {
+        return Err("Upload source must be an absolute path".into());
+    }
+    for ancestor in path.ancestors() {
+        let metadata = tokio::fs::symlink_metadata(ancestor)
+            .await
+            .map_err(to_error)?;
+        if metadata.file_type().is_symlink() {
+            return Err("Upload source must not use symbolic links".into());
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                return Err("Upload source must not use reparse points".into());
+            }
+        }
+    }
+    let metadata = tokio::fs::symlink_metadata(path).await.map_err(to_error)?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err("Upload source must be a regular file or directory".into());
+    }
+    Ok(metadata)
+}
+
+async fn open_interactive_source(path: &Path) -> Result<tokio::fs::File, String> {
+    let expected = checked_interactive_metadata(path).await?;
+    if !expected.is_file() {
+        return Err("Upload source must be a regular file".into());
+    }
+    let path = path.to_owned();
+    let file = tokio::task::spawn_blocking(move || -> Result<std::fs::File, String> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(1).custom_flags(0x00200000);
+        }
+        let file = options.open(path).map_err(to_error)?;
+        if !conflicts::same_local_file(&expected, &file.metadata().map_err(to_error)?) {
+            return Err("Upload source changed while opening; retry the transfer".into());
+        }
+        Ok(file)
+    })
+    .await
+    .map_err(to_error)??;
+    Ok(tokio::fs::File::from_std(file))
 }
 
 async fn checked_agent_metadata(local: &str) -> Result<std::fs::Metadata, String> {
@@ -917,6 +1152,18 @@ async fn download_file(
     status: Option<(&Events, &str)>,
     resume: Option<&str>,
 ) -> Result<(), String> {
+    download_file_with_replace(sftp, remote, local, options, status, resume, None).await
+}
+
+async fn download_file_with_replace(
+    sftp: Arc<SftpSession>,
+    remote: &str,
+    local: &Path,
+    options: DownloadOptions,
+    status: Option<(&Events, &str)>,
+    resume: Option<&str>,
+    replace: Option<std::fs::Metadata>,
+) -> Result<(), String> {
     let metadata = sftp.metadata(remote).await.map_err(to_error)?;
     let size = metadata.len();
     let directory = local.parent().ok_or("Missing download directory")?;
@@ -1030,9 +1277,8 @@ async fn download_file(
                 let done = bytes_done.load(Ordering::Relaxed);
                 let percent = done as f32 * 100.0 / size.max(1) as f32;
                 let speed = (done - resumed) as f64 / started.elapsed().as_secs_f64().max(0.1);
-                let mib = 1024.0 * 1024.0;
-                let text = format!("{}: {:.1} MB / {:.1} MB @ {:.1} MB/s", file_label(&local), done as f64 / mib, size as f64 / mib, speed / mib);
-                progress(events, id, text, percent, false, false).await;
+                let text = format!("{} — {} / {}", file_label(&local), transfer_bytes(done as f64), transfer_bytes(size as f64));
+                transfer_rate(events, id, text, percent, speed).await;
             }
         }
     }
@@ -1054,6 +1300,16 @@ async fn download_file(
         download.publish(&sftp, remote).await?;
     } else if let Some(mut temporary) = temporary {
         temporary.flush().map_err(to_error)?;
+        if let Some(expected) = replace {
+            let target = std::fs::symlink_metadata(&local).map_err(to_error)?;
+            if !conflicts::same_local_file(&expected, &target) {
+                return Err("Replacement destination changed; retry to confirm again".into());
+            }
+            temporary
+                .persist(&local)
+                .map_err(|error| to_error(error.error))?;
+            return Ok(());
+        }
         temporary.persist_noclobber(&local).map_err(|error| {
             if error.error.kind() == std::io::ErrorKind::AlreadyExists {
                 "Download destination already exists; choose another folder or remove it first"

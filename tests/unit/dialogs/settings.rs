@@ -152,3 +152,187 @@ impl Settings {
         self.page = page;
     }
 }
+
+#[test]
+fn software_update_is_a_dedicated_settings_page() {
+    let context = egui::Context::default();
+    let mut settings = Settings::benchmark_defaults();
+    let mut password = String::new();
+    let mut seen = false;
+    let render = |settings: &mut Settings, password: &mut String, seen: &mut bool, events| {
+        context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(710.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    settings.show(ui, Theme::dark(), password, false, |_, section| {
+                        *seen |= matches!(section, SettingsSection::Update);
+                    });
+                });
+            },
+        )
+    };
+    let output = render(&mut settings, &mut password, &mut seen, vec![]);
+    let pos = output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == "Update" => {
+                Some(text.visual_bounding_rect().center())
+            }
+            _ => None,
+        })
+        .expect("settings should display the Update category");
+    for pressed in [true, false] {
+        render(
+            &mut settings,
+            &mut password,
+            &mut seen,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    assert_eq!(settings.page, 7);
+    assert!(seen);
+}
+
+#[test]
+fn settings_sidebar_reaches_header_edge_and_aligns_labels() {
+    let context = egui::Context::default();
+    theme::install_fonts(&context);
+    let t = Theme::dark();
+    t.apply(&context);
+    let mut settings = Settings::benchmark_defaults();
+    let mut password = String::new();
+    settings.page = 7;
+    for width in [520.0, 710.0] {
+        let render = |settings: &mut Settings, password: &mut String, events| {
+            context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        vec2(1000.0, 720.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    super::super::modal("settings-sidebar-fixture", t).show(ctx, |ui| {
+                        super::super::modal_header(ui, "Settings", t, width);
+                        settings.show(ui, t, password, false, |_, _| {});
+                    });
+                },
+            )
+        };
+        // Allow the modal to settle its measured size before inspecting geometry.
+        for _ in 0..30 {
+            render(&mut settings, &mut password, vec![]);
+        }
+        let output = render(&mut settings, &mut password, vec![]);
+        let header = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == t.bar && (rect.rect.height() - 34.0).abs() < 0.5 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .expect("settings header");
+        let highlight = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == t.hover && (rect.rect.height() - 30.0).abs() < 0.5 =>
+                {
+                    Some((rect.rect, shape.clip_rect))
+                }
+                _ => None,
+            })
+            .expect("selected navigation row");
+        assert!(
+            (highlight.0.left() - header.left()).abs() < 0.5,
+            "sidebar highlight must be flush with the header"
+        );
+        assert!(
+            highlight.1.left() <= highlight.0.left() + 0.5,
+            "sidebar must not be clipped by the modal inset"
+        );
+        let label = |name: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == name => Some(text.pos),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing label {name}"))
+        };
+        let title = label("Settings");
+        let first = label("Terminal");
+        assert!(
+            (first.x - title.x).abs() < 0.5,
+            "navigation and title text must align"
+        );
+        for (index, name) in [
+            "Terminal",
+            "Appearance",
+            "Connection",
+            "Security",
+            "Import",
+            "SFTP",
+            "AI",
+            "Update",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let pos = label(name);
+            assert!(
+                (pos.x - first.x).abs() < 0.5,
+                "uneven horizontal padding: {name}"
+            );
+            assert!(
+                (pos.y - first.y - index as f32 * 30.0).abs() < 0.5,
+                "uneven row spacing: {name}"
+            );
+        }
+        let pos = egui::pos2(header.left() + 5.0, highlight.0.center().y - 30.0);
+        for pressed in [true, false] {
+            render(
+                &mut settings,
+                &mut password,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(
+            settings.page, 6,
+            "the entire sidebar row should be clickable"
+        );
+        settings.page = 7;
+    }
+}

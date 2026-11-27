@@ -21,6 +21,7 @@ pub(super) enum SettingsSection {
     VaultBackups,
     Import,
     Tunnel,
+    Update,
 }
 
 const DEFAULTS: &[(&str, &str)] = &[
@@ -189,17 +190,21 @@ impl Settings {
             "Import",
             "SFTP",
             "AI",
+            "Update",
         ];
         let height = (ui.ctx().content_rect().height() - 160.0).clamp(300.0, 460.0);
         let (body, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-        let nav = body.with_max_x(body.left() + 144.0);
+        // The modal header spans its outer inset. Let the navigation rail
+        // reach the same left edge instead of leaving an empty strip beside it.
+        let inset = f32::from(super::widgets::DIALOG_INSET);
+        let nav = body
+            .with_min_x(body.left() - inset)
+            .with_max_x(body.left() + 144.0);
         theme::band(ui, nav, t.panel, None);
-        ui.painter()
-            .vline(nav.right(), nav.y_range(), Stroke::new(1.0_f32, t.border));
         for (index, title) in pages.iter().enumerate() {
             let row = egui::Rect::from_min_size(
-                nav.min + vec2(0.0, 12.0 + index as f32 * 30.0),
-                vec2(nav.width(), 28.0),
+                nav.min + vec2(0.0, 8.0 + index as f32 * 30.0),
+                vec2(nav.width() - 0.5, 30.0),
             );
             let response = ui.interact(
                 row,
@@ -232,13 +237,16 @@ impl Settings {
             }
             theme::label(
                 ui,
-                row.shrink2(vec2(12.0, 0.0)),
+                row.shrink2(vec2(inset, 0.0)),
                 label,
                 t.chrome_font(12.0),
                 if self.page == index { t.text } else { t.muted },
                 egui::Align2::LEFT_CENTER,
             );
         }
+        // Paint the divider last so selection and hover cannot cover it.
+        ui.painter()
+            .vline(nav.right(), nav.y_range(), Stroke::new(1.0_f32, t.border));
         let bounds = body.with_min_x(nav.right() + 16.0).shrink2(vec2(0.0, 12.0));
         let mut content = ui.new_child(
             egui::UiBuilder::new()
@@ -267,6 +275,7 @@ impl Settings {
                 }
                 4 => show_section(ui, SettingsSection::Import),
                 5 => self.sftp_page(ui, t),
+                7 => show_section(ui, SettingsSection::Update),
                 _ => {
                     self.ai_page(ui, t);
                     ui.separator();

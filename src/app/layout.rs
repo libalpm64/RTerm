@@ -1,5 +1,24 @@
 use super::{menu::terminal_menu, *};
 
+fn contrast_text(background: Color32) -> Color32 {
+    let linear = |channel: u8| {
+        let channel = f32::from(channel) / 255.0;
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(background.r())
+        + 0.7152 * linear(background.g())
+        + 0.0722 * linear(background.b());
+    if luminance > 0.179 {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    }
+}
+
 impl App {
     fn tab_bar(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let t = self.theme;
@@ -92,28 +111,21 @@ impl App {
                                 Stroke::new(1.0_f32, t.accent.gamma_multiply(0.55)),
                             );
                         }
+                        let (glyph, protocol_color) = terminal.kind.icon(t);
                         let color = if terminal.closed {
                             t.dim
-                        } else if terminal.starting() || terminal.endpoint.is_none() {
-                            t.yellow
                         } else {
-                            match terminal.kind {
-                                Kind::Local => t.green,
-                                Kind::Ssh => t.blue,
-                                Kind::Telnet | Kind::Serial => t.purple,
-                            }
+                            protocol_color
                         };
-                        {
-                            theme::icon(
-                                ui,
-                                Rect::from_center_size(
-                                    pos2(tab.left() + 12.0, tab.center().y),
-                                    vec2(13.0, 13.0),
-                                ),
-                                Icon::Terminal,
-                                color,
-                            );
-                        }
+                        theme::icon(
+                            ui,
+                            Rect::from_center_size(
+                                pos2(tab.left() + 12.0, tab.center().y),
+                                vec2(13.0, 13.0),
+                            ),
+                            glyph,
+                            color,
+                        );
                         let title = tab
                             .with_min_x(tab.left() + 24.0)
                             .with_max_x(tab.right() - 22.0);
@@ -165,6 +177,8 @@ impl App {
                                 ui.close();
                             }
                             if !self.show_keys
+                                && !self.active_is_sftp()
+                                && terminal.kind != Kind::Sftp
                                 && self.active != Some(terminal.tab)
                                 && !self.splits.contains(terminal.tab)
                                 && self.splits.can_split()
@@ -194,7 +208,7 @@ impl App {
                                 activity = Some(terminal.tab);
                                 ui.close();
                             }
-                            if terminal.kind == Kind::Ssh
+                            if terminal.kind.is_ssh()
                                 && !terminal.starting()
                                 && ui.button(crate::i18n::tr(ui, "Reconnect")).clicked()
                             {
@@ -408,7 +422,7 @@ impl App {
                 .find(|item| Some(item.tab) == self.active)
         };
         let state = selected.map_or("Ready", |term| {
-            if term.kind == Kind::Ssh && self.ssh_connection_state(term) == "reconnecting" {
+            if term.kind.is_ssh() && self.ssh_connection_state(term) == "reconnecting" {
                 "Reconnecting..."
             } else if term.starting() {
                 "Connecting…"
@@ -449,9 +463,11 @@ impl App {
             fields.push("SSH Keys".into());
         } else if let Some(term) = selected {
             fields.push(term.name.clone());
-            let (dimensions, cursor) = term.status();
-            fields.push(cursor);
-            fields.push(dimensions);
+            if !self.file_workspace_active() {
+                let (dimensions, cursor) = term.status();
+                fields.push(cursor);
+                fields.push(dimensions);
+            }
             fields.push(format!("{} Mode", term.kind.title()));
         }
         for field in fields {
@@ -573,17 +589,85 @@ impl App {
     }
 
     fn center(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        let tabs = top_band(rect, 23.0);
-        self.tab_bar(ui, tabs);
+        let body = if self.file_workspace_active() && self.explorer.expanded {
+            rect
+        } else {
+            let tabs = top_band(rect, 23.0);
+            self.tab_bar(ui, tabs);
+            rect.with_min_y(tabs.bottom())
+        };
         if self.show_keys {
             if ui.input(|input| input.pointer.any_released()) {
                 self.drag_tab = None;
             }
-            self.key_panel(ui, rect.with_min_y(tabs.bottom()));
+            self.key_panel(ui, body);
 
             return;
         }
-        let toolbar = top_band(rect.with_min_y(tabs.bottom()), 22.0);
+        if self.file_workspace_active() {
+            self.focus_terminal = false;
+            self.drag_tab = None;
+            let queue_bar = body.with_min_y((body.bottom() - 26.0).max(body.top()));
+            let workspace = body.with_max_y(queue_bar.top());
+            let max_height = (workspace.height() * 0.68).max(0.0);
+            let min_height = 96.0_f32.min(max_height);
+            let queue_height = self.transfer_queue_height.clamp(min_height, max_height);
+            let reserve = if self.transfer_queue_open {
+                queue_height
+            } else {
+                0.0
+            };
+            let divider_height = if reserve > 0.0 {
+                6.0_f32.min(workspace.height() - reserve)
+            } else {
+                0.0
+            };
+            let files = workspace.with_max_y(workspace.bottom() - reserve - divider_height);
+            self.explorer_workspace(ui, files);
+            if reserve > 0.0 {
+                let divider = workspace
+                    .with_min_y(files.bottom())
+                    .with_max_y(files.bottom() + divider_height);
+                let response = ui
+                    .interact(
+                        divider,
+                        ui.id().with("transfer-queue-divider"),
+                        Sense::drag(),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+                    .on_hover_text(crate::i18n::tr(ui, "Drag to resize transfer queue"));
+                theme::band(
+                    ui,
+                    divider,
+                    if response.hovered() || response.dragged() {
+                        self.theme.accent
+                    } else {
+                        self.theme.bg
+                    },
+                    None,
+                );
+                ui.painter().hline(
+                    (divider.center().x - 20.0)..=(divider.center().x + 20.0),
+                    divider.center().y,
+                    Stroke::new(1.0_f32, self.theme.muted),
+                );
+                if response.dragged() {
+                    self.transfer_queue_height =
+                        (queue_height - response.drag_delta().y).clamp(min_height, max_height);
+                    ui.ctx().request_repaint();
+                }
+                self.transfer_queue(ui, workspace.with_min_y(divider.bottom()));
+            } else if !self.transfer_queue_open {
+                // Float above the file-list footer, never reserve space for transfers.
+                self.transfer_overlay(
+                    ui,
+                    files.with_max_y((files.bottom() - 24.0).max(files.top())),
+                );
+            }
+            self.transfer_queue_bar(ui, queue_bar);
+            return;
+        }
+        let toolbar = top_band(body, 22.0);
         self.toolbar(ui, toolbar);
         let body = rect.with_min_y(toolbar.bottom());
         let input = self.dialog.is_none()
@@ -601,7 +685,10 @@ impl App {
         if ui.input(|input| input.pointer.any_released())
             && let Some(tab) = self.drag_tab.take()
             && input
-            && self.terminals.iter().any(|term| term.tab == tab)
+            && self
+                .terminals
+                .iter()
+                .any(|term| term.tab == tab && term.kind != Kind::Sftp)
             && let Some(&(target, _)) = panes
                 .iter()
                 .find(|(_, rect)| ui.rect_contains_pointer(*rect))
@@ -905,8 +992,12 @@ impl App {
                 theme::icon(
                     ui,
                     icon,
-                    Icon::Terminal,
-                    if terminal.closed { t.dim } else { t.muted },
+                    terminal.kind.icon(t).0,
+                    if terminal.closed {
+                        t.dim
+                    } else {
+                        terminal.kind.icon(t).1
+                    },
                 );
                 theme::label(
                     ui,
@@ -926,48 +1017,321 @@ impl App {
         }
     }
 
+    fn transfer_queue_bar(&mut self, ui: &mut egui::Ui, bounds: Rect) {
+        let t = self.theme;
+        theme::band(ui, bounds, t.bar, Some(t.border));
+        let arrow = if self.transfer_queue_open {
+            "▼"
+        } else {
+            "▲"
+        };
+        let caption = format!("{arrow}  {}", crate::i18n::tr(ui, "Transfer queue"));
+        let font = t.chrome_font(11.0);
+        let toggle_width =
+            (theme::text_width(ui, &caption, font.clone()) + 24.0).min(bounds.width());
+        let toggle = bounds.with_max_x(bounds.left() + toggle_width);
+        let response = ui
+            .interact(
+                toggle,
+                ui.id().with("transfer-queue-toggle"),
+                Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.hovered() {
+            theme::band(ui, toggle, t.hover, None);
+        }
+        theme::label(
+            ui,
+            toggle,
+            &caption,
+            font.clone(),
+            t.text,
+            Align2::CENTER_CENTER,
+        );
+        if response
+            .on_hover_text(crate::i18n::tr(
+                ui,
+                if self.transfer_queue_open {
+                    "Hide transfer queue"
+                } else {
+                    "Show transfer queue"
+                },
+            ))
+            .clicked()
+        {
+            self.transfer_queue_open = !self.transfer_queue_open;
+            ui.ctx().request_repaint();
+        }
+        let rest = bounds.with_min_x(toggle.right());
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("queue-filter-buttons")
+                .max_rect(rest),
+        );
+        child.set_clip_rect(rest);
+        egui::ScrollArea::horizontal()
+            .id_salt("queue-filter-scroll")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .auto_shrink([false, false])
+            .show(&mut child, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    for (filter, label) in TransferFilter::OPTIONS {
+                        let count = self
+                            .transfers
+                            .values()
+                            .filter(|row| filter.matches(row))
+                            .count();
+                        let label = format!("{count} {}", crate::i18n::tr(ui, label));
+                        let selected = self.transfer_queue_open && self.transfer_filter == filter;
+                        let color = if filter == TransferFilter::Failed && count > 0 {
+                            t.red
+                        } else {
+                            t.text
+                        };
+                        let width = theme::text_width(ui, &label, font.clone()) + 18.0;
+                        let response = ui.add_sized(
+                            [width, 24.0],
+                            egui::Button::new(
+                                egui::RichText::new(label).font(font.clone()).color(color),
+                            )
+                            .selected(selected)
+                            .fill(if selected {
+                                t.hover
+                            } else {
+                                t.bar
+                            }),
+                        );
+                        if response.clicked() {
+                            self.transfer_filter = filter;
+                            self.transfer_queue_open = true;
+                            ui.ctx().request_repaint();
+                        }
+                    }
+                });
+            });
+    }
+
+    fn transfer_queue(&mut self, ui: &mut egui::Ui, bounds: Rect) {
+        let t = self.theme;
+        theme::band(ui, bounds, t.panel, Some(t.border));
+        let header = top_band(bounds, 26.0);
+        theme::band(ui, header, t.bar, Some(t.border));
+        theme::label(
+            ui,
+            header
+                .with_min_x(header.left() + 8.0)
+                .with_max_x((header.right() - 64.0).max(header.left())),
+            crate::i18n::tr(ui, "Transfer queue"),
+            t.chrome_font(11.0),
+            t.text,
+            Align2::LEFT_CENTER,
+        );
+        if theme::icon_button(ui, icon_slot(header, 0), "Close", Icon::Close, t).clicked() {
+            self.transfer_queue_open = false;
+            ui.ctx().request_repaint();
+        }
+        if theme::icon_button(
+            ui,
+            icon_slot(header, 1).translate(vec2(-6.0, 0.0)),
+            "Clear completed transfers",
+            Icon::Trash,
+            t,
+        )
+        .clicked()
+        {
+            self.transfers.retain(|_, row| row.expires.is_none());
+        }
+        let body = bounds
+            .with_min_y(header.bottom().min(bounds.bottom()))
+            .shrink2(vec2(8.0, 0.0));
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("transfer-queue-list")
+                .max_rect(body),
+        );
+        child.set_clip_rect(body);
+        let mut rows: Vec<_> = self
+            .transfers
+            .iter()
+            .filter(|(_, row)| self.transfer_filter.matches(row))
+            .collect();
+        rows.sort_by_key(|(_, row)| row.expires);
+        egui::ScrollArea::vertical()
+            .max_height(body.height())
+            .show(&mut child, |ui| {
+                if rows.is_empty() {
+                    ui.label(crate::i18n::tr(ui, "No matching transfers"));
+                }
+                for (key, row) in rows {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 12.0;
+                        let (state, color) = if row.error {
+                            ("Failed", t.red)
+                        } else if row.text.starts_with("Skipped ") {
+                            ("Skipped", t.muted)
+                        } else if row.expires.is_some() {
+                            ("Finished", t.green)
+                        } else if row.text.starts_with("Queued ") {
+                            ("Queued", t.muted)
+                        } else if row.text.starts_with("Waiting ") {
+                            ("Waiting", t.yellow)
+                        } else {
+                            ("Active", t.accent)
+                        };
+                        let direction = if key.contains(":download:") {
+                            "Download"
+                        } else {
+                            "Upload"
+                        };
+                        ui.add_sized(
+                            [80.0, 20.0],
+                            egui::Label::new(crate::i18n::tr(ui, direction)),
+                        );
+                        ui.add_sized(
+                            [82.0, 20.0],
+                            egui::Label::new(
+                                egui::RichText::new(crate::i18n::tr(ui, state)).color(color),
+                            ),
+                        );
+                        let (track, _) = ui.allocate_exact_size(vec2(105.0, 16.0), Sense::hover());
+                        ui.painter().rect_filled(track, 2.0, t.hover);
+                        let fraction = (row.percent / 100.0).clamp(0.0, 1.0);
+                        let filled = track.with_max_x(track.left() + track.width() * fraction);
+                        if fraction > 0.0 {
+                            ui.painter().rect_filled(filled, 2.0, color);
+                        }
+                        ui.painter().rect_stroke(
+                            track,
+                            2.0,
+                            Stroke::new(1.0_f32, t.border),
+                            egui::StrokeKind::Inside,
+                        );
+                        // Use the same centered galley across both halves of
+                        // the progress bar, with contrasting text on each.
+                        let painter = ui.painter();
+                        let galley = painter.layout_no_wrap(
+                            format!("{:.0}%", row.percent),
+                            t.chrome_font(10.0),
+                            t.text,
+                        );
+                        let position = Align2::CENTER_CENTER
+                            .align_size_within_rect(galley.size(), track)
+                            .min;
+                        let unfilled = track.with_min_x(filled.right());
+                        if unfilled.width() > 0.0 {
+                            painter
+                                .with_clip_rect(unfilled)
+                                .galley_with_override_text_color(
+                                    position,
+                                    galley.clone(),
+                                    contrast_text(t.hover),
+                                );
+                        }
+                        if filled.width() > 0.0 {
+                            painter
+                                .with_clip_rect(filled)
+                                .galley_with_override_text_color(
+                                    position,
+                                    galley,
+                                    contrast_text(color),
+                                );
+                        }
+                        let speed = row.rate_bps.map_or_else(
+                            || "—".into(),
+                            |rate| format!("{}/s", crate::backend::transfer_bytes(rate)),
+                        );
+                        ui.add_sized(
+                            [100.0, 20.0],
+                            egui::Label::new(egui::RichText::new(speed).color(t.muted)),
+                        );
+                        ui.add(egui::Label::new(&row.text).truncate())
+                            .on_hover_text(&row.text);
+                    });
+                }
+            });
+    }
+
     fn transfer_overlay(&self, ui: &mut egui::Ui, body: Rect) {
+        let now = Instant::now();
+        let visible: Vec<_> = self
+            .transfers
+            .values()
+            .filter(|transfer| transfer.expires.is_none_or(|time| time > now))
+            .take(5)
+            .collect();
+        if visible.is_empty() || body.width() < 80.0 || body.height() < 62.0 {
+            return;
+        }
         let width = (body.width() - 20.0).min(330.0);
-        let height = (self.transfers.len().min(5) as f32) * 38.0 + 14.0;
+        let height =
+            (visible.len().min(((body.height() - 24.0) / 38.0) as usize) as f32) * 38.0 + 14.0;
+        if height < 52.0 {
+            return;
+        }
         let area = Rect::from_min_size(
             pos2(body.right() - width - 10.0, body.bottom() - height - 10.0),
             vec2(width, height),
         );
-        ui.painter().rect(
-            area,
-            0.0,
-            self.theme.panel,
-            Stroke::new(1.0_f32, self.theme.border),
-            egui::StrokeKind::Inside,
-        );
-        for (index, transfer) in self.transfers.values().take(5).enumerate() {
-            let line = Rect::from_min_size(
-                area.min + vec2(9.0, 6.0 + index as f32 * 38.0),
-                vec2(width - 18.0, 22.0),
-            );
-            let color = if transfer.error {
-                self.theme.red
-            } else {
-                self.theme.accent
-            };
-            theme::label(
-                ui,
-                line,
-                &transfer.text,
-                self.theme.chrome_font(11.0),
-                self.theme.text,
-                Align2::LEFT_CENTER,
-            );
-            let track = Rect::from_min_size(line.left_bottom(), vec2(line.width(), 4.0));
-            ui.painter().rect_filled(track, 0.0, self.theme.hover);
-            ui.painter().rect_filled(
-                track.with_max_x(
-                    track.left() + track.width() * transfer.percent.clamp(0.0, 100.0) / 100.0,
-                ),
-                0.0,
-                color,
-            );
-        }
+        egui::Area::new(ui.id().with("transfer-card"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(area.min)
+            .default_size(area.size())
+            .constrain(false)
+            .show(ui.ctx(), |ui| {
+                ui.set_min_size(area.size());
+                ui.set_max_size(area.size());
+                ui.set_clip_rect(area);
+                ui.painter().rect(
+                    area,
+                    0.0,
+                    self.theme.panel,
+                    Stroke::new(1.0_f32, self.theme.border),
+                    egui::StrokeKind::Inside,
+                );
+                for (index, transfer) in visible
+                    .into_iter()
+                    .take(((height - 14.0) / 38.0) as usize)
+                    .enumerate()
+                {
+                    let line = Rect::from_min_size(
+                        area.min + vec2(9.0, 6.0 + index as f32 * 38.0),
+                        vec2(width - 18.0, 22.0),
+                    );
+                    let color = if transfer.error {
+                        self.theme.red
+                    } else {
+                        self.theme.accent
+                    };
+                    let label = if let Some(rate) = transfer.rate_bps {
+                        format!(
+                            "{}/s  ·  {}",
+                            crate::backend::transfer_bytes(rate),
+                            transfer.text
+                        )
+                    } else {
+                        transfer.text.clone()
+                    };
+                    theme::label(
+                        ui,
+                        line,
+                        &label,
+                        self.theme.chrome_font(11.0),
+                        self.theme.text,
+                        Align2::LEFT_CENTER,
+                    );
+                    let track = Rect::from_min_size(line.left_bottom(), vec2(line.width(), 4.0));
+                    ui.painter().rect_filled(track, 0.0, self.theme.hover);
+                    ui.painter().rect_filled(
+                        track.with_max_x(
+                            track.left()
+                                + track.width() * transfer.percent.clamp(0.0, 100.0) / 100.0,
+                        ),
+                        0.0,
+                        color,
+                    );
+                }
+            });
     }
 }
 
@@ -975,6 +1339,7 @@ impl App {
     fn capture_terminal_navigation(&mut self, context: &egui::Context, raw: &mut egui::RawInput) {
         self.terminal_navigation.clear();
         if !raw.focused
+            || self.file_workspace_active()
             || self.locked
             || self.dialog.is_some()
             || self.message.is_some()
@@ -1132,6 +1497,11 @@ impl eframe::App for App {
                 let menu = top_band(full, 26.0);
                 self.menu_bar(ui, menu);
                 let status = full.with_min_y(full.bottom() - 23.0);
+                if self.file_workspace_active() {
+                    self.center(ui, full.with_min_y(menu.bottom()).with_max_y(status.top()));
+                    self.status(ui, status);
+                    return;
+                }
                 let shell_height = if self.bottom_open {
                     self.bottom_height
                         .min((status.top() - menu.bottom()) * 0.48)
@@ -1180,7 +1550,7 @@ impl eframe::App for App {
                                     if response.hovered() {
                                         self.theme.accent
                                     } else {
-                                        self.theme.border
+                                        self.theme.bg
                                     },
                                 ),
                             );
@@ -1315,7 +1685,7 @@ fn resize_bar(
                 if response.hovered() || response.dragged() {
                     theme.accent
                 } else {
-                    theme.border
+                    theme.bg
                 },
             ),
         );

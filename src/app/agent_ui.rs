@@ -253,7 +253,7 @@ impl App {
     pub(super) fn agent_terminal(&self, session_id: u32) -> Option<&Terminal> {
         self.terminals
             .iter()
-            .find(|term| self.ssh_agent_id(term.tab) == Some(session_id))
+            .find(|term| term.kind == Kind::Ssh && self.ssh_agent_id(term.tab) == Some(session_id))
     }
 
     fn agent_endpoint(&self, session_id: u32) -> Option<(u32, u64)> {
@@ -356,6 +356,7 @@ impl App {
                 Transfer {
                     text: format!("AI SFTP upload — {:.0}%", percent),
                     percent,
+                    rate_bps: None,
                     expires: None,
                     error: false,
                 },
@@ -673,6 +674,7 @@ impl App {
                 let _ = request.reply.send(agent::error("Interactive shell unavailable. Return to an empty prompt or use background execution."));
                 return;
             }
+            self.explorer.expanded = false;
             self.activate(tab);
         }
         let seconds = request
@@ -835,6 +837,7 @@ impl App {
                             "AI SFTP upload failed".into()
                         },
                         percent: if value["ok"] == true { 100.0 } else { 0.0 },
+                        rate_bps: None,
                         expires: Some(Instant::now() + Duration::from_secs(4)),
                         error: value["ok"] != true,
                     },

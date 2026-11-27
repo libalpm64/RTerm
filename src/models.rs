@@ -52,6 +52,7 @@ fn default_serial_bits() -> u8 {
 pub(crate) enum Connection {
     Local { shell: String },
     Ssh { config: SshConfig, terminal: String },
+    Sftp { config: SshConfig },
     Telnet(TelnetConfig),
     Serial(SerialConfig),
 }
@@ -68,6 +69,7 @@ impl Profile {
         match self.connection {
             Connection::Local { .. } => Kind::Local,
             Connection::Ssh { .. } => Kind::Ssh,
+            Connection::Sftp { .. } => Kind::Sftp,
             Connection::Telnet(_) => Kind::Telnet,
             Connection::Serial(_) => Kind::Serial,
         }
@@ -77,7 +79,7 @@ impl Profile {
         match &self.connection {
             Connection::Local { shell } if !shell.is_empty() => shell.clone(),
             Connection::Local { .. } => "Local Shell".into(),
-            Connection::Ssh { config, .. } => {
+            Connection::Ssh { config, .. } | Connection::Sftp { config } => {
                 format!("{}@{}:{}", config.user, config.host, config.port)
             }
             Connection::Telnet(config) => format!("{}:{}", config.host, config.port),
@@ -87,7 +89,9 @@ impl Profile {
 
     pub(crate) fn without_credentials(&self) -> Self {
         let mut profile = self.clone();
-        if let Connection::Ssh { config, .. } = &mut profile.connection {
+        if let Connection::Ssh { config, .. } | Connection::Sftp { config } =
+            &mut profile.connection
+        {
             config.password = None;
             config.key_passphrase = None;
             config.vault_pass = None;

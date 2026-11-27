@@ -53,7 +53,9 @@ impl App {
             .find(|term| term.endpoint == Some(endpoint))?
             .tab;
         let state = self.ssh_tabs.get(&tab)?;
-        let Connection::Ssh { config, .. } = &state.profile.connection else {
+        let (Connection::Ssh { config, .. } | Connection::Sftp { config }) =
+            &state.profile.connection
+        else {
             return None;
         };
         let key = state.key.as_ref()?;
@@ -93,7 +95,7 @@ impl App {
         let existing = self
             .terminals
             .iter()
-            .filter(|term| term.kind == Kind::Ssh)
+            .filter(|term| term.kind == profile.kind())
             .filter(|term| {
                 self.ssh_tabs.get(&term.tab).is_some_and(|state| {
                     same_profile(&state.profile, &profile, state.credentials_available)
@@ -121,7 +123,7 @@ impl App {
         let Some(terminal) = self
             .terminals
             .iter_mut()
-            .find(|term| term.kind == Kind::Ssh && term.endpoint == Some(id))
+            .find(|term| term.kind.is_ssh() && term.endpoint == Some(id))
         else {
             return false;
         };
@@ -156,7 +158,7 @@ impl App {
         let Some(terminal) = self
             .terminals
             .iter_mut()
-            .find(|term| term.kind == Kind::Ssh && term.tab == tab)
+            .find(|term| term.kind.is_ssh() && term.tab == tab)
         else {
             return;
         };
@@ -255,6 +257,7 @@ fn same_profile(a: &Profile, b: &Profile, credentials_available: bool) -> bool {
                 terminal: right_term,
             },
         ) => left == right && left_term == right_term,
+        (Connection::Sftp { config: left }, Connection::Sftp { config: right }) => left == right,
         _ => false,
     }
 }

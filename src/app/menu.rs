@@ -49,8 +49,20 @@ impl App {
                             );
                         }
                         let disabled = match action {
-                            Action::SplitNew(_) => self.show_keys || !self.splits.can_split(),
-                            Action::SinglePane => !self.splits.is_split(),
+                            Action::SplitNew(_) => {
+                                self.show_keys
+                                    || self.file_workspace_active()
+                                    || !self.splits.can_split()
+                            }
+                            Action::SinglePane => {
+                                self.file_workspace_active() || !self.splits.is_split()
+                            }
+                            Action::FileWorkspace => self.show_keys,
+                            Action::Copy
+                            | Action::Paste
+                            | Action::Clear
+                            | Action::SelectAll
+                            | Action::JumpCommand(_) => self.file_workspace_active(),
                             _ => false,
                         };
                         if disabled {
@@ -110,6 +122,7 @@ fn menu_entries(name: &str, agent_active: bool) -> &'static [MenuEntry] {
         ],
         "View" => &[
             Item("Toggle Explorer", Action::Explorer),
+            Item("File Manager", Action::FileWorkspace),
             Item("Toggle Sessions", Action::Sessions),
             Item("Bottom Shell", Action::BottomShell),
             Divider,

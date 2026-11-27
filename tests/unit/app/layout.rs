@@ -1,5 +1,386 @@
 use super::*;
 
+#[test]
+fn expanded_file_workspace_hides_session_tabs_and_restores_them() {
+    let context = egui::Context::default();
+    let mut app = App::test_fixture(&context);
+    let options = app.settings.terminal();
+    let names = ["Fixture shell A", "Fixture shell B", "Fixture SFTP"];
+    for (index, name) in names.iter().enumerate() {
+        let kind = if index == 2 { Kind::Sftp } else { Kind::Local };
+        app.terminals.push(Terminal::new(
+            index as u64 + 1,
+            (*name).into(),
+            kind,
+            &options,
+        ));
+    }
+    app.activate(1);
+    assert!(app.splits.split(1, 2, crate::app::splits::Direction::Right));
+    let render = |app: &mut App, width: f32, events: Vec<egui::Event>| {
+        context.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 800.0))),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| app.center(ui, ui.max_rect()));
+            },
+        )
+    };
+    let label_rect = |output: &egui::FullOutput, name: &str| {
+        output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == name => Some(shape.clip_rect),
+            _ => None,
+        })
+    };
+    let check_tabs = |output: &egui::FullOutput, visible: bool| {
+        for name in names {
+            assert_eq!(label_rect(output, name).is_some(), visible, "{name}");
+        }
+    };
+
+    check_tabs(&render(&mut app, 1200.0, vec![]), true);
+    app.toggle_file_workspace();
+    let expanded = render(&mut app, 1200.0, vec![]);
+    check_tabs(&expanded, false);
+    assert_eq!(label_rect(&expanded, "File Manager").unwrap().top(), 0.0);
+
+    // Exercise the actual restore icon, not just the state toggle.
+    let position = pos2(1186.0, 15.0);
+    for pressed in [true, false] {
+        render(
+            &mut app,
+            1200.0,
+            vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    assert!(!app.explorer.expanded);
+    check_tabs(&render(&mut app, 1200.0, vec![]), true);
+    assert_eq!(app.active, Some(1));
+    assert!(app.splits.contains(1) && app.splits.contains(2));
+
+    app.activate(3);
+    assert!(app.explorer.expanded);
+    for width in [1200.0, 350.0] {
+        let expanded = render(&mut app, width, vec![]);
+        check_tabs(&expanded, false);
+        assert_eq!(label_rect(&expanded, "File Manager").unwrap().top(), 0.0);
+    }
+    app.toggle_file_workspace();
+    assert!(app.file_workspace_active());
+    let compact = render(&mut app, 1200.0, vec![]);
+    check_tabs(&compact, true);
+    assert_eq!(label_rect(&compact, "File Manager").unwrap().top(), 23.0);
+    assert_eq!(app.active, Some(3));
+    assert_eq!(app.terminals.len(), 3);
+    assert!(app.splits.contains(1) && app.splits.contains(2));
+}
+
+#[test]
+fn folder_creation_button_works_in_fullscreen_and_docked_sftp() {
+    let context = egui::Context::default();
+    let mut app = App::test_fixture(&context);
+    let mut terminal = Terminal::new(1, "Fixture SSH".into(), Kind::Ssh, &app.settings.terminal());
+    terminal.endpoint = Some(42);
+    app.terminals.push(terminal);
+    app.active = Some(1);
+    app.explorer
+        .accept_initial_listing(42, "/fixture".into(), vec![]);
+    app.explorer.remote_active = true;
+    assert!(app.can_create_sftp_folder());
+    for (expanded, sftp_only, pos) in [
+        (true, false, pos2(1146.0, 15.0)),
+        (true, false, pos2(1166.0, 43.0)),
+        (false, false, pos2(166.0, 35.0)),
+        (false, true, pos2(1146.0, 15.0)),
+        (false, true, pos2(1166.0, 65.0)),
+    ] {
+        app.explorer.expanded = expanded;
+        app.terminals[0].kind = if sftp_only { Kind::Sftp } else { Kind::Ssh };
+        app.terminals[0].sftp_ready = sftp_only;
+        assert!(app.can_create_sftp_folder());
+        let render = |app: &mut App, events| {
+            context.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(ctx, |ui| {
+                            if expanded || sftp_only {
+                                app.explorer_workspace(ui, ui.max_rect());
+                            } else {
+                                app.explorer_panel(ui, ui.max_rect().with_max_x(240.0));
+                            }
+                        });
+                },
+            )
+        };
+        let initial = render(&mut app, vec![]);
+        if expanded {
+            assert!(initial.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Rect(rect) if rect.rect.left() == 598.0 && rect.rect.right() == 602.0
+                    && rect.rect.top() == 30.0 && rect.fill == app.theme.bg)));
+        }
+        for pressed in [true, false] {
+            render(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let Some(Dialog::NewSftpFolder {
+            id,
+            directory,
+            name,
+        }) = app.dialog.take()
+        else {
+            panic!("folder button must open the dialog, expanded={expanded}");
+        };
+        assert_eq!(id, 42);
+        assert_eq!(directory, "/fixture");
+        assert!(name.is_empty());
+    }
+}
+
+#[test]
+fn transfer_card_preserves_file_panes_and_queue_is_opt_in() {
+    let context = egui::Context::default();
+    let mut app = App::test_fixture(&context);
+    app.explorer.expanded = true;
+    app.explorer
+        .accept_initial_listing(42, "/fixture".into(), vec![]);
+    let render = |app: &mut App, events| {
+        context.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| app.center(ui, ui.max_rect()));
+            },
+        )
+    };
+    let footer_y = |out: &egui::FullOutput| {
+        let positions: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text().starts_with("Items:") => {
+                    Some(text.pos.y)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[0], positions[1]);
+        positions[0]
+    };
+    let baseline = footer_y(&render(&mut app, vec![]));
+    app.handle_event(BackendEvent::Progress {
+        id: "42:upload:fixture".into(),
+        text: "Uploading fixture.txt".into(),
+        percent: 45.0,
+        rate_bps: Some(2.5 * 1024.0 * 1024.0),
+        finished: false,
+        error: false,
+    });
+    render(&mut app, vec![]);
+    let overlay = render(&mut app, vec![]);
+    assert_eq!(footer_y(&overlay), baseline);
+    assert!(overlay.shapes.iter().any(|shape| matches!(&shape.shape,
+        egui::Shape::Text(text) if text.galley.text().contains("2.5 MiB/s") && text.galley.text().contains("Uploading fixture.txt")
+    )));
+    let click = |app: &mut App, position| {
+        for pressed in [true, false] {
+            render(
+                app,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    };
+    // The bottom bar is visible even when the queue is closed.
+    assert!(overlay.shapes.iter().any(|shape| matches!(&shape.shape,
+        egui::Shape::Text(text) if text.galley.text() == "1 Pending"
+    )));
+    click(&mut app, pos2(55.0, 787.0));
+    assert!(app.transfer_queue_open);
+    let queue = render(&mut app, vec![]);
+    let initial_footer = footer_y(&queue);
+    assert!(initial_footer < baseline);
+    assert!(queue.shapes.iter().any(|shape| matches!(&shape.shape,
+        egui::Shape::Text(text) if text.galley.text() == "Transfer queue"
+    )));
+
+    let text_rect = |name: &str| {
+        queue
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == name => {
+                    Some(Rect::from_min_size(text.pos, text.galley.size()))
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    let speed = text_rect("2.5 MiB/s");
+    let filename = text_rect("Uploading fixture.txt");
+    let progress = text_rect("45%");
+    assert!(speed.left() > progress.right() + 12.0);
+    assert!(filename.left() >= speed.right() + 10.0);
+
+    // Drag the separator upward, then verify the queue's new height
+    // survives both reopening and an idle render.
+    let start = pos2(600.0, 774.0 - app.transfer_queue_height - 3.0);
+    let end = start - vec2(0.0, 85.0);
+    let initial_height = app.transfer_queue_height;
+    render(
+        &mut app,
+        vec![
+            egui::Event::PointerMoved(start),
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+    );
+    render(&mut app, vec![egui::Event::PointerMoved(end)]);
+    render(
+        &mut app,
+        vec![egui::Event::PointerButton {
+            pos: end,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    assert!(
+        app.transfer_queue_height > initial_height + 50.0,
+        "queue height {}",
+        app.transfer_queue_height
+    );
+    let resized_footer = footer_y(&render(&mut app, vec![]));
+    assert!(resized_footer < initial_footer - 50.0);
+    click(&mut app, pos2(55.0, 787.0));
+    assert!(!app.transfer_queue_open);
+    assert_eq!(footer_y(&render(&mut app, vec![])), baseline);
+    click(&mut app, pos2(1126.0, 15.0));
+    assert!(app.transfer_queue_open);
+    assert_eq!(footer_y(&render(&mut app, vec![])), resized_footer);
+
+    app.handle_event(BackendEvent::Progress {
+        id: "42:upload:failed".into(),
+        text: "Failed fixture".into(),
+        percent: 0.0,
+        rate_bps: None,
+        finished: true,
+        error: true,
+    });
+    let result = render(&mut app, vec![]);
+    assert!(result.shapes.iter().any(|shape| matches!(&shape.shape,
+        egui::Shape::Text(text) if text.galley.text() == "1 Failed"
+    )));
+    for (id, description, percent, error) in [
+        ("complete", "Transferred successful fixture", 100.0, false),
+        ("skip", "Skipped fixture", 0.0, false),
+    ] {
+        app.handle_event(BackendEvent::Progress {
+            id: id.into(),
+            text: description.into(),
+            percent,
+            rate_bps: None,
+            finished: true,
+            error,
+        });
+    }
+    let text = |out: &egui::FullOutput, label: &str| {
+        out.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(t) if t.galley.text() == label => {
+                Some(Rect::from_min_size(t.pos, t.galley.size()).center())
+            }
+            _ => None,
+        })
+    };
+    let all = render(&mut app, vec![]);
+    assert!(text(&all, "Transferred successful fixture").is_some());
+    assert_eq!(contrast_text(app.theme.green), Color32::BLACK);
+    assert_eq!(contrast_text(app.theme.hover), Color32::WHITE);
+    assert!(all.shapes.iter().any(|shape| matches!(&shape.shape,
+        egui::Shape::Text(t) if t.galley.text() == "100%" && t.override_text_color == Some(Color32::BLACK)
+    )));
+    for (button, filter, visible) in [
+        ("1 Failed", TransferFilter::Failed, "Failed fixture"),
+        (
+            "1 Completed",
+            TransferFilter::Completed,
+            "Transferred successful fixture",
+        ),
+        ("1 Skipped", TransferFilter::Skipped, "Skipped fixture"),
+        (
+            "1 Pending",
+            TransferFilter::Pending,
+            "Uploading fixture.txt",
+        ),
+    ] {
+        let frame = render(&mut app, vec![]);
+        click(&mut app, text(&frame, button).unwrap());
+        assert_eq!(app.transfer_filter, filter);
+        assert!(app.transfer_queue_open);
+        let filtered = render(&mut app, vec![]);
+        for name in [
+            "Failed fixture",
+            "Transferred successful fixture",
+            "Skipped fixture",
+            "Uploading fixture.txt",
+        ] {
+            assert_eq!(
+                text(&filtered, name).is_some(),
+                name == visible,
+                "{button}: {name}"
+            );
+        }
+    }
+    let frame = render(&mut app, vec![]);
+    click(&mut app, text(&frame, "4 All").unwrap());
+    assert_eq!(app.transfer_filter, TransferFilter::All);
+}
+
 #[cfg(all(windows, feature = "benchmark"))]
 #[test]
 #[ignore = "requires Neovim on PATH; exercises a real local Windows PTY"]

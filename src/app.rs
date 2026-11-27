@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -25,8 +25,43 @@ struct Pending {
 struct Transfer {
     text: String,
     percent: f32,
+    rate_bps: Option<f64>,
     expires: Option<Instant>,
     error: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TransferFilter {
+    #[default]
+    All,
+    Pending,
+    Completed,
+    Failed,
+    Skipped,
+}
+
+impl TransferFilter {
+    const OPTIONS: [(Self, &'static str); 5] = [
+        (Self::All, "All"),
+        (Self::Pending, "Pending"),
+        (Self::Completed, "Completed"),
+        (Self::Failed, "Failed"),
+        (Self::Skipped, "Skipped"),
+    ];
+
+    fn matches(self, row: &Transfer) -> bool {
+        match self {
+            Self::All => true,
+            Self::Pending => row.expires.is_none(),
+            Self::Failed => row.error,
+            Self::Skipped => {
+                row.expires.is_some() && !row.error && row.text.starts_with("Skipped ")
+            }
+            Self::Completed => {
+                row.expires.is_some() && !row.error && !row.text.starts_with("Skipped ")
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -41,6 +76,7 @@ enum Action {
     Clear,
     JumpCommand(bool),
     Explorer,
+    FileWorkspace,
     Sessions,
     BottomShell,
     SplitNew(splits::Direction),
@@ -72,6 +108,7 @@ pub(crate) struct App {
     ssh_tabs: BTreeMap<u64, ssh_reconnect::SshTab>,
     host_trust: host_trust::Trust,
     pub(crate) settings: Settings,
+    pub(crate) updater: crate::updater::Updater,
     pub(crate) theme: Theme,
     pub(crate) wallpaper: Option<crate::background::Wallpaper>,
     agent: agent_ui::State,
@@ -115,6 +152,10 @@ pub(crate) struct App {
     active_filter: String,
     dock_fraction: f32,
     transfers: BTreeMap<String, Transfer>,
+    pub(crate) transfer_queue_open: bool,
+    transfer_queue_height: f32,
+    transfer_filter: TransferFilter,
+    transfer_conflicts: VecDeque<crate::backend::ConflictPrompt>,
     last_activity: Instant,
     last_service: Instant,
     exit_confirmed: bool,
@@ -125,6 +166,11 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn new(context: &egui::Context) -> Self {
         Self::with_settings(context, Settings::load(), true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture(context: &egui::Context) -> Self {
+        Self::with_settings(context, Settings::benchmark_defaults(), false)
     }
 
     fn with_settings(context: &egui::Context, settings: Settings, restore_sessions: bool) -> Self {
@@ -194,6 +240,7 @@ impl App {
             ssh_tabs: BTreeMap::new(),
             host_trust: host_trust::Trust::new(restore_sessions),
             settings,
+            updater: Default::default(),
             theme,
             wallpaper,
             agent: Default::default(),
@@ -241,6 +288,10 @@ impl App {
             active_filter: String::new(),
             dock_fraction: 0.30,
             transfers: BTreeMap::new(),
+            transfer_queue_open: false,
+            transfer_queue_height: 190.0,
+            transfer_filter: TransferFilter::All,
+            transfer_conflicts: VecDeque::new(),
             last_activity: Instant::now(),
             last_service: Instant::now(),
             exit_confirmed: false,
@@ -265,6 +316,7 @@ impl App {
     }
 
     fn poll(&mut self, context: &egui::Context) {
+        self.updater.poll();
         let mut completed = Vec::new();
         let mut startup_error = None;
         for terminal in self
@@ -339,8 +391,40 @@ impl App {
             );
         }
         let now = Instant::now();
-        self.transfers
-            .retain(|_, transfer| transfer.expires.is_none_or(|time| time > now));
+        if let Some(expiry) = self
+            .transfers
+            .values()
+            .filter_map(|row| row.expires)
+            .filter(|time| *time > now)
+            .min()
+        {
+            context.request_repaint_after(expiry.saturating_duration_since(now));
+        }
+        // Keep a bounded in-memory history for the transfer queue, while
+        // expired cards disappear from the compact overlay.
+        let mut completed: Vec<_> = self
+            .transfers
+            .iter()
+            .filter_map(|(id, transfer)| transfer.expires.map(|time| (time, id.clone())))
+            .collect();
+        if completed.len() > 200 {
+            completed.sort_unstable();
+            let excess = completed.len() - 200;
+            for (_, id) in completed.into_iter().take(excess) {
+                self.transfers.remove(&id);
+            }
+        }
+        self.transfer_conflicts
+            .retain(|conflict| !conflict.is_closed());
+        if self.file_interaction_allowed()
+            && let Some(conflict) = self.transfer_conflicts.pop_front()
+        {
+            self.dialog = Some(Dialog::TransferConflict {
+                conflict,
+                remember: false,
+            });
+            context.request_repaint();
+        }
     }
 
     fn handle_event(&mut self, event: BackendEvent) {
@@ -408,6 +492,7 @@ impl App {
                 id,
                 text,
                 percent,
+                rate_bps,
                 finished,
                 error,
             } => {
@@ -417,12 +502,19 @@ impl App {
                     Transfer {
                         text,
                         percent,
+                        rate_bps,
                         expires,
                         error,
                     },
                 );
             }
+            BackendEvent::TransferConflict(conflict) => {
+                if !self.locked {
+                    self.transfer_conflicts.push_back(conflict);
+                }
+            }
             BackendEvent::RemoteChanged(id) => self.refresh_remote_if(id),
+            BackendEvent::LocalChanged => self.explorer.refresh_local(),
         }
     }
 
@@ -512,6 +604,7 @@ impl App {
             return;
         }
         self.stop_agent();
+        self.transfer_conflicts.clear();
         self.dialog = None;
         self.message = None;
         self.keys = KeyManager::default();
@@ -576,7 +669,8 @@ impl App {
     }
     pub(crate) fn focus_terminal_after_dialog(&mut self) {
         self.bottom_request_focus = self.bottom_open && self.bottom_focus;
-        self.focus_terminal = !self.bottom_request_focus && !self.show_keys;
+        self.focus_terminal =
+            !self.bottom_request_focus && !self.show_keys && !self.file_workspace_active();
     }
     fn new_local(&mut self) {
         self.connect(
@@ -630,7 +724,7 @@ impl App {
             self.activate(tab);
             return;
         }
-        if kind == Kind::Ssh {
+        if kind.is_ssh() {
             self.ssh_tabs
                 .insert(tab, ssh_reconnect::SshTab::new(profile.clone()));
         }
@@ -643,7 +737,7 @@ impl App {
     fn start_remote_connection(&mut self, tab: u64, profile: Profile, save: Option<Option<usize>>) {
         let mut host_verification = None;
         let (command, terminal_type) = match &profile.connection {
-            Connection::Ssh { config, terminal } => {
+            Connection::Ssh { config, .. } | Connection::Sftp { config } => {
                 let mut config = config.clone();
                 if config.keepalive == 0 && self.settings.on("ssh_auto_reconnect") {
                     // Older profiles may have keepalives disabled. Probe idle
@@ -662,7 +756,13 @@ impl App {
                     }
                 };
                 host_verification = Some((host, trusted.clone()));
-                (Command::Ssh { config, trusted }, Some(terminal.clone()))
+                (
+                    Command::Ssh { config, trusted },
+                    match &profile.connection {
+                        Connection::Ssh { terminal, .. } => Some(terminal.clone()),
+                        _ => None,
+                    },
+                )
             }
             Connection::Telnet(config) => (Command::Telnet(config.clone()), None),
             Connection::Serial(config) => (Command::Serial(config.clone()), None),
@@ -737,6 +837,48 @@ impl App {
                                 }
                             },
                         );
+                    } else if terminal.kind == Kind::Sftp {
+                        // Prove the server accepts the SFTP subsystem, not just SSH auth.
+                        app.request(
+                            Command::Sftp {
+                                id,
+                                action: crate::backend::RemoteAction::List(".".into()),
+                            },
+                            move |app, result| {
+                                if !app.terminals.iter().any(|term| {
+                                    term.tab == tab && term.endpoint == Some(id) && !term.closed
+                                }) {
+                                    return;
+                                }
+                                match result {
+                                    Ok(BackendReply::Files { path, entries }) => {
+                                        if let Some(term) =
+                                            app.terminals.iter_mut().find(|term| term.tab == tab)
+                                        {
+                                            term.sftp_ready = true;
+                                        }
+                                        if let Some(state) = app.ssh_tabs.get_mut(&tab) {
+                                            state.connected();
+                                        }
+                                        app.remember_profile(profile, save);
+                                        if app.active == Some(tab) {
+                                            app.explorer.accept_initial_listing(id, path, entries);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        app.ssh_transport_closed(
+                                            id,
+                                            &format!("SFTP failed: {error}"),
+                                            false,
+                                        );
+                                        app.fail(error);
+                                    }
+                                    _ => {
+                                        app.ssh_transport_closed(id, "Invalid SFTP listing", false);
+                                    }
+                                }
+                            },
+                        );
                     } else {
                         app.remember_profile(profile, save);
                     }
@@ -773,7 +915,19 @@ impl App {
 
     fn activate(&mut self, tab: u64) {
         let old_ssh = self.active_ssh();
-        self.splits.select(self.active, tab);
+        let sftp = self
+            .terminals
+            .iter()
+            .any(|term| term.tab == tab && term.kind == Kind::Sftp);
+        if !sftp {
+            self.splits.select(self.active, tab);
+        }
+        if self.active != Some(tab) {
+            self.explorer.expanded = sftp;
+        }
+        if sftp {
+            self.explorer.remote_active = true;
+        }
         self.active = Some(tab);
         self.show_keys = false;
         self.focus_terminal = true;
@@ -819,6 +973,15 @@ impl App {
                     .get(index.min(self.terminals.len().saturating_sub(1)))
                     .map(|terminal| terminal.tab)
             });
+            if let Some(next) = self.active
+                && !self.active_is_sftp()
+            {
+                self.splits.select(Some(tab), next);
+            }
+            self.explorer.expanded = self.active_is_sftp();
+            if self.active_is_sftp() {
+                self.explorer.remote_active = true;
+            }
             self.focus_terminal_after_dialog();
             if self.explorer.remote_active {
                 self.activate_remote(self.active_ssh());
@@ -826,11 +989,57 @@ impl App {
         }
     }
 
+    pub(crate) fn file_connection_label(&self) -> &'static str {
+        self.terminals
+            .iter()
+            .find(|term| Some(term.tab) == self.active)
+            .map_or("Not connected", |term| {
+                if term.closed {
+                    "Disconnected"
+                } else if term.starting() {
+                    "Connecting…"
+                } else {
+                    "Loading folder..."
+                }
+            })
+    }
+
+    pub(crate) fn active_is_sftp(&self) -> bool {
+        self.terminals
+            .iter()
+            .any(|term| Some(term.tab) == self.active && term.kind == Kind::Sftp)
+    }
+
+    pub(crate) fn file_interaction_allowed(&self) -> bool {
+        !self.locked
+            && self.dialog.is_none()
+            && self.message.is_none()
+            && !self.host_trust.blocking()
+            && !self.agent.blocks_terminal_input()
+    }
+
+    pub(crate) fn file_workspace_active(&self) -> bool {
+        !self.show_keys && (self.explorer.expanded || self.active_is_sftp())
+    }
+
+    pub(crate) fn toggle_file_workspace(&mut self) {
+        self.explorer.expanded = !self.explorer.expanded;
+        if self.explorer.expanded {
+            self.explorer.remote_active = true;
+            self.activate_remote(self.active_ssh());
+        } else {
+            self.focus_terminal_after_dialog();
+        }
+    }
+
     pub(crate) fn active_ssh(&self) -> Option<u32> {
         self.terminals
             .iter()
             .find(|terminal| {
-                Some(terminal.tab) == self.active && terminal.kind == Kind::Ssh && !terminal.closed
+                Some(terminal.tab) == self.active
+                    && terminal.kind.is_ssh()
+                    && !terminal.closed
+                    && (terminal.kind != Kind::Sftp || terminal.sftp_ready)
             })
             .and_then(|terminal| terminal.endpoint)
     }
@@ -846,6 +1055,9 @@ impl App {
     }
 
     fn selected(&mut self) -> Option<&mut Terminal> {
+        if self.file_workspace_active() {
+            return None;
+        }
         if self.bottom_open && self.bottom_focus {
             return self.bottom_shell.as_mut();
         }
@@ -927,6 +1139,9 @@ impl App {
                 self.focus_terminal_after_dialog();
             }
             Action::Paste => {
+                if self.file_workspace_active() {
+                    return;
+                }
                 let text = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text());
                 if let Ok(text) = text
                     && let Some(terminal) = if self.bottom_open && self.bottom_focus {
@@ -966,6 +1181,7 @@ impl App {
                     Some(240.0)
                 }
             }
+            Action::FileWorkspace => self.toggle_file_workspace(),
             Action::Sessions => {
                 self.sessions_sidebar = if self.sessions_sidebar.is_some() {
                     None
@@ -1223,6 +1439,10 @@ impl App {
     }
 
     fn request_exit(&mut self, context: &egui::Context) {
+        if self.updater.blocks_exit() {
+            self.fail("Keep RTerm open until the software update finishes.");
+            return;
+        }
         if self.settings.on("confirm_exit")
             && (!self.terminals.is_empty() || self.bottom_shell.is_some())
             && !self.locked
@@ -1234,6 +1454,10 @@ impl App {
     }
 
     pub(crate) fn exit(&mut self, context: &egui::Context) {
+        if self.updater.blocks_exit() {
+            self.fail("Keep RTerm open until the software update finishes.");
+            return;
+        }
         self.stop_agent();
         self.exit_confirmed = true;
         if self.settings.on("clear_on_close") {
@@ -1263,6 +1487,12 @@ impl App {
     }
 
     fn shortcuts(&mut self, context: &egui::Context) {
+        if self.file_workspace_active() {
+            if context.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, Key::N)) {
+                self.new_local();
+            }
+            return;
+        }
         // Consume every zoom press, including multiple repeats in one frame.
         // Base the first step on the font actually drawn, not the saved size.
         let zooms = context.input_mut(|input| {

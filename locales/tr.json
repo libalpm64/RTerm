@@ -323,5 +323,20 @@
   "Split Right": "Sağa böl",
   "Split Right (New Terminal)": "Sağa böl (yeni terminal)",
   "Free Type Mode": "Serbest yazma modu",
-  "Use the mouse to edit echoed shell commands": "Görüntülenen kabuk komutlarını fareyle düzenle"
+  "Use the mouse to edit echoed shell commands": "Görüntülenen kabuk komutlarını fareyle düzenle",
+  "File Manager": "Dosya yöneticisi",
+  "Restore Filer": "Dosya panelini geri al",
+  "Expand Filer": "Dosya panelini genişlet",
+  "Local files": "Yerel dosyalar",
+  "Upload Folder": "Klasör yükle",
+  "Filter by modified date": "Değişiklik tarihine göre filtrele",
+  "From": "Başlangıç",
+  "To": "Bitiş",
+  "No modification dates": "Değişiklik tarihi yok",
+  "Size": "Boyut",
+  "Downloads": "İndirilenler",
+  "Current local folder": "Geçerli yerel klasör",
+  "Source folder": "Kaynak klasör",
+  "Choose an existing destination folder": "Var olan bir hedef klasör seçin",
+  "SFTP": "SFTP"
 }

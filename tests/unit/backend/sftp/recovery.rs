@@ -486,7 +486,7 @@ async fn uploads_resume_after_the_last_saved_offset() {
     std::fs::write(&local, &data).unwrap();
     let first = session(files.clone()).await;
     assert!(
-        upload_with_records(&first, &local, "/target", "peer", &records)
+        upload_with_records(&first, &local, "/target", "peer", &records, None)
             .await
             .is_err()
     );
@@ -498,9 +498,33 @@ async fn uploads_resume_after_the_last_saved_offset() {
         files.writes.clear();
     }
     let second = session(files.clone()).await;
-    upload_with_records(&second, &local, "/target", "peer", &records)
-        .await
-        .unwrap();
+    let (backend, mut events) = crate::backend::Backend::new(&eframe::egui::Context::default());
+    upload_with_records(
+        &second,
+        &local,
+        "/target",
+        "peer",
+        &records,
+        Some((&backend.events, "resume")),
+    )
+    .await
+    .unwrap();
+    let mut saw_rate = false;
+    while let Ok(event) = events.try_recv() {
+        if let BackendEvent::Progress {
+            id,
+            percent,
+            rate_bps: Some(rate),
+            ..
+        } = event
+        {
+            assert_eq!(id, "resume");
+            assert!(rate.is_finite() && rate > 0.0);
+            assert!(percent > 99.0 && percent <= 100.0);
+            saw_rate = true;
+        }
+    }
+    assert!(saw_rate, "resumed upload must report its payload rate");
     let files = files.lock().unwrap();
     assert_eq!(files.writes.iter().min(), Some(&CHECKPOINT_BYTES));
     let uploaded = &files.data["/target"];
@@ -512,6 +536,70 @@ async fn uploads_resume_after_the_last_saved_offset() {
             .position(|(got, wanted)| got != wanted),
         None
     );
+}
+
+#[tokio::test]
+async fn regular_upload_reports_measured_rate_and_correct_bytes() {
+    let files = Arc::new(StdMutex::new(Files::default()));
+    let sftp = session(files.clone()).await;
+    let temp = crate::storage::test_private_tempdir();
+    let source = temp.path().join("source.bin");
+    let payload = vec![0x5a; 512 * 1024];
+    std::fs::write(&source, &payload).unwrap();
+    let (backend, mut events) = crate::backend::Backend::new(&eframe::egui::Context::default());
+    let ctx = conflicts::TransferContext::new(&backend.events, "regular", Default::default());
+    conflicts::upload_regular(
+        &sftp,
+        &source,
+        "/target",
+        &ctx,
+        "Uploading source.bin".into(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(files.lock().unwrap().data["/target"], payload);
+    let mut last = 0.0;
+    while let Ok(event) = events.try_recv() {
+        if let BackendEvent::Progress {
+            id,
+            text,
+            percent,
+            rate_bps: Some(rate),
+            ..
+        } = event
+        {
+            assert_eq!(id, "regular");
+            assert!(text.contains("source.bin"));
+            assert!(percent >= last && percent <= 100.0);
+            assert!(rate.is_finite() && rate > 0.0);
+            last = percent;
+        }
+    }
+    assert_eq!(last, 100.0);
+}
+
+#[tokio::test]
+async fn upload_meter_excludes_previously_transferred_bytes() {
+    let (backend, mut events) = crate::backend::Backend::new(&eframe::egui::Context::default());
+    let mut meter = UploadMeter::new(
+        Some((&backend.events, "resume")),
+        "fixture".into(),
+        10_000_000,
+        9_000_000,
+    );
+    meter.sampled_at = Instant::now() - Duration::from_secs(1);
+    meter.report(9_001_000, false).await;
+    let BackendEvent::Progress {
+        percent,
+        rate_bps: Some(rate),
+        ..
+    } = events.try_recv().unwrap()
+    else {
+        panic!("Expected speed sample");
+    };
+    assert!((90.0..91.0).contains(&percent));
+    assert!(rate > 0.0 && rate <= 1000.0, "{rate}");
+    assert_eq!(transfer_bytes(2.5 * 1024.0 * 1024.0), "2.5 MiB");
 }
 
 #[tokio::test]

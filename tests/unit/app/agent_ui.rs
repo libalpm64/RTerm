@@ -10,11 +10,116 @@ const PAGER_PROBE: &str = "test ! -t 0 && test ! -t 1 && test ! -t 2 || exit 99\
 
 type FixtureFiles = Arc<Mutex<BTreeMap<String, Vec<u8>>>>;
 
-struct TestSftp(FixtureFiles);
+struct TestSftp(FixtureFiles, std::collections::HashSet<String>);
 impl russh_sftp::server::Handler for TestSftp {
     type Error = russh_sftp::protocol::StatusCode;
     fn unimplemented(&self) -> Self::Error {
         Self::Error::OpUnsupported
+    }
+    async fn realpath(
+        &mut self,
+        id: u32,
+        path: String,
+    ) -> Result<russh_sftp::protocol::Name, Self::Error> {
+        Ok(russh_sftp::protocol::Name {
+            id,
+            files: vec![russh_sftp::protocol::File::dummy(if path == "." {
+                "/".to_owned()
+            } else {
+                path
+            })],
+        })
+    }
+    async fn opendir(
+        &mut self,
+        id: u32,
+        path: String,
+    ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
+        let path = if path == "." { "/".into() } else { path };
+        self.1.remove(&path);
+        Ok(russh_sftp::protocol::Handle { id, handle: path })
+    }
+    async fn readdir(
+        &mut self,
+        id: u32,
+        path: String,
+    ) -> Result<russh_sftp::protocol::Name, Self::Error> {
+        if !self.1.insert(path.clone()) {
+            return Err(Self::Error::Eof);
+        }
+        let prefix = format!("{}/", path.trim_end_matches('/'));
+        let files = self.0.lock().unwrap();
+        let mut entries = Vec::new();
+        for (name, data) in files.iter() {
+            let Some(relative) = name.strip_prefix(&prefix) else {
+                continue;
+            };
+            let directory = relative.ends_with('/');
+            let relative = relative.trim_end_matches('/');
+            if relative.is_empty() || relative.contains('/') {
+                continue;
+            }
+            let mut attrs = russh_sftp::protocol::FileAttributes::empty();
+            if directory {
+                attrs.set_dir(true);
+            } else {
+                attrs.set_regular(true);
+            }
+            attrs.size = Some(data.len() as u64);
+            attrs.mtime = Some(1700000000);
+            entries.push(russh_sftp::protocol::File::new(relative, attrs));
+        }
+        Ok(russh_sftp::protocol::Name { id, files: entries })
+    }
+    async fn stat(
+        &mut self,
+        id: u32,
+        path: String,
+    ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
+        let files = self.0.lock().unwrap();
+        let mut attrs = russh_sftp::protocol::FileAttributes::empty();
+        if let Some(data) = files.get(&path) {
+            attrs.set_regular(true);
+            attrs.size = Some(data.len() as u64);
+        } else if path == "/" || files.contains_key(&format!("{path}/")) {
+            attrs.set_dir(true);
+        } else {
+            return Err(Self::Error::NoSuchFile);
+        }
+        attrs.mtime = Some(1700000000);
+        Ok(russh_sftp::protocol::Attrs { id, attrs })
+    }
+    async fn lstat(
+        &mut self,
+        id: u32,
+        path: String,
+    ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
+        self.stat(id, path).await
+    }
+    async fn fstat(
+        &mut self,
+        id: u32,
+        handle: String,
+    ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
+        self.stat(id, handle).await
+    }
+    async fn read(
+        &mut self,
+        id: u32,
+        handle: String,
+        offset: u64,
+        len: u32,
+    ) -> Result<russh_sftp::protocol::Data, Self::Error> {
+        let files = self.0.lock().unwrap();
+        let data = files.get(&handle).ok_or(Self::Error::NoSuchFile)?;
+        let start = offset as usize;
+        if start >= data.len() {
+            return Err(Self::Error::Eof);
+        }
+        Ok(russh_sftp::protocol::Data {
+            id,
+            data: data[start..(start + len as usize).min(data.len())].to_vec(),
+        })
     }
     async fn mkdir(
         &mut self,
@@ -42,13 +147,19 @@ impl russh_sftp::server::Handler for TestSftp {
         _: russh_sftp::protocol::FileAttributes,
     ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
         use russh_sftp::protocol::OpenFlags;
-        assert!(flags.contains(OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::EXCLUDE));
-        assert!(!flags.contains(OpenFlags::TRUNCATE));
         let mut files = self.0.lock().unwrap();
-        if files.contains_key(&filename) || files.contains_key(&format!("{filename}/")) {
-            return Err(Self::Error::Failure);
+        if flags.contains(OpenFlags::READ) && !flags.contains(OpenFlags::WRITE) {
+            if !files.contains_key(&filename) {
+                return Err(Self::Error::NoSuchFile);
+            }
+        } else {
+            assert!(flags.contains(OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::EXCLUDE));
+            assert!(!flags.contains(OpenFlags::TRUNCATE));
+            if files.contains_key(&filename) || files.contains_key(&format!("{filename}/")) {
+                return Err(Self::Error::Failure);
+            }
+            files.insert(filename.clone(), Vec::new());
         }
-        files.insert(filename.clone(), Vec::new());
         Ok(russh_sftp::protocol::Handle {
             id,
             handle: filename,
@@ -153,7 +264,11 @@ impl server::Handler for TestServer {
         if name == "sftp" {
             let channel = self.3.remove(&id).unwrap();
             session.channel_success(id)?;
-            russh_sftp::server::run(channel.into_stream(), TestSftp(self.2.clone())).await;
+            russh_sftp::server::run(
+                channel.into_stream(),
+                TestSftp(self.2.clone(), Default::default()),
+            )
+            .await;
         } else {
             session.channel_failure(id)?;
         }
@@ -1763,4 +1878,441 @@ fn native_wayland_minimized_agent_discovery() {
         longest < Duration::from_secs(1),
         "discovery stalled: {longest:?}"
     );
+}
+
+#[test]
+fn sftp_only_authenticates_without_shell_and_transfers_files() {
+    struct FileServer {
+        files: FixtureFiles,
+        channels: std::collections::HashMap<ChannelId, Channel<server::Msg>>,
+        shell_requests: Arc<AtomicUsize>,
+    }
+    impl server::Handler for FileServer {
+        type Error = russh::Error;
+        async fn auth_password(&mut self, _: &str, _: &str) -> Result<server::Auth, Self::Error> {
+            Ok(server::Auth::Accept)
+        }
+        async fn channel_open_session(
+            &mut self,
+            channel: Channel<server::Msg>,
+            reply: server::ChannelOpenHandle,
+            _: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.channels.insert(channel.id(), channel);
+            reply.accept().await;
+            Ok(())
+        }
+        async fn pty_request(
+            &mut self,
+            channel: ChannelId,
+            _: &str,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: &[(russh::Pty, u32)],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.shell_requests.fetch_add(1, Ordering::Relaxed);
+            session.channel_failure(channel)
+        }
+        async fn shell_request(
+            &mut self,
+            channel: ChannelId,
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.shell_requests.fetch_add(1, Ordering::Relaxed);
+            session.channel_failure(channel)
+        }
+        async fn subsystem_request(
+            &mut self,
+            id: ChannelId,
+            name: &str,
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            if name == "sftp" {
+                let channel = self.channels.remove(&id).unwrap();
+                session.channel_success(id)?;
+                russh_sftp::server::run(
+                    channel.into_stream(),
+                    TestSftp(self.files.clone(), Default::default()),
+                )
+                .await;
+            } else {
+                session.channel_failure(id)?;
+            }
+            Ok(())
+        }
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let files: FixtureFiles = Arc::new(Mutex::new(BTreeMap::from([
+        ("/remote.txt".into(), b"download fixture".to_vec()),
+        ("/incoming/".into(), Vec::new()),
+    ])));
+    let shells = Arc::new(AtomicUsize::new(0));
+    let port = runtime.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let config = Arc::new(server::Config {
+            keys: vec![
+                ssh_key::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap(),
+            ],
+            ..Default::default()
+        });
+        let files = files.clone();
+        let shells = shells.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let handler = FileServer {
+                    files: files.clone(),
+                    channels: Default::default(),
+                    shell_requests: shells.clone(),
+                };
+                let config = config.clone();
+                tokio::spawn(async move {
+                    if let Ok(running) = server::run_stream(config, stream, handler).await {
+                        let _ = running.await;
+                    }
+                });
+            }
+        });
+        port
+    });
+    let context = egui::Context::default();
+    let mut app = App::with_settings(&context, Settings::benchmark_defaults(), false);
+    app.settings.set("sftp_resume", "0".into());
+    let config = crate::models::SshConfig {
+        host: "127.0.0.1".into(),
+        port,
+        user: "fixture".into(),
+        password: Some("fixture".into()),
+        key_path: None,
+        key_name: None,
+        vault_pass: None,
+        name: None,
+        compression: None,
+        key_passphrase: None,
+        use_agent: false,
+        keepalive: 0,
+    };
+    let profile = Profile {
+        name: "File-only fixture".into(),
+        connection: Connection::Sftp { config },
+    };
+    let encoded = serde_json::to_string(&profile).unwrap();
+    assert!(serde_json::from_str::<Profile>(&encoded).unwrap().kind() == Kind::Sftp);
+    assert!(
+        !serde_json::to_string(&profile.without_credentials())
+            .unwrap()
+            .contains("\"password\":\"fixture\"")
+    );
+    app.connect(profile, None);
+    let tab = app.active.unwrap();
+    assert!(app.active_is_sftp());
+    assert!(app.file_workspace_active());
+    let pump = |app: &mut App, ready: &dyn Fn(&App) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready(app) {
+            app.poll(&context);
+            assert!(
+                Instant::now() < deadline,
+                "SFTP fixture timed out; message {:?}",
+                app.message
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    pump(&mut app, &|app| app.host_trust.blocking());
+    assert!(app.active_ssh().is_none());
+    assert!(app.approve_fixture_host());
+    pump(&mut app, &|app| app.active_ssh().is_some());
+    assert!(app.terminals[0].sftp_ready);
+    assert!(!app.terminals[0].starting());
+    assert!(app.agent_sessions().is_empty());
+    assert!(app.agent_endpoint(app.ssh_agent_id(tab).unwrap()).is_none());
+    assert_eq!(shells.load(Ordering::Relaxed), 0);
+    let id = app.active_ssh().unwrap();
+    pump(&mut app, &|app| app.can_create_sftp_folder());
+    app.new_sftp_folder();
+    let Some(Dialog::NewSftpFolder {
+        id: folder_id,
+        directory,
+        ..
+    }) = app.dialog.take()
+    else {
+        panic!("Folder action should open the folder dialog");
+    };
+    assert_eq!(folder_id, id);
+    assert!(app.create_sftp_folder(id, &directory, "../escape").is_err());
+    assert!(app.create_sftp_folder(id, &directory, " ").is_err());
+    assert!(
+        app.create_sftp_folder(id, "/wrong-directory", "new")
+            .is_err()
+    );
+    let name = "New fixture folder";
+    let path = crate::backend::join_remote(&directory, name);
+    app.create_sftp_folder(id, &directory, name).unwrap();
+    pump(&mut app, &|app| {
+        files.lock().unwrap().contains_key(&format!("{path}/"))
+            && app.pending.is_empty()
+            && app.can_create_sftp_folder()
+    });
+    app.create_sftp_folder(id, &directory, name).unwrap();
+    pump(&mut app, &|app| app.message.is_some());
+    app.message = None;
+    assert!(files.lock().unwrap().contains_key(&format!("{path}/")));
+    app.toggle_file_workspace();
+    assert!(!app.explorer.expanded);
+    pump(&mut app, &|app| app.can_create_sftp_folder());
+    app.new_sftp_folder();
+    assert!(matches!(
+        app.dialog.take(),
+        Some(Dialog::NewSftpFolder { .. })
+    ));
+    app.toggle_file_workspace();
+    let temp = crate::storage::test_private_tempdir();
+    let shared = temp.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
+    let source = shared.join("tree");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(source.join("empty")).unwrap();
+    std::fs::write(source.join("data.txt"), b"tree fixture").unwrap();
+    let request = app.backend.request(Command::Sftp {
+        id,
+        action: crate::backend::RemoteAction::UploadTree {
+            local: source,
+            remote: "/incoming/tree".into(),
+            batch: Default::default(),
+        },
+    });
+    assert!(
+        request
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .is_ok()
+    );
+    pump(&mut app, &|_| {
+        files
+            .lock()
+            .unwrap()
+            .get("/incoming/tree/data.txt")
+            .is_some_and(|data| data == b"tree fixture")
+    });
+    assert!(files.lock().unwrap().contains_key("/incoming/tree/empty/"));
+    let download = temp.path().join("download.txt");
+    let request = app.backend.request(Command::Sftp {
+        id,
+        action: crate::backend::RemoteAction::Download {
+            remote: "/remote.txt".into(),
+            local: download.clone(),
+            batch: Default::default(),
+            directory: false,
+            options: crate::backend::DownloadOptions {
+                parallel: 1,
+                max_bytes_per_second: 0,
+                timestamps: false,
+            },
+            resume: None,
+        },
+    });
+    assert!(
+        request
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .is_ok()
+    );
+    pump(&mut app, &|_| {
+        std::fs::read(&download).is_ok_and(|data| data == b"download fixture")
+    });
+    // Both drag uploads and picker uploads must ask before replacing a
+    // destination, and a remembered answer applies only to its own batch.
+    use crate::backend::{ConflictBatch, ConflictChoice, RemoteAction};
+    let first = shared.join("first.txt");
+    let second = shared.join("second.txt");
+    std::fs::write(&first, b"new first").unwrap();
+    std::fs::write(&second, b"new second").unwrap();
+    {
+        let mut remote = files.lock().unwrap();
+        remote.insert("/incoming/first.txt".into(), b"original first".to_vec());
+        remote.insert("/incoming/second.txt".into(), b"original second".to_vec());
+    }
+    let dispatch = |app: &App, action| {
+        assert!(
+            app.backend
+                .request(Command::Sftp { id, action })
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .is_ok()
+        );
+    };
+    dispatch(
+        &app,
+        RemoteAction::Upload {
+            local: first.clone(),
+            remote: "/incoming/shared-fresh.txt".into(),
+            resume: None,
+            batch: Default::default(),
+        },
+    );
+    pump(&mut app, &|_| {
+        files
+            .lock()
+            .unwrap()
+            .get("/incoming/shared-fresh.txt")
+            .is_some_and(|data| data == b"new first")
+    });
+    let batch = ConflictBatch::default();
+    dispatch(
+        &app,
+        RemoteAction::UploadTree {
+            local: first.clone(),
+            remote: "/incoming/first.txt".into(),
+            batch: batch.clone(),
+        },
+    );
+    dispatch(
+        &app,
+        RemoteAction::Upload {
+            local: second.clone(),
+            remote: "/incoming/second.txt".into(),
+            resume: None,
+            batch,
+        },
+    );
+    pump(&mut app, &|app| {
+        matches!(app.dialog, Some(Dialog::TransferConflict { .. }))
+    });
+    assert_eq!(
+        files.lock().unwrap()["/incoming/first.txt"],
+        b"original first"
+    );
+    assert_eq!(
+        files.lock().unwrap()["/incoming/second.txt"],
+        b"original second"
+    );
+    let Some(Dialog::TransferConflict { mut conflict, .. }) = app.dialog.take() else {
+        panic!("Expected conflict")
+    };
+    assert!(conflict.can_replace);
+    conflict.decide(ConflictChoice::Replace, true);
+    pump(&mut app, &|_| {
+        let remote = files.lock().unwrap();
+        remote
+            .get("/incoming/first.txt")
+            .is_some_and(|data| data == b"new first")
+            && remote
+                .get("/incoming/second.txt")
+                .is_some_and(|data| data == b"new second")
+    });
+    assert!(app.dialog.is_none());
+    pump(&mut app, &|app| {
+        app.transfers.values().all(|row| row.expires.is_some())
+    });
+    assert!(
+        files
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|path| !path.contains(".rterm-replaced-"))
+    );
+
+    // A new batch prompts again; skip must leave the original untouched.
+    std::fs::write(&first, b"must not replace").unwrap();
+    dispatch(
+        &app,
+        RemoteAction::UploadTree {
+            local: first.clone(),
+            remote: "/incoming/first.txt".into(),
+            batch: Default::default(),
+        },
+    );
+    pump(&mut app, &|app| {
+        matches!(app.dialog, Some(Dialog::TransferConflict { .. }))
+    });
+    let Some(Dialog::TransferConflict { mut conflict, .. }) = app.dialog.take() else {
+        panic!("Expected conflict")
+    };
+    conflict.decide(ConflictChoice::Skip, false);
+    pump(&mut app, &|app| {
+        app.transfers
+            .values()
+            .any(|row| row.text == "Skipped first.txt")
+    });
+    assert_eq!(files.lock().unwrap()["/incoming/first.txt"], b"new first");
+
+    // Keep both generates a distinct filename without replacing the original.
+    dispatch(
+        &app,
+        RemoteAction::UploadTree {
+            local: first.clone(),
+            remote: "/incoming/first.txt".into(),
+            batch: Default::default(),
+        },
+    );
+    pump(&mut app, &|app| {
+        matches!(app.dialog, Some(Dialog::TransferConflict { .. }))
+    });
+    let Some(Dialog::TransferConflict { mut conflict, .. }) = app.dialog.take() else {
+        panic!("Expected conflict")
+    };
+    conflict.decide(ConflictChoice::KeepBoth, false);
+    pump(&mut app, &|_| {
+        files
+            .lock()
+            .unwrap()
+            .get("/incoming/first (1).txt")
+            .is_some_and(|data| data == b"must not replace")
+    });
+    assert_eq!(files.lock().unwrap()["/incoming/first.txt"], b"new first");
+
+    // Existing local downloads also require an explicit decision.
+    std::fs::write(&download, b"old local data").unwrap();
+    dispatch(
+        &app,
+        RemoteAction::Download {
+            remote: "/remote.txt".into(),
+            local: download.clone(),
+            directory: false,
+            options: crate::backend::DownloadOptions {
+                parallel: 1,
+                max_bytes_per_second: 0,
+                timestamps: false,
+            },
+            resume: None,
+            batch: Default::default(),
+        },
+    );
+    pump(&mut app, &|app| {
+        matches!(app.dialog, Some(Dialog::TransferConflict { .. }))
+    });
+    assert_eq!(std::fs::read(&download).unwrap(), b"old local data");
+    let Some(Dialog::TransferConflict { mut conflict, .. }) = app.dialog.take() else {
+        panic!("Expected conflict")
+    };
+    conflict.decide(ConflictChoice::Replace, false);
+    pump(&mut app, &|_| {
+        std::fs::read(&download).is_ok_and(|data| data == b"download fixture")
+    });
+    pump(&mut app, &|app| {
+        app.transfers.values().all(|row| row.expires.is_some())
+    });
+    assert!(app.transfers.values().all(|row| !row.error));
+    app.new_local();
+    assert!(!app.file_workspace_active());
+    app.activate(tab);
+    assert!(app.file_workspace_active());
+    assert_eq!(app.active_ssh(), Some(id));
+    app.close_tab(tab);
+    assert_eq!(app.terminals.len(), 1);
+    assert!(!app.file_workspace_active());
+    assert_eq!(shells.load(Ordering::Relaxed), 0);
 }

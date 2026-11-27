@@ -323,5 +323,20 @@
   "Split Right": "Розділити праворуч",
   "Split Right (New Terminal)": "Розділити праворуч (новий terminal)",
   "Free Type Mode": "Режим вільного введення",
-  "Use the mouse to edit echoed shell commands": "Редагувати відображені команди оболонки мишею"
+  "Use the mouse to edit echoed shell commands": "Редагувати відображені команди оболонки мишею",
+  "File Manager": "Файловий менеджер",
+  "Restore Filer": "Згорнути панель",
+  "Expand Filer": "Розгорнути панель",
+  "Local files": "Локальні файли",
+  "Upload Folder": "Завантажити папку",
+  "Filter by modified date": "Фільтрувати за датою зміни",
+  "From": "Від",
+  "To": "До",
+  "No modification dates": "Немає дат зміни",
+  "Size": "Розмір",
+  "Downloads": "Завантаження",
+  "Current local folder": "Поточна локальна папка",
+  "Source folder": "Вихідна папка",
+  "Choose an existing destination folder": "Виберіть наявну папку призначення",
+  "SFTP": "SFTP"
 }

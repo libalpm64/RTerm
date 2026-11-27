@@ -323,5 +323,20 @@
   "Split Right": "Разделить вправо",
   "Split Right (New Terminal)": "Разделить вправо (новый terminal)",
   "Free Type Mode": "Режим свободного ввода",
-  "Use the mouse to edit echoed shell commands": "Редактировать отображаемые команды оболочки мышью"
+  "Use the mouse to edit echoed shell commands": "Редактировать отображаемые команды оболочки мышью",
+  "File Manager": "Файловый менеджер",
+  "Restore Filer": "Свернуть панель",
+  "Expand Filer": "Развернуть панель",
+  "Local files": "Локальные файлы",
+  "Upload Folder": "Загрузить папку",
+  "Filter by modified date": "Фильтр по дате изменения",
+  "From": "С",
+  "To": "По",
+  "No modification dates": "Нет дат изменения",
+  "Size": "Размер",
+  "Downloads": "Загрузки",
+  "Current local folder": "Текущая локальная папка",
+  "Source folder": "Исходная папка",
+  "Choose an existing destination folder": "Выберите существующую папку назначения",
+  "SFTP": "SFTP"
 }

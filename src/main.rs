@@ -26,6 +26,7 @@ mod storage;
 mod terminal;
 mod theme;
 mod tunnel;
+mod updater;
 
 fn main() -> eframe::Result {
     #[cfg(target_os = "linux")]

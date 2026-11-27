@@ -221,15 +221,16 @@ fn parse(bytes: &[u8]) -> Result<Import, String> {
 }
 
 pub(crate) fn append_unique(saved: &mut Vec<Profile>, incoming: Vec<Profile>) -> usize {
-    fn identity(profile: &Profile) -> Option<(String, String, Option<String>)> {
+    fn identity(profile: &Profile) -> Option<(&'static str, String, String, Option<String>)> {
         let (host, port, user) = match &profile.connection {
-            Connection::Ssh { config, .. } => {
+            Connection::Ssh { config, .. } | Connection::Sftp { config } => {
                 (config.host.as_str(), config.port, Some(config.user.clone()))
             }
             Connection::Telnet(config) => (config.host.as_str(), config.port, None),
             _ => return None,
         };
         Some((
+            profile.kind().title(),
             profile.name.clone(),
             crate::host_keys::target(host, port),
             user,

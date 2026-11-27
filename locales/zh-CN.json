@@ -323,5 +323,20 @@
   "Split Right": "向右拆分",
   "Split Right (New Terminal)": "向右拆分（新建 terminal）",
   "Free Type Mode": "自由输入模式",
-  "Use the mouse to edit echoed shell commands": "使用鼠标编辑已回显的 shell 命令"
+  "Use the mouse to edit echoed shell commands": "使用鼠标编辑已回显的 shell 命令",
+  "File Manager": "文件管理器",
+  "Restore Filer": "还原文件面板",
+  "Expand Filer": "展开文件面板",
+  "Local files": "本地文件",
+  "Upload Folder": "上传文件夹",
+  "Filter by modified date": "按修改日期筛选",
+  "From": "从",
+  "To": "到",
+  "No modification dates": "无修改日期",
+  "Size": "大小",
+  "Downloads": "下载",
+  "Current local folder": "当前本地文件夹",
+  "Source folder": "源文件夹",
+  "Choose an existing destination folder": "选择现有目标文件夹",
+  "SFTP": "SFTP"
 }

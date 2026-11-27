@@ -72,8 +72,8 @@ impl App {
                         pos2(row.left() + 16.0, row.center().y),
                         vec2(16.0, 16.0),
                     ),
-                    Icon::Terminal,
-                    t.accent,
+                    profile.kind().icon(t).0,
+                    profile.kind().icon(t).1,
                 );
                 let text = row
                     .with_min_x(row.left() + 32.0)
@@ -145,14 +145,15 @@ impl App {
         });
         if let Some(index) = connect {
             let profile = self.profiles[index].clone();
-            if let Connection::Ssh { config, .. } = &profile.connection
+            if let Connection::Ssh { config, .. } | Connection::Sftp { config } =
+                &profile.connection
                 && !config.use_agent
                 && config.password.is_none()
                 && config.key_path.is_none()
                 && config.key_name.is_none()
             {
                 edit = Some(index);
-            } else if profile.kind() == Kind::Ssh {
+            } else if profile.kind().is_ssh() {
                 self.open_ssh_profile(profile);
             } else {
                 self.connect(profile, None);

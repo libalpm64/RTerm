@@ -323,5 +323,20 @@
   "Split Right": "向右分割",
   "Split Right (New Terminal)": "向右分割（新增 terminal）",
   "Free Type Mode": "自由輸入模式",
-  "Use the mouse to edit echoed shell commands": "使用滑鼠編輯已回顯的 shell 命令"
+  "Use the mouse to edit echoed shell commands": "使用滑鼠編輯已回顯的 shell 命令",
+  "File Manager": "檔案管理員",
+  "Restore Filer": "還原檔案面板",
+  "Expand Filer": "展開檔案面板",
+  "Local files": "本機檔案",
+  "Upload Folder": "上傳資料夾",
+  "Filter by modified date": "依修改日期篩選",
+  "From": "從",
+  "To": "到",
+  "No modification dates": "無修改日期",
+  "Size": "大小",
+  "Downloads": "下載",
+  "Current local folder": "目前本機資料夾",
+  "Source folder": "來源資料夾",
+  "Choose an existing destination folder": "選擇現有目的地資料夾",
+  "SFTP": "SFTP"
 }

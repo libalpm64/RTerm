@@ -82,12 +82,14 @@ impl ConnectForm {
         form.index = Some(index);
         match &profile.connection {
             Connection::Local { shell } => form.shell.clone_from(shell),
-            Connection::Ssh { config, terminal } => {
+            Connection::Ssh { config, .. } | Connection::Sftp { config } => {
                 form.host.clone_from(&config.host);
                 form.ssh_port = config.port.to_string();
                 form.username.clone_from(&config.user);
                 form.password = config.password.clone().unwrap_or_default();
-                form.terminal.clone_from(terminal);
+                if let Connection::Ssh { terminal, .. } = &profile.connection {
+                    form.terminal.clone_from(terminal);
+                }
                 form.key_name.clone_from(&config.key_name);
                 form.key_path = config.key_path.clone().unwrap_or_default();
                 form.key_passphrase = config.key_passphrase.clone().unwrap_or_default();
@@ -127,7 +129,7 @@ impl ConnectForm {
             Kind::Local => Connection::Local {
                 shell: self.shell.clone(),
             },
-            Kind::Ssh => {
+            Kind::Ssh | Kind::Sftp => {
                 let host = required(&self.host, "Host")?;
                 let user = required(&self.username, "Username")?;
                 if self.authentication == Authentication::Key
@@ -159,9 +161,13 @@ impl ConnectForm {
                     keepalive: app.settings.get("ssh_keepalive").parse().unwrap_or(0),
                     use_agent: self.authentication == Authentication::Agent,
                 };
-                Connection::Ssh {
-                    config,
-                    terminal: self.terminal.clone(),
+                if self.kind == Kind::Sftp {
+                    Connection::Sftp { config }
+                } else {
+                    Connection::Ssh {
+                        config,
+                        terminal: self.terminal.clone(),
+                    }
                 }
             }
             Kind::Telnet => Connection::Telnet(TelnetConfig {
@@ -177,7 +183,9 @@ impl ConnectForm {
         let name = if self.name.trim().is_empty() {
             match &connection {
                 Connection::Local { .. } => "Local Shell".into(),
-                Connection::Ssh { config, .. } => format!("{}@{}", config.user, config.host),
+                Connection::Ssh { config, .. } | Connection::Sftp { config } => {
+                    format!("{}@{}", config.user, config.host)
+                }
                 Connection::Telnet(config) => config.host.clone(),
                 Connection::Serial(config) => config.port.clone(),
             }
@@ -216,7 +224,7 @@ impl ConnectForm {
             ui.add_space(18.0);
             let placeholder = match self.kind {
                 Kind::Local => "Local Shell",
-                Kind::Ssh => "My Server",
+                Kind::Ssh | Kind::Sftp => "My Server",
                 Kind::Telnet => "Telnet Session",
                 Kind::Serial => "Serial Session",
             };
@@ -224,7 +232,7 @@ impl ConnectForm {
             ui.add_space(FIELD_GAP);
             match self.kind {
                 Kind::Local => self.show_local(ui, t),
-                Kind::Ssh => self.show_ssh(ui, t, keys, agent_enabled),
+                Kind::Ssh | Kind::Sftp => self.show_ssh(ui, t, keys, agent_enabled),
                 Kind::Telnet => field_pair(
                     ui,
                     PORT_WIDTH,
@@ -293,25 +301,29 @@ impl ConnectForm {
             |ui| form_field(ui, t, "Port", &mut self.ssh_port, "", false),
         );
         ui.add_space(FIELD_GAP);
-        field_pair(
-            ui,
-            174.0,
-            |ui| form_field(ui, t, "Username", &mut self.username, "Username", false),
-            |ui| {
-                let label = field_label(ui, t, "Terminal Type");
-                combo(
-                    ui,
-                    "term",
-                    &mut self.terminal,
-                    &[
-                        ("xterm-256color", "xterm-256color"),
-                        ("xterm", "xterm"),
-                        ("vt100", "vt100"),
-                    ],
-                )
-                .labelled_by(label.id);
-            },
-        );
+        if self.kind == Kind::Sftp {
+            form_field(ui, t, "Username", &mut self.username, "Username", false);
+        } else {
+            field_pair(
+                ui,
+                174.0,
+                |ui| form_field(ui, t, "Username", &mut self.username, "Username", false),
+                |ui| {
+                    let label = field_label(ui, t, "Terminal Type");
+                    combo(
+                        ui,
+                        "term",
+                        &mut self.terminal,
+                        &[
+                            ("xterm-256color", "xterm-256color"),
+                            ("xterm", "xterm"),
+                            ("vt100", "vt100"),
+                        ],
+                    )
+                    .labelled_by(label.id);
+                },
+            );
+        }
         ui.add_space(FIELD_GAP);
         let label = field_label(ui, t, "Authentication");
         let method = match self.authentication {

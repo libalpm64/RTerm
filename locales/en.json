@@ -323,5 +323,20 @@
   "Split Right": "Split Right",
   "Split Right (New Terminal)": "Split Right (New Terminal)",
   "Free Type Mode": "Free Type Mode",
-  "Use the mouse to edit echoed shell commands": "Use the mouse to edit echoed shell commands"
+  "Use the mouse to edit echoed shell commands": "Use the mouse to edit echoed shell commands",
+  "File Manager": "File Manager",
+  "Restore Filer": "Restore Filer",
+  "Expand Filer": "Expand Filer",
+  "Local files": "Local files",
+  "Upload Folder": "Upload Folder",
+  "Filter by modified date": "Filter by modified date",
+  "From": "From",
+  "To": "To",
+  "No modification dates": "No modification dates",
+  "Size": "Size",
+  "Downloads": "Downloads",
+  "Current local folder": "Current local folder",
+  "Source folder": "Source folder",
+  "Choose an existing destination folder": "Choose an existing destination folder",
+  "SFTP": "SFTP"
 }

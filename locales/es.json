@@ -323,5 +323,20 @@
   "Split Right": "Dividir a la derecha",
   "Split Right (New Terminal)": "Dividir a la derecha (nuevo terminal)",
   "Free Type Mode": "Modo de escritura libre",
-  "Use the mouse to edit echoed shell commands": "Usar el ratón para editar comandos de shell visibles"
+  "Use the mouse to edit echoed shell commands": "Usar el ratón para editar comandos de shell visibles",
+  "File Manager": "Gestor de archivos",
+  "Restore Filer": "Restaurar panel",
+  "Expand Filer": "Ampliar panel",
+  "Local files": "Archivos locales",
+  "Upload Folder": "Subir carpeta",
+  "Filter by modified date": "Filtrar por fecha de modificación",
+  "From": "Desde",
+  "To": "Hasta",
+  "No modification dates": "Sin fechas de modificación",
+  "Size": "Tamaño",
+  "Downloads": "Descargas",
+  "Current local folder": "Carpeta local actual",
+  "Source folder": "Carpeta de origen",
+  "Choose an existing destination folder": "Elija una carpeta de destino existente",
+  "SFTP": "SFTP"
 }

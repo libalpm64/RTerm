@@ -187,7 +187,7 @@ impl Node {
                 let color = if response.hovered() || response.dragged() {
                     theme.accent
                 } else {
-                    theme.border
+                    theme.bg
                 };
                 theme::band(ui, divider, theme.bg, None);
                 let line = if horizontal {
@@ -323,7 +323,7 @@ impl Splits {
 
 impl App {
     pub(super) fn split_new(&mut self, direction: Direction) {
-        if self.locked || self.show_keys {
+        if self.locked || self.show_keys || self.file_workspace_active() {
             return;
         }
         let Some(anchor) = self.active else {
@@ -336,7 +336,14 @@ impl App {
     }
 
     pub(super) fn split_existing(&mut self, tab: u64, direction: Direction) {
-        if self.locked || self.show_keys || !self.terminals.iter().any(|term| term.tab == tab) {
+        if self.locked
+            || self.show_keys
+            || self.file_workspace_active()
+            || !self
+                .terminals
+                .iter()
+                .any(|term| term.tab == tab && term.kind != Kind::Sftp)
+        {
             return;
         }
         if self.splits.contains(tab) {

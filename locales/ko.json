@@ -323,5 +323,20 @@
   "Split Right": "오른쪽으로 분할",
   "Split Right (New Terminal)": "오른쪽으로 분할 (새 terminal)",
   "Free Type Mode": "자유 입력 모드",
-  "Use the mouse to edit echoed shell commands": "마우스로 화면에 표시된 셸 명령 편집"
+  "Use the mouse to edit echoed shell commands": "마우스로 화면에 표시된 셸 명령 편집",
+  "File Manager": "파일 관리자",
+  "Restore Filer": "파일 창 복원",
+  "Expand Filer": "파일 창 확장",
+  "Local files": "로컬 파일",
+  "Upload Folder": "폴더 업로드",
+  "Filter by modified date": "수정 날짜로 필터링",
+  "From": "시작",
+  "To": "종료",
+  "No modification dates": "수정 날짜 없음",
+  "Size": "크기",
+  "Downloads": "다운로드",
+  "Current local folder": "현재 로컬 폴더",
+  "Source folder": "원본 폴더",
+  "Choose an existing destination folder": "기존 대상 폴더 선택",
+  "SFTP": "SFTP"
 }

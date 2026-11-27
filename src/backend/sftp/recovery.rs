@@ -455,9 +455,10 @@ pub(super) async fn upload(
     local: &Path,
     remote: &str,
     peer: &str,
+    status: Option<(&Events, &str)>,
 ) -> Result<(), String> {
     let records = crate::storage::get_config_dir().join("transfers");
-    upload_with_records(sftp, local, remote, peer, &records).await
+    upload_with_records(sftp, local, remote, peer, &records, status).await
 }
 
 async fn upload_with_records(
@@ -466,11 +467,13 @@ async fn upload_with_records(
     remote: &str,
     peer: &str,
     records: &Path,
+    status: Option<(&Events, &str)>,
 ) -> Result<(), String> {
     let (directory, _) = remote
         .rsplit_once('/')
         .ok_or("Missing remote upload directory")?;
     let directory = if directory.is_empty() { "/" } else { directory };
+    let mut input = open_interactive_source(local).await?;
     let local = std::fs::canonicalize(local).map_err(to_error)?;
     if !crate::storage::ensure_private_config_dir(records) {
         return Err("Unsafe transfer recovery directory".into());
@@ -478,7 +481,6 @@ async fn upload_with_records(
     let name = transfer_name(peer, remote, &local);
     let journal = records.join(format!("{name}.json"));
     let _lock = lock(&records.join(format!("{name}.lock")))?;
-    let mut input = tokio::fs::File::open(&local).await.map_err(to_error)?;
     let size = input.metadata().await.map_err(to_error)?.len();
     let hash = hash_file(&mut input).await?;
     let previous = read::<UploadState>(&journal)?;
@@ -539,20 +541,32 @@ async fn upload_with_records(
         .seek(SeekFrom::Start(state.position))
         .await
         .map_err(to_error)?;
+    let mut meter = UploadMeter::new(
+        status,
+        format!("Uploading {}", file_label(&local)),
+        size,
+        state.position,
+    );
+    let mut buffer = vec![0; 128 * 1024];
     while state.position < size {
-        let mut chunk = (&mut input).take((size - state.position).min(CHECKPOINT_BYTES));
-        let expected = chunk.limit();
-        let written = tokio::io::copy(&mut chunk, &mut output)
-            .await
-            .map_err(to_error)?;
-        if written != expected {
-            return Err("The local file changed during upload".into());
+        let end = state.position.saturating_add(CHECKPOINT_BYTES).min(size);
+        let mut offset = state.position;
+        while offset < end {
+            let limit = (end - offset).min(buffer.len() as u64) as usize;
+            let n = input.read(&mut buffer[..limit]).await.map_err(to_error)?;
+            if n == 0 {
+                return Err("The local file changed during upload".into());
+            }
+            output.write_all(&buffer[..n]).await.map_err(to_error)?;
+            offset += n as u64;
+            meter.report(offset, false).await;
         }
         output.flush().await.map_err(to_error)?;
-        state.position += written;
+        state.position = offset;
         write(&journal, &state)?;
     }
     output.shutdown().await.map_err(to_error)?;
+    meter.report(state.position, true).await;
     if hash_file(&mut input).await? != state.hash {
         return Err(
             "The local file changed during upload. Retry to upload the current version.".into(),

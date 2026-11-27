@@ -50,7 +50,23 @@ pub(crate) enum Dialog {
         entries: Vec<Target>,
         input: String,
     },
-    Download(Vec<Target>),
+    Download {
+        entries: Vec<Target>,
+        folder: String,
+    },
+    NewLocalFolder {
+        directory: std::path::PathBuf,
+        name: String,
+    },
+    NewSftpFolder {
+        id: u32,
+        directory: String,
+        name: String,
+    },
+    TransferConflict {
+        conflict: crate::backend::ConflictPrompt,
+        remember: bool,
+    },
     Key(keys::KeyDialog),
 }
 
@@ -87,7 +103,10 @@ impl Dialog {
                 FileAction::Rename => "Rename",
                 FileAction::Info => "Info",
             },
-            Self::Download(_) => "Select download folder",
+            Self::Download { .. } => "Select download folder",
+            Self::NewLocalFolder { .. } => "New Local Folder",
+            Self::NewSftpFolder { .. } => "New Folder",
+            Self::TransferConflict { .. } => "Destination already exists",
             Self::Key(key) => key.title(),
         }
     }
@@ -145,6 +164,7 @@ impl App {
                         let mut open_security = false;
                         let can_import_sessions = self.can_import_sessions() && draft.on("vault_enabled");
                         draft.show(ui, t, password, existing_vault, |ui, section| match section {
+                            SettingsSection::Update => self.updater.show(ui, t),
                             SettingsSection::Tunnel => {
                                 connect = tunnel.show(ui, t, tunnel_vault_ready, self.tunnel_profile.as_ref(), self.openai_tunnel.as_ref());
                             }
@@ -354,27 +374,97 @@ impl App {
                         entries,
                         input,
                     } => self.file_details(ui, action, entries, input),
-                    Dialog::Download(entries) => {
-                        ui.label(if entries.len() == 1 {
-                            crate::i18n::format(ui, "Save “{name}” to a local folder.", &[("name", &entries[0].entry().name)])
-                        } else {
-                            crate::i18n::format(ui, "Save selected items to a local folder. Count: {count}", &[("count", &entries.len().to_string())])
+                    Dialog::Download { entries, folder } => {
+                        ui.label(crate::i18n::format(ui, "Files selected: {count}", &[("count", &entries.len().to_string())]));
+                        file_selection_preview(ui, entries);
+                        ui.add_space(8.0);
+                        form_field(ui, t, "Destination Folder", folder, "Directory path", false);
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button(crate::i18n::tr(ui,"Browse…")).clicked()
+                                && let Some(path) = rfd::FileDialog::new().set_directory(storage::expand_local_path(folder)).pick_folder() {
+                                *folder = path.to_string_lossy().into_owned();
+                            }
+                            if ui.button(crate::i18n::tr(ui,"Downloads")).clicked() {
+                                *folder = storage::default_download_dir().to_string_lossy().into_owned();
+                            }
+                            if ui.button(crate::i18n::tr(ui,"Current local folder")).clicked() {
+                                *folder = self.explorer.local_folder().to_string_lossy().into_owned();
+                            }
                         });
-                        match footer(ui, t, Some("Cancel"), "Choose Folder", false) {
+                        match footer(ui, t, Some("Cancel"), "Download", false) {
                             Choice::Yes => {
-                                if let Some(folder) = rfd::FileDialog::new()
-                                    .set_directory(storage::default_download_dir())
-                                    .pick_folder()
-                                {
-                                    self.download_targets(entries.clone(), folder);
-                                    true
-                                } else {
+                                let path = storage::expand_local_path(folder.trim());
+                                if folder.trim().is_empty() || !path.is_dir() {
+                                    self.fail("Choose an existing destination folder");
                                     false
+                                } else {
+                                    self.download_targets(entries.clone(), path);
+                                    true
                                 }
                             }
                             Choice::Cancel => true,
                             Choice::None => false,
                         }
+                    }
+                    Dialog::NewLocalFolder { directory, name } => {
+                        ui.label(crate::i18n::tr(ui, "Destination Folder"));
+                        ui.add(egui::Label::new(directory.display().to_string()).wrap());
+                        ui.add_space(8.0);
+                        form_field(ui, t, "Folder name", name, "New Folder", false);
+                        match footer(ui, t, Some("Cancel"), "Create", false) {
+                            Choice::Cancel => true,
+                            Choice::Yes => match self.create_local_folder(directory, name) {
+                                Ok(()) => true,
+                                Err(error) => { self.fail(error); false }
+                            },
+                            Choice::None => false,
+                        }
+                    }
+                    Dialog::NewSftpFolder { id, directory, name } => {
+                        ui.label(crate::i18n::tr(ui, "Destination Folder"));
+                        ui.add(egui::Label::new(directory.as_str()).wrap());
+                        ui.add_space(8.0);
+                        form_field(ui, t, "Folder name", name, "New Folder", false);
+                        match footer(ui, t, Some("Cancel"), "Create", false) {
+                            Choice::Cancel => true,
+                            Choice::Yes => match self.create_sftp_folder(*id, directory, name) {
+                                Ok(()) => true,
+                                Err(error) => { self.fail(error); false }
+                            },
+                            Choice::None => false,
+                        }
+                    }
+                    Dialog::TransferConflict { conflict, remember } => {
+                        use crate::backend::ConflictChoice;
+                        if conflict.is_closed() { return true; }
+                        ui.label(crate::i18n::tr(ui, "A file or folder with this name already exists at the destination."));
+                        ui.add_space(8.0);
+                        ui.label(crate::i18n::tr(ui, "Source"));
+                        ui.add(egui::Label::new(&conflict.source).wrap());
+                        ui.label(crate::i18n::tr(ui, "Destination"));
+                        ui.add(egui::Label::new(&conflict.destination).wrap());
+                        ui.add_space(12.0);
+                        if !conflict.can_replace {
+                            ui.label(crate::i18n::tr(ui, "Only regular files can be replaced. Keep both or skip."));
+                        }
+                        ui.checkbox(remember, crate::i18n::tr(ui, "Always use this action for the current transfer batch"));
+                        ui.add_space(12.0);
+                        let mut selected = None;
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.add_enabled(conflict.can_replace, egui::Button::new(crate::i18n::tr(ui, "Replace"))).clicked() {
+                                selected = Some(ConflictChoice::Replace);
+                            }
+                            if ui.button(crate::i18n::tr(ui, "Keep both")).clicked() {
+                                selected = Some(ConflictChoice::KeepBoth);
+                            }
+                            if ui.button(crate::i18n::tr(ui, "Skip")).clicked() {
+                                selected = Some(ConflictChoice::Skip);
+                            }
+                        });
+                        if let Some(choice) = selected {
+                            conflict.decide(choice, *remember);
+                            true
+                        } else { false }
                     }
                     Dialog::Key(dialog) => self.key_dialog(ui, dialog),
                 }
@@ -414,6 +504,10 @@ impl App {
         let mut affirmative = "OK";
         let mut cancel = Some("Cancel");
         let mut danger = false;
+        if !matches!(action, FileAction::Info) {
+            file_selection_preview(ui, entries);
+            ui.add_space(8.0);
+        }
         match action {
             FileAction::Info => {
                 if let Some(target) = entries.first() {
@@ -459,6 +553,38 @@ impl App {
                         .pick_folder()
                 {
                     *input = path.to_string_lossy().into_owned();
+                }
+                if let Some(Target::Remote { id, path, .. }) = entries.first() {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button(crate::i18n::tr(ui, "Parent Folder")).clicked()
+                            && let Some((parent, _)) = input.trim_end_matches('/').rsplit_once('/')
+                        {
+                            *input = if parent.is_empty() {
+                                "/".into()
+                            } else {
+                                parent.into()
+                            };
+                        }
+                        if ui.button(crate::i18n::tr(ui, "Source folder")).clicked() {
+                            *input = path
+                                .rsplit_once('/')
+                                .map_or(
+                                    "/",
+                                    |(parent, _)| if parent.is_empty() { "/" } else { parent },
+                                )
+                                .to_owned();
+                        }
+                    });
+                    let folders = self.remote_folder_suggestions(*id, input);
+                    egui::ScrollArea::vertical()
+                        .max_height(100.0)
+                        .show(ui, |ui| {
+                            for name in folders {
+                                if ui.selectable_label(false, &name).clicked() {
+                                    *input = crate::backend::join_remote(input, &name);
+                                }
+                            }
+                        });
                 }
                 affirmative = "Move";
             }
@@ -741,4 +867,17 @@ fn about(ui: &mut egui::Ui, t: Theme) -> bool {
         );
     });
     footer(ui, t, None, "Close", false) == Choice::Yes
+}
+
+fn file_selection_preview(ui: &mut egui::Ui, entries: &[Target]) {
+    egui::ScrollArea::vertical()
+        .max_height(90.0)
+        .show(ui, |ui| {
+            for target in entries {
+                let name = crate::agent_upload::literal_text(target.entry().name.as_bytes());
+                let path = crate::agent_upload::literal_text(target.path().as_bytes());
+                ui.add(egui::Label::new(RichText::new(name).strong()).truncate())
+                    .on_hover_text(path);
+            }
+        });
 }

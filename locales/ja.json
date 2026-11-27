@@ -323,5 +323,20 @@
   "Split Right": "右に分割",
   "Split Right (New Terminal)": "右に分割（新規 terminal）",
   "Free Type Mode": "自由入力モード",
-  "Use the mouse to edit echoed shell commands": "マウスで表示されたシェルコマンドを編集する"
+  "Use the mouse to edit echoed shell commands": "マウスで表示されたシェルコマンドを編集する",
+  "File Manager": "ファイルマネージャー",
+  "Restore Filer": "ファイル欄を戻す",
+  "Expand Filer": "ファイル欄を拡大",
+  "Local files": "ローカルファイル",
+  "Upload Folder": "フォルダーをアップロード",
+  "Filter by modified date": "更新日で絞り込む",
+  "From": "開始",
+  "To": "終了",
+  "No modification dates": "更新日なし",
+  "Size": "サイズ",
+  "Downloads": "ダウンロード",
+  "Current local folder": "現在のローカルフォルダー",
+  "Source folder": "元のフォルダー",
+  "Choose an existing destination folder": "既存の保存先フォルダーを選択",
+  "SFTP": "SFTP"
 }

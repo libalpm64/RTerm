@@ -38,16 +38,37 @@ pub(crate) fn elapsed_label(elapsed: Duration) -> String {
 pub(crate) enum Kind {
     Local,
     Ssh,
+    Sftp,
     Telnet,
     Serial,
 }
 
 impl Kind {
-    pub(crate) const ALL: [Self; 4] = [Self::Local, Self::Ssh, Self::Telnet, Self::Serial];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Local,
+        Self::Ssh,
+        Self::Sftp,
+        Self::Telnet,
+        Self::Serial,
+    ];
+    pub(crate) fn is_ssh(self) -> bool {
+        matches!(self, Self::Ssh | Self::Sftp)
+    }
+    pub(crate) fn icon(self, t: crate::theme::Theme) -> (crate::theme::Icon, Color32) {
+        use crate::theme::Icon;
+        match self {
+            Self::Local => (Icon::Terminal, t.green),
+            Self::Ssh => (Icon::Server, t.blue),
+            Self::Sftp => (Icon::Folder, t.yellow),
+            Self::Telnet => (Icon::Network, t.purple),
+            Self::Serial => (Icon::Plug, Color32::from_rgb(230, 137, 78)),
+        }
+    }
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Local => "Local",
             Self::Ssh => "SSH",
+            Self::Sftp => "SFTP",
             Self::Telnet => "Telnet",
             Self::Serial => "Serial",
         }
@@ -193,6 +214,7 @@ pub(crate) struct Terminal {
     pub(crate) kind: Kind,
     pub(crate) endpoint: Option<u32>,
     pub(crate) closed: bool,
+    pub(crate) sftp_ready: bool,
     local: Option<LocalPty>,
     startup: Option<LocalStartup>,
     queued_local: Option<(String, bool)>,
@@ -242,6 +264,7 @@ impl Terminal {
             kind,
             endpoint: None,
             closed: false,
+            sftp_ready: false,
             local: None,
             startup: None,
             queued_local: None,
@@ -304,6 +327,7 @@ impl Terminal {
             && (self.startup.is_some()
                 || self.queued_local.is_some()
                 || (self.kind == Kind::Ssh && self.ssh_size.is_none())
+                || (self.kind == Kind::Sftp && !self.sftp_ready)
                 || (self.kind != Kind::Local && self.endpoint.is_none()))
     }
 
@@ -395,6 +419,7 @@ impl Terminal {
         }
         self.finish_shell_command(None);
         self.closed = true;
+        self.sftp_ready = false;
         self.free_type = Default::default();
         self.mouse = Default::default();
         self.ssh_size = None;
@@ -507,6 +532,9 @@ impl Terminal {
         data: Vec<u8>,
         automatic: bool,
     ) -> Result<(), &'static str> {
+        if self.kind == Kind::Sftp {
+            return Err("SFTP-only session has no shell");
+        }
         if self.closed {
             return Err("The terminal session is closed");
         }
