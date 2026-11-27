@@ -89,14 +89,13 @@ impl ShellJob {
         })
     }
 
-    fn capture(&mut self, bytes: &[u8]) {
+    fn capture(preview: &mut Vec<u8>, truncated: &mut bool, result_reply: &Reply, bytes: &[u8]) {
         let count = bytes
             .len()
-            .min(agent::MAX_OUTPUT.saturating_sub(self.preview.len()));
-        self.preview.extend_from_slice(&bytes[..count]);
-        self.truncated |= count < bytes.len();
-        self.result_reply
-            .capture_output(agent::OutputStream::Combined, bytes);
+            .min(agent::MAX_OUTPUT.saturating_sub(preview.len()));
+        preview.extend_from_slice(&bytes[..count]);
+        *truncated |= count < bytes.len();
+        result_reply.capture_output(agent::OutputStream::Combined, bytes);
     }
 
     // Return a result only after the actual interactive shell emits the
@@ -122,8 +121,12 @@ impl ShellJob {
                         !s.is_empty() && s.len() <= 3 && s.bytes().all(|b| b.is_ascii_digit())
                     })
                     .and_then(|s| s.parse::<u8>().ok());
-                let prefix = self.pending[..pos].to_vec();
-                self.capture(&prefix);
+                Self::capture(
+                    &mut self.preview,
+                    &mut self.truncated,
+                    &self.result_reply,
+                    &self.pending[..pos],
+                );
                 return Some(match code {
                     Some(code) => self.value(Some(code), None),
                     None => self.value(
@@ -138,12 +141,23 @@ impl ShellJob {
                     Some("Invalid shell completion marker; outcome uncertain"),
                 ));
             }
-            let prefix: Vec<_> = self.pending.drain(..pos).collect();
-            self.capture(&prefix);
+            Self::capture(
+                &mut self.preview,
+                &mut self.truncated,
+                &self.result_reply,
+                &self.pending[..pos],
+            );
+            self.pending.drain(..pos);
         } else {
             let keep = suffix(&self.pending, &self.end);
-            let prefix: Vec<_> = self.pending.drain(..self.pending.len() - keep).collect();
-            self.capture(&prefix);
+            let prefix_len = self.pending.len() - keep;
+            Self::capture(
+                &mut self.preview,
+                &mut self.truncated,
+                &self.result_reply,
+                &self.pending[..prefix_len],
+            );
+            self.pending.drain(..prefix_len);
         }
         None
     }

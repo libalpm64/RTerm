@@ -1224,6 +1224,7 @@ impl Terminal {
         let mut row_text = String::new();
         let mut offsets = Vec::new();
         let mut highlights = Vec::new();
+        let mut highlight_colors = Vec::new();
         let mut run = AsciiRun::default();
         for indexed in content.display_iter {
             if inspect_text && line != Some(indexed.point.line) {
@@ -1237,11 +1238,14 @@ impl Terminal {
                     row_text.push(cell.c);
                 }
                 let text = row_text.trim_end();
-                highlights = if text.is_empty() {
-                    Vec::new()
-                } else {
-                    highlighter.ranges(text)
-                };
+                highlighter.ranges_into(text, &mut highlights);
+                highlight_colors.clear();
+                highlight_colors.resize(self.size.cols as usize, None);
+                for (range, color) in &highlights {
+                    let start = offsets.partition_point(|offset| *offset < range.start);
+                    let end = offsets.partition_point(|offset| *offset < range.end);
+                    highlight_colors[start..end].fill(Some(*color));
+                }
             }
             let Some(position) = point_to_viewport(content.display_offset, indexed.point) else {
                 continue;
@@ -1261,10 +1265,7 @@ impl Terminal {
                 default_bg,
             );
             if indexed.fg == Color::Named(NamedColor::Foreground)
-                && let Some((_, color)) = highlights
-                    .iter()
-                    .rev()
-                    .find(|(range, _)| range.contains(&offsets[indexed.point.column.0]))
+                && let Some(Some(color)) = highlight_colors.get(indexed.point.column.0)
             {
                 foreground = *color;
             }

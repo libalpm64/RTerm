@@ -106,7 +106,14 @@ impl Running {
     ) -> Result<Self, String> {
         profile.validate()?;
         let client = find_client(&profile.client)?;
-        let work = tempfile::tempdir().map_err(|_| "Could not create tunnel runtime directory")?;
+        let temp_root = crate::storage::private_temp_dir()?;
+        let work = tempfile::Builder::new()
+            .prefix("rterm-tunnel-")
+            .tempdir_in(temp_root)
+            .map_err(|_| "Could not create tunnel runtime directory")?;
+        if !crate::storage::ensure_private_config_dir(work.path()) {
+            return Err("Unsafe tunnel runtime directory".into());
+        }
         let config = work.path().join("tunnel.yaml");
         std::fs::write(&config, b"config_version: 1\n")
             .map_err(|_| "Could not prepare the tunnel client configuration")?;
@@ -225,18 +232,89 @@ fn resolve_client(
 }
 
 fn client_executable(path: &Path) -> bool {
-    let Ok(metadata) = path.metadata() else {
+    if !path.is_absolute() {
+        return false;
+    }
+    let Ok(link_metadata) = std::fs::symlink_metadata(path) else {
         return false;
     };
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+        use std::os::unix::fs::MetadataExt;
+        let uid = unsafe { libc::geteuid() };
+        if link_metadata.file_type().is_symlink()
+            && link_metadata.uid() != uid
+            && link_metadata.uid() != 0
+        {
+            return false;
+        }
+        let Some(parent) = path.parent() else {
+            return false;
+        };
+        if !crate::storage::unix_directory_is_private(parent) {
+            return false;
+        }
+        let Ok(real) = std::fs::canonicalize(path) else {
+            return false;
+        };
+        let Some(parent) = real.parent() else {
+            return false;
+        };
+        if !crate::storage::unix_directory_is_private(parent) {
+            return false;
+        }
+        std::fs::metadata(real).is_ok_and(|metadata| {
+            metadata.is_file()
+                && (metadata.uid() == uid || metadata.uid() == 0)
+                && metadata.mode() & 0o022 == 0
+                && metadata.mode() & 0o111 != 0
+        })
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        metadata.is_file()
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        if link_metadata.file_attributes() & 0x400 != 0
+            || !path
+                .parent()
+                .is_some_and(crate::storage::windows_directory_is_not_shared_writable)
+        {
+            return false;
+        }
+        let Ok(real) = std::fs::canonicalize(path) else {
+            return false;
+        };
+        let Some(parent) = real.parent() else {
+            return false;
+        };
+        if !crate::storage::windows_directory_is_not_shared_writable(parent) {
+            return false;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).custom_flags(0x00200000);
+        options.open(real).is_ok_and(|file| {
+            file.metadata().is_ok_and(|metadata| {
+                metadata.is_file()
+                    && metadata.file_attributes() & 0x400 == 0
+                    && crate::storage::windows_file_is_not_shared_writable(&file)
+            })
+        })
     }
+    #[cfg(not(any(unix, windows)))]
+    {
+        link_metadata.is_file()
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn find_trusted_executable(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join(name))
+        .find_map(|path| {
+            client_executable(&path)
+                .then(|| std::fs::canonicalize(path).ok())
+                .flatten()
+        })
 }
 
 fn client_command(
@@ -407,7 +485,7 @@ mod client_tests {
 
     #[test]
     fn automatic_client_uses_installed_copy_even_with_stale_saved_path() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::storage::test_private_tempdir();
         let root = temp.path();
         let name = if cfg!(windows) {
             "tunnel-client.exe"
@@ -433,5 +511,19 @@ mod client_tests {
         std::fs::remove_file(&bundled).unwrap();
         assert_eq!(resolve(Path::new("")).unwrap(), external);
         assert!(resolve(&root.join("removed-client")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_executables_in_shared_writable_path_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = crate::storage::test_private_tempdir();
+        let shared = temp.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let candidate = shared.join("tunnel-client");
+        executable(&candidate);
+        assert!(!client_executable(&candidate));
     }
 }

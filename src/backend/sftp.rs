@@ -9,6 +9,9 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
+const MAX_DIRECTORY_ENTRIES: usize = 100_000;
+const MAX_ENTRY_NAME_BYTES: usize = 4096;
+
 use russh::client::Handle;
 use russh_sftp::client::SftpSession;
 use tokio::{
@@ -167,21 +170,31 @@ impl SessionService {
         match action {
             RemoteAction::List(path) => {
                 let (path, files) = list_directory(&sftp, &path).await?;
-                let entries = files
-                    .map(|file| Entry {
-                        name: file.file_name(),
+                let mut entries = Vec::new();
+                for file in files {
+                    if entries.len() == MAX_DIRECTORY_ENTRIES {
+                        return Err(format!(
+                            "Remote directory exceeds {MAX_DIRECTORY_ENTRIES} entries"
+                        ));
+                    }
+                    let name = file.file_name();
+                    if name.len() > MAX_ENTRY_NAME_BYTES {
+                        return Err("Remote filename exceeds 4096 bytes".into());
+                    }
+                    let metadata = file.metadata();
+                    entries.push(Entry {
+                        name,
                         directory: file.file_type().is_dir(),
-                        size: file.metadata().len(),
-                        permissions: file.metadata().permissions.map(|mode| mode & 0o777),
-                        modified: file
-                            .metadata()
+                        size: metadata.len(),
+                        permissions: metadata.permissions.map(|mode| mode & 0o777),
+                        modified: metadata
                             .mtime
                             .and_then(|seconds| {
                                 chrono::DateTime::from_timestamp(i64::from(seconds), 0)
                             })
                             .map(|time| time.with_timezone(&chrono::Local)),
-                    })
-                    .collect();
+                    });
+                }
                 Ok(Reply::Files { path, entries })
             }
             RemoteAction::Rename { from, to } => {
@@ -358,6 +371,7 @@ pub(super) async fn agent_upload(
     remote: &str,
     permit: crate::agent::Permit,
     display: &super::AgentDisplay,
+    approved: crate::agent_upload::ManifestSummary,
 ) -> Result<u64, String> {
     use crate::agent_upload::validate_paths;
     validate_paths(local, remote)?;
@@ -365,9 +379,14 @@ pub(super) async fn agent_upload(
         return Err("Upload authorization expired or revoked".into());
     }
     let transfer = async {
-        display.lock().unwrap().output =
-            b"Inspecting source and calculating transfer size...".to_vec();
-        let (entries, total) = plan_agent_upload(local, remote, &permit).await?;
+        display.lock().unwrap().output = b"Rechecking the approved upload manifest...".to_vec();
+        let (entries, summary) = plan_agent_upload(local, remote, &permit).await?;
+        if summary != approved {
+            return Err(
+                "Upload source changed after approval; inspect and approve the new manifest".into(),
+            );
+        }
+        let total = summary.total_bytes;
         display.lock().unwrap().progress = Some((0, total));
         if !permit.valid() {
             return Err("Upload authorization expired or revoked".into());
@@ -377,9 +396,11 @@ pub(super) async fn agent_upload(
             .request_subsystem(true, "sftp")
             .await
             .map_err(to_error)?;
-        let sftp = SftpSession::new(channel.into_stream())
-            .await
-            .map_err(to_error)?;
+        let sftp = Arc::new(
+            SftpSession::new(channel.into_stream())
+                .await
+                .map_err(to_error)?,
+        );
         let result = async {
             let mut sent = 0u64;
             for entry in entries {
@@ -394,7 +415,7 @@ pub(super) async fn agent_upload(
                         return Err("Source file size changed since inspection".into());
                     }
                     let count = upload_agent_file(
-                        &sftp,
+                        sftp.clone(),
                         &mut input,
                         size,
                         &entry.remote,
@@ -426,8 +447,14 @@ pub(super) async fn agent_upload(
             Ok(sent)
         }
         .await;
-        let _ = sftp.close().await;
-        result.map_err(|e: String| format!("{e}; destination may contain partial results"))
+        if result.is_ok() {
+            let _ = sftp.close().await;
+        }
+        result.map_err(|e: String| {
+            format!(
+                "{e}; completed files and newly created directories may remain, while incomplete file data is kept under hidden staging names"
+            )
+        })
     };
     tokio::pin!(transfer);
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -435,11 +462,21 @@ pub(super) async fn agent_upload(
         tokio::select! {
             biased;
             _ = tick.tick() => if !permit.valid() {
-                return Err("Upload timed out or access was revoked; remote file may be incomplete".into());
+                return Err("Upload timed out or access was revoked; hidden staging files or newly created directories may remain, but incomplete file data is not published under final filenames".into());
             },
             result = &mut transfer => return result,
         }
     }
+}
+
+pub(super) async fn inspect_agent_upload(
+    local: &str,
+    remote: &str,
+    permit: &crate::agent::Permit,
+) -> Result<crate::agent_upload::ManifestSummary, String> {
+    crate::agent_upload::validate_paths(local, remote)?;
+    let (_, summary) = plan_agent_upload(local, remote, permit).await?;
+    Ok(summary)
 }
 
 struct AgentUploadEntry {
@@ -453,7 +490,7 @@ async fn plan_agent_upload(
     local: &str,
     remote: &str,
     permit: &crate::agent::Permit,
-) -> Result<(Vec<AgentUploadEntry>, u64), String> {
+) -> Result<(Vec<AgentUploadEntry>, crate::agent_upload::ManifestSummary), String> {
     // Bound manifest memory independently of the amount of file data.
     const MAX_ENTRIES: usize = 100_000;
     const MAX_PATH_BYTES: usize = 32 * 1024 * 1024;
@@ -507,7 +544,33 @@ async fn plan_agent_upload(
             size,
         });
     }
-    Ok((entries, total))
+    entries.sort_by(|left, right| left.remote.cmp(&right.remote));
+    let mut fingerprint = blake3::Hasher::new();
+    let mut file_count = 0;
+    let mut directory_count = 0;
+    for entry in &entries {
+        fingerprint.update(&(entry.local.len() as u64).to_le_bytes());
+        fingerprint.update(entry.local.as_bytes());
+        fingerprint.update(&(entry.remote.len() as u64).to_le_bytes());
+        fingerprint.update(entry.remote.as_bytes());
+        if let Some(size) = entry.size {
+            file_count += 1;
+            fingerprint.update(&[1]);
+            fingerprint.update(&size.to_le_bytes());
+        } else {
+            directory_count += 1;
+            fingerprint.update(&[0]);
+        }
+    }
+    Ok((
+        entries,
+        crate::agent_upload::ManifestSummary {
+            file_count,
+            directory_count,
+            total_bytes: total,
+            fingerprint: *fingerprint.finalize().as_bytes(),
+        },
+    ))
 }
 
 async fn checked_agent_metadata(local: &str) -> Result<std::fs::Metadata, String> {
@@ -529,7 +592,22 @@ async fn checked_agent_metadata(local: &str) -> Result<std::fs::Metadata, String
             }
         }
     }
-    tokio::fs::symlink_metadata(&path).await.map_err(to_error)
+    let metadata = tokio::fs::symlink_metadata(&path).await.map_err(to_error)?;
+    let protected_directory = if metadata.is_dir() {
+        path.as_path()
+    } else {
+        path.parent()
+            .ok_or("Upload source has no parent directory")?
+    };
+    #[cfg(unix)]
+    if !crate::storage::unix_directory_is_private(protected_directory) {
+        return Err("Upload source directory can be replaced by another user".into());
+    }
+    #[cfg(windows)]
+    if !crate::storage::windows_directory_is_not_shared_writable(protected_directory) {
+        return Err("Upload source directory can be replaced by another Windows account".into());
+    }
+    Ok(metadata)
 }
 
 async fn open_agent_source(local: &str) -> Result<tokio::fs::File, String> {
@@ -557,11 +635,26 @@ async fn open_agent_source(local: &str) -> Result<tokio::fs::File, String> {
         if !metadata.is_file() {
             return Err("Upload source must be a regular file".into());
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let uid = unsafe { libc::geteuid() };
+            if (metadata.uid() != uid && metadata.uid() != 0)
+                || metadata.mode() & 0o022 != 0
+                || metadata.nlink() != 1
+            {
+                return Err(
+                    "Upload source file is writable by another user or has multiple links".into(),
+                );
+            }
+        }
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
-            if metadata.file_attributes() & 0x400 != 0 {
-                return Err("Upload source must not use reparse points".into());
+            if metadata.file_attributes() & 0x400 != 0
+                || !crate::storage::windows_file_is_not_shared_writable(&file)
+            {
+                return Err("Upload source file is not a private regular file".into());
             }
         }
         Ok(file)
@@ -574,7 +667,7 @@ async fn open_agent_source(local: &str) -> Result<tokio::fs::File, String> {
 // Explicit transfer inputs and authorization/progress context.
 #[allow(clippy::too_many_arguments)]
 async fn upload_agent_file(
-    sftp: &SftpSession,
+    sftp: Arc<SftpSession>,
     input: &mut tokio::fs::File,
     size: u64,
     remote: &str,
@@ -587,20 +680,20 @@ async fn upload_agent_file(
     if !permit.valid() {
         return Err("Upload authorization expired or revoked".into());
     }
-    // EXCLUDE is the protocol-level no-overwrite guarantee, not a
-    // racy check for existence followed by a truncating open.
+    let staging = remote_staging_path(remote);
+    // EXCLUDE prevents a random-name collision from opening an existing file.
+    // The final path is published only after the complete staging file closes.
     let mut output = sftp
         .open_with_flags(
-            remote,
+            &staging,
             OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE,
         )
         .await
-        .map_err(|e| {
-            format!("Cannot create destination (existing files are not overwritten): {e}")
-        })?;
+        .map_err(|e| format!("Cannot create remote staging file: {e}"))?;
+    let mut stage = RemoteUploadStage::new(sftp.clone(), staging);
     let mut sent = 0;
     let mut buffer = vec![0; 32 * 1024];
-    let result = async {
+    let result: Result<u64, String> = async {
         while sent < size {
             if !permit.valid() {
                 return Err("Upload authorization expired or revoked".into());
@@ -621,7 +714,98 @@ async fn upload_agent_file(
         Ok(sent)
     }
     .await;
-    result.map_err(|e: String| format!("{e}; remote file may be incomplete"))
+    drop(output);
+    match result {
+        Ok(count) if permit.valid() => {
+            match sftp.rename(stage.path.clone(), remote.to_owned()).await {
+                Ok(()) => {
+                    stage.finished = true;
+                    Ok(count)
+                }
+                Err(error) => {
+                    let removed = stage.remove().await;
+                    Err(if removed {
+                        format!(
+                            "Cannot publish completed upload to {remote} (the destination may already exist): {error}"
+                        )
+                    } else {
+                        format!(
+                            "Cannot publish completed upload to {remote}: {error}; staging file may remain at {}",
+                            stage.path
+                        )
+                    })
+                }
+            }
+        }
+        Ok(_) => {
+            let removed = stage.remove().await;
+            Err(if removed {
+                "Upload authorization expired or revoked; incomplete staging data was discarded"
+                    .into()
+            } else {
+                format!(
+                    "Upload authorization expired or revoked; staging file may remain at {}",
+                    stage.path
+                )
+            })
+        }
+        Err(error) => {
+            let removed = stage.remove().await;
+            Err(if removed {
+                format!("{error}; incomplete staging data was discarded")
+            } else {
+                format!("{error}; staging file may remain at {}", stage.path)
+            })
+        }
+    }
+}
+
+fn remote_staging_path(remote: &str) -> String {
+    let parent = remote.rsplit_once('/').map_or("", |(parent, _)| parent);
+    join_remote(
+        parent,
+        &format!(".rterm-upload-{}.part", crate::agent::random_id()),
+    )
+}
+
+struct RemoteUploadStage {
+    sftp: Arc<SftpSession>,
+    path: String,
+    finished: bool,
+}
+
+impl RemoteUploadStage {
+    fn new(sftp: Arc<SftpSession>, path: String) -> Self {
+        Self {
+            sftp,
+            path,
+            finished: false,
+        }
+    }
+
+    async fn remove(&mut self) -> bool {
+        match self.sftp.remove_file(self.path.clone()).await {
+            Ok(()) => {
+                self.finished = true;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+impl Drop for RemoteUploadStage {
+    fn drop(&mut self) {
+        if !self.finished
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            let sftp = self.sftp.clone();
+            let path = self.path.clone();
+            runtime.spawn(async move {
+                let _ = sftp.remove_file(path).await;
+            });
+        }
+    }
 }
 
 async fn download_directory(
@@ -631,8 +815,29 @@ async fn download_directory(
     options: DownloadOptions,
 ) -> Result<(), String> {
     let parent = local.parent().ok_or("Missing download directory")?;
+    #[cfg(unix)]
+    if !crate::storage::unix_directory_is_private(parent) {
+        return Err(
+            "Download directory is not protected against replacement by another user".into(),
+        );
+    }
+    #[cfg(windows)]
+    if !crate::storage::windows_directory_is_not_shared_writable(parent) {
+        return Err("Download directory is writable by another Windows account".into());
+    }
     tokio::fs::create_dir_all(parent).await.map_err(to_error)?;
+    #[cfg(unix)]
+    if !crate::storage::unix_directory_is_private(parent) {
+        return Err(
+            "Download directory is not protected against replacement by another user".into(),
+        );
+    }
+    #[cfg(windows)]
+    if !crate::storage::windows_directory_is_not_shared_writable(parent) {
+        return Err("Download directory is writable by another Windows account".into());
+    }
     let mut folders = vec![(remote, local)];
+    let mut entry_count = 0;
     while let Some((remote, local)) = folders.pop() {
         // Never merge a server-controlled directory tree into existing local
         // files, symlinks, or junctions. Each directory must be newly created.
@@ -642,8 +847,25 @@ async fn download_directory(
                 local.display()
             )
         })?;
+        #[cfg(unix)]
+        if !crate::storage::unix_directory_is_private(&local) {
+            return Err("Created download directory is writable by another user".into());
+        }
+        #[cfg(windows)]
+        if !crate::storage::windows_directory_is_not_shared_writable(&local) {
+            return Err("Created download directory is writable by another Windows account".into());
+        }
         for entry in sftp.read_dir(&remote).await.map_err(to_error)? {
+            entry_count += 1;
+            if entry_count > MAX_DIRECTORY_ENTRIES {
+                return Err(format!(
+                    "Remote directory tree exceeds {MAX_DIRECTORY_ENTRIES} entries"
+                ));
+            }
             let name = entry.file_name();
+            if name.len() > MAX_ENTRY_NAME_BYTES {
+                return Err("Remote filename exceeds 4096 bytes".into());
+            }
             if matches!(name.as_str(), "." | "..") {
                 continue;
             }
@@ -675,8 +897,9 @@ pub(crate) fn join_remote(directory: &str, name: &str) -> String {
 pub(crate) fn safe_name(name: &str) -> Result<&str, String> {
     let mut parts = Path::new(name).components();
     if name.is_empty()
+        || name.len() > MAX_ENTRY_NAME_BYTES
         || name.contains(['/', '\\'])
-        || name.chars().any(char::is_control)
+        || crate::agent_upload::has_unsafe_text(name)
         || (cfg!(windows) && crate::agent_upload::invalid_windows_name(name))
         || !matches!(parts.next(), Some(Component::Normal(_)))
         || parts.next().is_some()
@@ -700,6 +923,35 @@ async fn download_file(
     tokio::fs::create_dir_all(directory)
         .await
         .map_err(to_error)?;
+    // Validate the user-selected path before resolving it. Canonicalizing
+    // first would discard a hostile symlink/junction ancestor from the checks.
+    #[cfg(windows)]
+    if !crate::storage::windows_directory_is_not_shared_writable(directory) {
+        return Err("Download directory is writable by another Windows account".into());
+    }
+    #[cfg(unix)]
+    if !crate::storage::unix_directory_is_private(directory) {
+        return Err(
+            "Download directory is not protected against replacement by another user".into(),
+        );
+    }
+    // Resolve directory aliases once and use the resulting destination for
+    // staging and publication. Reusing the caller's path after a long transfer
+    // would let a retargeted symlink/junction redirect the final rename.
+    let directory = std::fs::canonicalize(directory).map_err(to_error)?;
+    let local = directory.join(local.file_name().ok_or("Missing download name")?);
+    #[cfg(windows)]
+    if !crate::storage::windows_directory_is_not_shared_writable(
+        local.parent().ok_or("Missing download directory")?,
+    ) {
+        return Err("Download directory is writable by another Windows account".into());
+    }
+    #[cfg(unix)]
+    if !crate::storage::unix_directory_is_private(&directory) {
+        return Err(
+            "Download directory is not protected against replacement by another user".into(),
+        );
+    }
 
     // Each worker owns a file handle and writes a disjoint range. Publish the
     // temporary file only after all ranges complete to avoid exposing partial downloads.
@@ -710,7 +962,7 @@ async fn download_file(
     };
     let (resumable, temporary, staging, work) = if let Some(peer) = resume {
         let (download, ranges, offsets) =
-            recovery::Download::open(&sftp, remote, local, peer, count, size).await?;
+            recovery::Download::open(&sftp, remote, &local, peer, count, size).await?;
         let work = ranges
             .into_iter()
             .zip(offsets)
@@ -719,7 +971,11 @@ async fn download_file(
         let path = download.part.clone();
         (Some(Arc::new(download)), None, path, work)
     } else {
-        let file = tempfile::NamedTempFile::new_in(directory).map_err(to_error)?;
+        let file = tempfile::NamedTempFile::new_in(&directory).map_err(to_error)?;
+        #[cfg(windows)]
+        if !crate::storage::windows_file_is_not_shared_writable(file.as_file()) {
+            return Err("Download staging file is writable by another Windows account".into());
+        }
         file.as_file().set_len(size).map_err(to_error)?;
         let range_size = size.div_ceil(count);
         let work = (0..count)
@@ -775,7 +1031,7 @@ async fn download_file(
                 let percent = done as f32 * 100.0 / size.max(1) as f32;
                 let speed = (done - resumed) as f64 / started.elapsed().as_secs_f64().max(0.1);
                 let mib = 1024.0 * 1024.0;
-                let text = format!("{}: {:.1} MB / {:.1} MB @ {:.1} MB/s", file_label(local), done as f64 / mib, size as f64 / mib, speed / mib);
+                let text = format!("{}: {:.1} MB / {:.1} MB @ {:.1} MB/s", file_label(&local), done as f64 / mib, size as f64 / mib, speed / mib);
                 progress(events, id, text, percent, false, false).await;
             }
         }
@@ -788,18 +1044,24 @@ async fn download_file(
         if let Some(seconds) = metadata.atime {
             times = times.set_accessed(UNIX_EPOCH + Duration::from_secs(seconds.into()));
         }
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&staging)
-            .map_err(to_error)?
-            .set_times(times)
-            .map_err(to_error)?;
+        if let Some(download) = &resumable {
+            download.set_times(times)?;
+        } else if let Some(temporary) = &temporary {
+            temporary.as_file().set_times(times).map_err(to_error)?;
+        }
     }
     if let Some(download) = resumable {
-        download.publish(&sftp, remote, local).await?;
+        download.publish(&sftp, remote).await?;
     } else if let Some(mut temporary) = temporary {
         temporary.flush().map_err(to_error)?;
-        temporary.persist(local).map_err(to_error)?;
+        temporary.persist_noclobber(&local).map_err(|error| {
+            if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+                "Download destination already exists; choose another folder or remove it first"
+                    .into()
+            } else {
+                to_error(error.error)
+            }
+        })?;
     }
     Ok(())
 }
@@ -818,11 +1080,13 @@ struct RangeCopy {
 impl RangeCopy {
     async fn run(self) -> Result<(), String> {
         let mut input = self.sftp.open(&self.remote).await.map_err(to_error)?;
-        let mut output = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(&self.staging)
-            .await
-            .map_err(to_error)?;
+        let mut output = tokio::fs::File::from_std(recovery::open_staging(
+            &self.staging,
+            false,
+            true,
+            false,
+            false,
+        )?);
         if self.start > 0 {
             input
                 .seek(SeekFrom::Start(self.start))
@@ -972,6 +1236,8 @@ mod listing_tests {
             "dir\\file",
             "a\0b",
             "a\nb",
+            "report\u{202e}gpj.exe",
+            "file\u{2066}name.txt",
         ] {
             assert!(safe_name(name).is_err(), "{name:?}");
         }
@@ -1036,5 +1302,70 @@ mod listing_tests {
             overlapped[2].as_secs_f64() * 1000.0
         );
         session.close().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod agent_upload_source_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn upload_sources_reject_shared_writable_paths_and_files() {
+        let temp = crate::storage::test_private_tempdir();
+        let source = temp.path().join("source.txt");
+        std::fs::write(&source, b"approved source").unwrap();
+        let mut input = open_agent_source(source.to_str().unwrap()).await.unwrap();
+        let mut contents = Vec::new();
+        input.read_to_end(&mut contents).await.unwrap();
+        assert_eq!(contents, b"approved source");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o666)).unwrap();
+            assert!(open_agent_source(source.to_str().unwrap()).await.is_err());
+
+            let shared = temp.path().join("shared");
+            std::fs::create_dir(&shared).unwrap();
+            std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let shared_source = shared.join("source.txt");
+            std::fs::write(&shared_source, b"untrusted source").unwrap();
+            assert!(
+                checked_agent_metadata(shared_source.to_str().unwrap())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_manifest_reports_file_count_and_total_and_detects_size_changes() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+
+        let temp = crate::storage::test_private_tempdir();
+        let root = temp.path().join("folder");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(root.join("one.txt"), b"one").unwrap();
+        std::fs::write(nested.join("two.txt"), b"four").unwrap();
+        let active = Arc::new(AtomicBool::new(true));
+        let permit = crate::agent::Permit {
+            bridge: active.clone(),
+            request: active,
+            deadline: Instant::now() + Duration::from_secs(60),
+        };
+        let summary = inspect_agent_upload(root.to_str().unwrap(), "/upload", &permit)
+            .await
+            .unwrap();
+        assert_eq!(summary.file_count, 2);
+        assert_eq!(summary.directory_count, 2);
+        assert_eq!(summary.total_bytes, 7);
+
+        std::fs::write(nested.join("two.txt"), b"changed-size").unwrap();
+        let (_, changed) = plan_agent_upload(root.to_str().unwrap(), "/upload", &permit)
+            .await
+            .unwrap();
+        assert_ne!(summary, changed);
     }
 }

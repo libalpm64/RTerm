@@ -114,7 +114,7 @@ impl App {
                             "Trust SSH host?"
                         },
                     ));
-                    ui.label(&prompt.host);
+                    ui.label(crate::host_keys::display_host(&prompt.host));
                     if let Some(key) = &prompt.trusted {
                         ui.label(crate::i18n::tr(ui, "Trusted fingerprint"));
                         ui.monospace(&key.fingerprint);
@@ -169,7 +169,7 @@ impl App {
                             .show(ui, |ui| {
                                 for (host, key) in entries {
                                     ui.horizontal(|ui| {
-                                        ui.strong(host);
+                                        ui.strong(crate::host_keys::display_host(host));
                                         if ui.small_button(crate::i18n::tr(ui, "Forget")).clicked()
                                         {
                                             forget = Some(host.clone());

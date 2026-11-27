@@ -15,6 +15,13 @@ static RULES: LazyLock<Vec<(Regex, Color32)>> = LazyLock::new(|| {
     ].into_iter().map(|(regex, hex)| (Regex::new(regex).unwrap(), color(hex))).collect()
 });
 
+fn contains_ascii_case_insensitive(value: &str, needle: &str) -> bool {
+    value
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
 pub(crate) struct Highlighter {
     enabled: bool,
     keywords: Option<Regex>,
@@ -42,8 +49,8 @@ impl Highlighter {
 
     // Highlight only cells with the default foreground. Terminal applications
     // retain their own ANSI colors and the parser still receives the raw bytes.
-    pub(crate) fn ranges(&self, line: &str) -> Vec<(Range<usize>, Color32)> {
-        let mut matches = Vec::new();
+    pub(crate) fn ranges_into(&self, line: &str, matches: &mut Vec<(Range<usize>, Color32)>) {
+        matches.clear();
         if self.enabled {
             for (pattern, color) in RULES.iter() {
                 matches.extend(pattern.find_iter(line).map(|item| (item.range(), *color)));
@@ -51,20 +58,20 @@ impl Highlighter {
         }
         if let Some(pattern) = &self.keywords {
             matches.extend(pattern.find_iter(line).map(|item| {
-                let keyword = item.as_str().to_lowercase();
+                let keyword = item.as_str();
                 let hex = if ["error", "fail", "fault", "critical", "exception"]
                     .iter()
-                    .any(|part| keyword.contains(part))
+                    .any(|part| contains_ascii_case_insensitive(keyword, part))
                 {
                     0xff0000
                 } else if ["success", "ok", "passed", "done"]
                     .iter()
-                    .any(|part| keyword.contains(part))
+                    .any(|part| contains_ascii_case_insensitive(keyword, part))
                 {
                     0x00ffff
                 } else if ["info", "debug", "trace"]
                     .iter()
-                    .any(|part| keyword.contains(part))
+                    .any(|part| contains_ascii_case_insensitive(keyword, part))
                 {
                     0x5c5cff
                 } else {
@@ -73,6 +80,34 @@ impl Highlighter {
                 (item.range(), color(hex))
             }));
         }
-        matches
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranges_into_reuses_storage_and_preserves_match_order() {
+        let highlighter = Highlighter::new(true, "error success");
+        let mut ranges = Vec::with_capacity(32);
+        highlighter.ranges_into("sudo rm failed success", &mut ranges);
+        let first = ranges.clone();
+        let capacity = ranges.capacity();
+        let pointer = ranges.as_ptr();
+
+        highlighter.ranges_into("sudo rm failed success", &mut ranges);
+
+        assert_eq!(ranges, first);
+        assert_eq!(ranges.capacity(), capacity);
+        assert_eq!(ranges.as_ptr(), pointer);
+        assert!(ranges.len() >= 4);
+    }
+
+    #[test]
+    fn keyword_color_classification_is_ascii_case_insensitive() {
+        assert!(contains_ascii_case_insensitive("Pre-ERROR-Code", "error"));
+        assert!(contains_ascii_case_insensitive("SUCCESS", "success"));
+        assert!(!contains_ascii_case_insensitive("fatal", "error"));
     }
 }

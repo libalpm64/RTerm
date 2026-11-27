@@ -224,7 +224,6 @@ pub(crate) fn compact_list(height: f32) -> egui::ScrollArea {
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
 }
 
-#[cfg(test)]
 #[test]
 fn compact_list_scrolls_without_reserving_scrollbar_space() {
     let context = egui::Context::default();

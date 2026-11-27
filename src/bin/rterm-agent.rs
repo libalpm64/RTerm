@@ -25,6 +25,7 @@ mod cli {
     };
     use serde_json::{Value, json};
     use std::{
+        fs::OpenOptions,
         io::{self, Read, Write},
         path::Path,
         time::Duration,
@@ -83,6 +84,50 @@ All RTerm permissions and AI-client policies remain in force.";
         Ok(text)
     }
 
+    fn open_command_file(path: &str) -> Result<std::fs::File, &'static str> {
+        let path = Path::new(path);
+        let link_metadata =
+            std::fs::symlink_metadata(path).map_err(|_| "Cannot inspect command file")?;
+        if !link_metadata.file_type().is_file() {
+            return Err("Command file must be a regular file, not a symlink or special file");
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if link_metadata.file_attributes() & 0x400 != 0 {
+                return Err("Command file must not be a reparse point");
+            }
+        }
+
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // O_NONBLOCK prevents a path swapped to a FIFO between the
+            // metadata check and open from hanging the CLI indefinitely.
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
+        }
+        let file = options.open(path).map_err(|_| "Cannot open command file")?;
+        let metadata = file.metadata().map_err(|_| "Cannot inspect command file")?;
+        if !metadata.is_file() {
+            return Err("Command file must be a regular file");
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                return Err("Command file must not be a reparse point");
+            }
+        }
+        Ok(file)
+    }
+
     fn parse(args: &[String]) -> Result<Value, &'static str> {
         let mut args = args.iter().map(String::as_str);
         let action = args.next().ok_or("Missing subcommand; use --help")?;
@@ -102,16 +147,7 @@ All RTerm permissions and AI-client policies remain in force.";
                     "-" => read_script(io::stdin().lock())?,
                     "--command-file" => {
                         let path = args.next().ok_or("Missing command file path")?;
-                        let file =
-                            std::fs::File::open(path).map_err(|_| "Cannot open command file")?;
-                        if !file
-                            .metadata()
-                            .map_err(|_| "Cannot inspect command file")?
-                            .is_file()
-                        {
-                            return Err("Command file must be a regular file");
-                        }
-                        read_script(file)?
+                        read_script(open_command_file(path)?)?
                     }
                     command => {
                         validate_command(command)?;
@@ -353,6 +389,26 @@ All RTerm permissions and AI-client policies remain in force.";
                     ])
                     .is_err()
                 );
+            }
+
+            #[cfg(unix)]
+            #[test]
+            fn command_file_rejects_fifos_and_symlinks_before_reading() {
+                use std::ffi::CString;
+                use std::os::unix::ffi::OsStrExt;
+                use std::os::unix::fs::symlink;
+
+                let dir = tempfile::tempdir().unwrap();
+                let fifo = dir.path().join("command.fifo");
+                let path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+                assert!(open_command_file(fifo.to_str().unwrap()).is_err());
+
+                let target = dir.path().join("command.sh");
+                let link = dir.path().join("command-link.sh");
+                std::fs::write(&target, b"printf safe\n").unwrap();
+                symlink(&target, &link).unwrap();
+                assert!(open_command_file(link.to_str().unwrap()).is_err());
             }
             #[cfg(unix)]
             {

@@ -5,6 +5,94 @@ use tokio::sync::Mutex;
 
 pub(super) const CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
 const SAMPLE_BYTES: u64 = 32 * 1024;
+const MAX_RECOVERY_RECORD: u64 = 64 * 1024;
+
+pub(super) fn open_staging(
+    path: &Path,
+    read: bool,
+    write: bool,
+    create_new: bool,
+    truncate: bool,
+) -> Result<std::fs::File, String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(read).write(write);
+    if create_new {
+        options.create_new(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        if !path
+            .parent()
+            .is_some_and(crate::storage::unix_directory_is_private)
+        {
+            return Err("Download staging directory is writable by another user".into());
+        }
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let file = options.open(path).map_err(to_error)?;
+        let metadata = file.metadata().map_err(to_error)?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1
+        {
+            return Err("Download staging path is not a private regular file".into());
+        }
+        if metadata.permissions().mode() & 0o077 != 0 {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(to_error)?;
+        }
+        if truncate {
+            file.set_len(0).map_err(to_error)?;
+        }
+        Ok(file)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::{
+            fs::{MetadataExt, OpenOptionsExt},
+            io::AsRawHandle,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        // Open the reparse point itself, never its target. Deny delete sharing
+        // while range workers hold the file so its path cannot be swapped.
+        options.custom_flags(0x00200000).share_mode(3);
+        let file = options.open(path).map_err(to_error)?;
+        let metadata = file.metadata().map_err(to_error)?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        if !metadata.is_file()
+            || metadata.file_attributes() & 0x400 != 0
+            || info.nNumberOfLinks != 1
+            || !crate::storage::windows_file_is_not_shared_writable(&file)
+            || !path
+                .parent()
+                .is_some_and(crate::storage::windows_directory_is_not_shared_writable)
+        {
+            return Err("Download staging path is not a private regular file".into());
+        }
+        if truncate {
+            file.set_len(0).map_err(to_error)?;
+        }
+        Ok(file)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let file = options.open(path).map_err(to_error)?;
+        if !file.metadata().map_err(to_error)?.is_file() {
+            return Err("Download staging path is not a regular file".into());
+        }
+        if truncate {
+            file.set_len(0).map_err(to_error)?;
+        }
+        Ok(file)
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Version {
@@ -64,11 +152,26 @@ fn transfer_name(peer: &str, remote: &str, local: &Path) -> String {
 }
 
 fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
-    match std::fs::read(path) {
-        Ok(data) => serde_json::from_slice(&data).map(Some).map_err(to_error),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.to_string()),
+    use std::io::Read;
+
+    let mut file = match open_staging(path, true, false, false, false) {
+        Ok(file) => file,
+        Err(error) => match std::fs::symlink_metadata(path) {
+            Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            _ => return Err(error),
+        },
+    };
+    if file.metadata().map_err(to_error)?.len() > MAX_RECOVERY_RECORD {
+        return Err("Transfer recovery record exceeds 64 KiB".into());
     }
+    let mut data = Vec::new();
+    std::io::Read::take(&mut file, MAX_RECOVERY_RECORD + 1)
+        .read_to_end(&mut data)
+        .map_err(to_error)?;
+    if data.len() as u64 > MAX_RECOVERY_RECORD {
+        return Err("Transfer recovery record exceeds 64 KiB".into());
+    }
+    serde_json::from_slice(&data).map(Some).map_err(to_error)
 }
 
 fn write(path: &Path, value: &impl Serialize) -> Result<(), String> {
@@ -77,13 +180,15 @@ fn write(path: &Path, value: &impl Serialize) -> Result<(), String> {
 }
 
 fn lock(path: &Path) -> Result<std::fs::File, String> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(to_error)?;
+    let file = match open_staging(path, true, true, false, false) {
+        Ok(file) => file,
+        Err(error) => match std::fs::symlink_metadata(path) {
+            Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {
+                open_staging(path, true, true, true, false)?
+            }
+            _ => return Err(error),
+        },
+    };
     file.try_lock()
         .map_err(|error| format!("Could not lock transfer: {error}"))?;
     Ok(file)
@@ -97,6 +202,7 @@ struct DownloadState {
 }
 
 pub(super) struct Download {
+    local: PathBuf,
     pub(super) part: PathBuf,
     journal: PathBuf,
     state: Mutex<DownloadState>,
@@ -116,10 +222,29 @@ impl Download {
         if version.size != size {
             return Err("The remote file changed before download started".into());
         }
-        let parent = local.parent().ok_or("Missing download directory")?;
-        let local = std::fs::canonicalize(parent)
-            .map_err(to_error)?
-            .join(local.file_name().ok_or("Missing download name")?);
+        let selected_parent = local.parent().ok_or("Missing download directory")?;
+        #[cfg(unix)]
+        if !crate::storage::unix_directory_is_private(selected_parent) {
+            return Err(
+                "Download directory is not protected against replacement by another user".into(),
+            );
+        }
+        #[cfg(windows)]
+        if !crate::storage::windows_directory_is_not_shared_writable(selected_parent) {
+            return Err("Download directory is writable by another Windows account".into());
+        }
+        let parent = std::fs::canonicalize(selected_parent).map_err(to_error)?;
+        #[cfg(unix)]
+        if !crate::storage::unix_directory_is_private(&parent) {
+            return Err(
+                "Download directory is not protected against replacement by another user".into(),
+            );
+        }
+        #[cfg(windows)]
+        if !crate::storage::windows_directory_is_not_shared_writable(&parent) {
+            return Err("Download directory is writable by another Windows account".into());
+        }
+        let local = parent.join(local.file_name().ok_or("Missing download name")?);
         let stem = format!(".rterm-download-{}", transfer_name(peer, remote, &local));
         let part = parent.join(format!("{stem}.part"));
         let journal = parent.join(format!("{stem}.json"));
@@ -157,17 +282,10 @@ impl Download {
             };
             write(&journal, &state)?;
             let file = if staging.is_some() {
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .truncate(true)
-                    .open(&part)
+                open_staging(&part, false, true, false, true)
             } else {
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&part)
-            }
-            .map_err(to_error)?;
+                open_staging(&part, false, true, true, false)
+            }?;
             file.set_len(state.version.size).map_err(to_error)?;
             state
         };
@@ -175,6 +293,7 @@ impl Download {
         let offsets = state.offsets.clone();
         Ok((
             Self {
+                local,
                 part,
                 journal,
                 state: Mutex::new(state),
@@ -191,12 +310,7 @@ impl Download {
         write(&self.journal, &*state)
     }
 
-    pub(super) async fn publish(
-        &self,
-        sftp: &SftpSession,
-        remote: &str,
-        local: &Path,
-    ) -> Result<(), String> {
+    pub(super) async fn publish(&self, sftp: &SftpSession, remote: &str) -> Result<(), String> {
         let version = remote_version(sftp, remote).await?;
         let state = self.state.lock().await;
         if state.version != version {
@@ -215,9 +329,33 @@ impl Download {
                 "Download checkpoints are incomplete. Repeat the download to resume.".into(),
             );
         }
-        std::fs::rename(&self.part, local).map_err(to_error)?;
+        // Re-open the final staging path without following links immediately
+        // before publication; workers may have closed their handles already.
+        drop(open_staging(&self.part, false, true, false, false)?);
+        // Persist with no-clobber semantics so a remote filename cannot
+        // silently replace an existing local file. Retain the resumable part
+        // when publication fails.
+        if let Err(error) = tempfile::TempPath::try_from_path(&self.part)
+            .map_err(to_error)?
+            .persist_noclobber(&self.local)
+        {
+            let tempfile::PathPersistError { error, mut path } = error;
+            path.disable_cleanup(true);
+            return Err(if error.kind() == std::io::ErrorKind::AlreadyExists {
+                "Download destination already exists; choose another folder or remove it first"
+                    .into()
+            } else {
+                to_error(error)
+            });
+        }
         let _ = std::fs::remove_file(&self.journal);
         Ok(())
+    }
+
+    pub(super) fn set_times(&self, times: std::fs::FileTimes) -> Result<(), String> {
+        open_staging(&self.part, false, true, false, false)?
+            .set_times(times)
+            .map_err(to_error)
     }
 }
 
@@ -241,7 +379,7 @@ async fn verified_ranges(
     state: &DownloadState,
 ) -> Result<bool, String> {
     let mut source = sftp.open(remote).await.map_err(to_error)?;
-    let mut staged = tokio::fs::File::open(part).await.map_err(to_error)?;
+    let mut staged = tokio::fs::File::from_std(open_staging(part, true, true, false, false)?);
     for (&(start, _), &offset) in state.ranges.iter().zip(&state.offsets) {
         if !matches_edges(&mut source, &mut staged, start, offset).await? {
             return Ok(false);
@@ -334,7 +472,9 @@ async fn upload_with_records(
         .ok_or("Missing remote upload directory")?;
     let directory = if directory.is_empty() { "/" } else { directory };
     let local = std::fs::canonicalize(local).map_err(to_error)?;
-    std::fs::create_dir_all(records).map_err(to_error)?;
+    if !crate::storage::ensure_private_config_dir(records) {
+        return Err("Unsafe transfer recovery directory".into());
+    }
     let name = transfer_name(peer, remote, &local);
     let journal = records.join(format!("{name}.json"));
     let _lock = lock(&records.join(format!("{name}.lock")))?;
@@ -433,6 +573,27 @@ mod tests {
         server,
     };
     use std::sync::Mutex as StdMutex;
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_records_reject_links_and_oversized_files() {
+        use std::os::unix::fs::symlink;
+
+        let dir = crate::storage::test_private_tempdir();
+        let target = dir.path().join("target.json");
+        let link = dir.path().join("linked.json");
+        let hardlink = dir.path().join("hardlinked.json");
+        std::fs::write(&target, b"{}").unwrap();
+        symlink(&target, &link).unwrap();
+        assert!(read::<serde_json::Value>(&link).is_err());
+        std::fs::hard_link(&target, &hardlink).unwrap();
+        assert!(read::<serde_json::Value>(&hardlink).is_err());
+
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_file(&hardlink).unwrap();
+        std::fs::write(&target, vec![b'x'; MAX_RECOVERY_RECORD as usize + 1]).unwrap();
+        assert!(read::<serde_json::Value>(&target).is_err());
+    }
 
     #[derive(Default)]
     struct Files {
@@ -586,7 +747,7 @@ mod tests {
             .unwrap()
             .data
             .insert(remote.into(), data.clone());
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::storage::test_private_tempdir();
         let local = temp.path().join("download");
         let first = session(files.clone()).await;
         let (download, ranges, _) =
@@ -653,12 +814,229 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resumed_download_never_overwrites_an_existing_destination() {
+        let files = Arc::new(StdMutex::new(Files::default()));
+        let data = b"remote download fixture".to_vec();
+        let remote = "/source";
+        files
+            .lock()
+            .unwrap()
+            .data
+            .insert(remote.into(), data.clone());
+        let temp = crate::storage::test_private_tempdir();
+        let local = temp.path().join("download");
+        let sftp = session(files).await;
+        let (download, ranges, _) =
+            Download::open(&sftp, remote, &local, "peer", 1, data.len() as u64)
+                .await
+                .unwrap();
+        std::fs::write(&download.part, &data).unwrap();
+        download.checkpoint(0, ranges[0].1).await.unwrap();
+        std::fs::write(&local, b"keep existing local data").unwrap();
+
+        let error = download.publish(&sftp, remote).await.unwrap_err();
+        assert!(error.contains("already exists"));
+        assert_eq!(std::fs::read(&local).unwrap(), b"keep existing local data");
+        assert!(download.part.exists());
+    }
+
+    #[tokio::test]
+    async fn ordinary_download_never_overwrites_an_existing_destination() {
+        let files = Arc::new(StdMutex::new(Files::default()));
+        let data = b"remote download fixture".to_vec();
+        let remote = "/source";
+        files.lock().unwrap().data.insert(remote.into(), data);
+        let temp = crate::storage::test_private_tempdir();
+        let local = temp.path().join("download");
+        std::fs::write(&local, b"keep existing local data").unwrap();
+        let sftp = session(files).await;
+        let options = super::super::DownloadOptions {
+            parallel: 1,
+            max_bytes_per_second: 0,
+            timestamps: false,
+        };
+
+        let error = super::super::download_file(sftp, remote, &local, options, None, None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("already exists"));
+        assert_eq!(std::fs::read(&local).unwrap(), b"keep existing local data");
+    }
+
+    fn upload_permit() -> crate::agent::Permit {
+        let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        crate::agent::Permit {
+            bridge: active.clone(),
+            request: active,
+            deadline: Instant::now() + Duration::from_secs(60),
+        }
+    }
+
+    fn upload_display() -> crate::backend::AgentDisplay {
+        Arc::new(StdMutex::new(crate::backend::AgentTranscript::default()))
+    }
+
+    #[tokio::test]
+    async fn agent_upload_publishes_only_complete_files_and_never_overwrites() {
+        let files = Arc::new(StdMutex::new(Files::default()));
+        let temp = crate::storage::test_private_tempdir();
+        let local = temp.path().join("upload");
+        let data = b"complete staged upload";
+        std::fs::write(&local, data).unwrap();
+        let sftp = session(files.clone()).await;
+        let mut input = tokio::fs::File::open(&local).await.unwrap();
+
+        super::super::upload_agent_file(
+            sftp.clone(),
+            &mut input,
+            data.len() as u64,
+            "/target",
+            &upload_permit(),
+            &upload_display(),
+            0,
+            data.len() as u64,
+        )
+        .await
+        .unwrap();
+
+        let existing = b"keep existing remote data".to_vec();
+        {
+            let mut remote = files.lock().unwrap();
+            assert_eq!(remote.data.get("/target").unwrap(), data);
+            assert_eq!(
+                remote.data.len(),
+                1,
+                "the staging name must be renamed away"
+            );
+            remote.data.insert("/existing".into(), existing.clone());
+        }
+
+        let mut input = tokio::fs::File::open(&local).await.unwrap();
+        let error = super::super::upload_agent_file(
+            sftp,
+            &mut input,
+            data.len() as u64,
+            "/existing",
+            &upload_permit(),
+            &upload_display(),
+            0,
+            data.len() as u64,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("destination may already exist"));
+        let remote = files.lock().unwrap();
+        assert_eq!(remote.data.get("/existing"), Some(&existing));
+        assert_eq!(
+            remote.data.len(),
+            2,
+            "failed publication must remove its staging file"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_upload_discards_a_failed_staging_file() {
+        let files = Arc::new(StdMutex::new(Files {
+            fail_writes: true,
+            ..Default::default()
+        }));
+        let temp = crate::storage::test_private_tempdir();
+        let local = temp.path().join("upload");
+        let data = vec![b'x'; CHECKPOINT_BYTES as usize + 1024];
+        std::fs::write(&local, &data).unwrap();
+        let sftp = session(files.clone()).await;
+        let mut input = tokio::fs::File::open(&local).await.unwrap();
+        let error = super::super::upload_agent_file(
+            sftp,
+            &mut input,
+            data.len() as u64,
+            "/target",
+            &upload_permit(),
+            &upload_display(),
+            0,
+            data.len() as u64,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("incomplete staging data was discarded"));
+        let remote = files.lock().unwrap();
+        assert!(!remote.data.contains_key("/target"));
+        assert!(
+            remote.data.is_empty(),
+            "failed staging data must be removed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn download_publication_uses_the_canonical_destination() {
+        use std::os::unix::fs::symlink;
+
+        let files = Arc::new(StdMutex::new(Files::default()));
+        let data = b"remote download fixture".to_vec();
+        let remote = "/source";
+        files
+            .lock()
+            .unwrap()
+            .data
+            .insert(remote.into(), data.clone());
+        let temp = crate::storage::test_private_tempdir();
+        let original = temp.path().join("original");
+        let redirected = temp.path().join("redirected");
+        std::fs::create_dir(&original).unwrap();
+        std::fs::create_dir(&redirected).unwrap();
+        let alias = temp.path().join("download-dir");
+        symlink(&original, &alias).unwrap();
+        let local = alias.join("download");
+        let sftp = session(files).await;
+        let (download, _, _) = Download::open(&sftp, remote, &local, "peer", 1, data.len() as u64)
+            .await
+            .unwrap();
+        std::fs::write(&download.part, &data).unwrap();
+        download.checkpoint(0, data.len() as u64).await.unwrap();
+
+        std::fs::remove_file(&alias).unwrap();
+        symlink(&redirected, &alias).unwrap();
+        download.publish(&sftp, remote).await.unwrap();
+
+        assert_eq!(std::fs::read(original.join("download")).unwrap(), data);
+        assert!(!redirected.join("download").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_open_rejects_symlinks_without_truncating_the_target() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::symlink;
+
+        let temp = crate::storage::test_private_tempdir();
+        let target = temp.path().join("important-file");
+        let staging = temp.path().join("download.part");
+        let hardlink = temp.path().join("download-hardlink.part");
+        std::fs::write(&target, b"keep this data").unwrap();
+        symlink(&target, &staging).unwrap();
+        std::fs::hard_link(&target, &hardlink).unwrap();
+
+        assert!(open_staging(&staging, false, true, false, true).is_err());
+        assert!(open_staging(&hardlink, false, true, false, true).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep this data");
+
+        std::fs::remove_file(&staging).unwrap();
+        std::fs::remove_file(&hardlink).unwrap();
+        std::fs::write(&staging, b"staging data").unwrap();
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let file = open_staging(&staging, true, true, false, false).unwrap();
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[tokio::test]
     async fn uploads_resume_after_the_last_saved_offset() {
         let files = Arc::new(StdMutex::new(Files {
             fail_writes: true,
             ..Default::default()
         }));
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::storage::test_private_tempdir();
         let local = temp.path().join("upload");
         let records = temp.path().join("records");
         let data: Vec<_> = (0..CHECKPOINT_BYTES + 10_000)

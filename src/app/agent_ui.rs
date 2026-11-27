@@ -18,6 +18,7 @@ pub(super) struct State {
     grants: BTreeMap<u32, Instant>,
     tunnel_grants: BTreeMap<u32, Instant>,
     running: BTreeMap<u32, Arc<AtomicBool>>,
+    upload_summaries: BTreeMap<u32, crate::agent_upload::ManifestSummary>,
     minutes: u32,
     pub(super) activity: Activity,
     displays: BTreeMap<u64, AgentDisplay>,
@@ -84,6 +85,7 @@ impl State {
         self.grants.clear();
         self.tunnel_grants.clear();
         self.saved.clear();
+        self.upload_summaries.clear();
         for request in self
             .pending
             .take()
@@ -99,6 +101,7 @@ impl State {
     pub(super) fn revoke_session(&mut self, id: u32) {
         self.grants.remove(&id);
         self.tunnel_grants.remove(&id);
+        self.upload_summaries.remove(&id);
         if self
             .pending
             .as_ref()
@@ -126,19 +129,7 @@ impl State {
 
 // Remote data is displayed as literal text, never terminal instructions.
 pub(super) fn literal_text(bytes: &[u8]) -> String {
-    let mut text = String::new();
-    for ch in String::from_utf8_lossy(bytes).replace("\r\n", "\n").chars() {
-        match ch {
-            '\n' | '\t' => text.push(ch),
-            c if c.is_control()
-                || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') =>
-            {
-                text.extend(c.escape_default())
-            }
-            c => text.push(c),
-        }
-    }
-    text
+    crate::agent_upload::literal_text(bytes)
 }
 
 impl App {
@@ -420,6 +411,9 @@ impl App {
                 break;
             }
             let request = self.agent.pending.take().unwrap();
+            if let Some(id) = request.action.session_id() {
+                self.agent.upload_summaries.remove(&id);
+            }
             let _ = request.reply.send(agent::error(
                 "Permission request expired or SSH session closed",
             ));
@@ -463,7 +457,8 @@ impl App {
                             let background = !self.settings.on("ai_interactive");
                             let tabs: Vec<_> = self.terminals.iter().filter(|term| term.kind == Kind::Ssh).map(|term| {
                                 let state = self.ssh_connection_state(term);
-                                // Keep the protocol v2 field for callers that check whether they can submit without approval.
+                                // This legacy field describes local terminal checks,
+                                // not whether the remote shell is actually at a prompt.
                                 let auto_execute = mode == Mode::Unrestricted && !background && term.agent_prompt_available();
                                 json!({"tab_id":term.tab,"name":term.name,"target":term.remote_target,"state":state,"shell_confirmed":auto_execute,
                                     "session_id":self.ssh_agent_id(term.tab)})
@@ -498,11 +493,77 @@ impl App {
                                     "AI file uploads are disabled in AI Settings",
                                 ));
                             } else {
-                                self.agent.queue_approval(request, context);
+                                let AgentAction::Upload {
+                                    session_id,
+                                    local,
+                                    remote,
+                                } = &request.action
+                                else {
+                                    unreachable!()
+                                };
+                                let session_id = *session_id;
+                                let permit = Permit {
+                                    bridge: request.active.clone(),
+                                    request: request.alive.clone(),
+                                    deadline: request.deadline,
+                                };
+                                if !permit.valid() {
+                                    let _ = request.reply.send(agent::error(
+                                        "Upload inspection expired or was cancelled",
+                                    ));
+                                } else {
+                                    request.reply.phase("preparing_upload");
+                                    let alive = request.alive.clone();
+                                    self.agent.running.insert(session_id, alive.clone());
+                                    let context = context.clone();
+                                    self.request(
+                                        Command::AgentUploadInspect {
+                                            local: local.clone(),
+                                            remote: remote.clone(),
+                                            permit,
+                                        },
+                                        move |app, result| {
+                                            let current = app.agent.finish(session_id, &alive);
+                                            if !current
+                                                || !request.authorized()
+                                                || request.deadline <= Instant::now()
+                                                || !app.agent.active()
+                                                || app.locked
+                                                || !app.settings.on("ai_upload")
+                                                || app.agent_endpoint(session_id).is_none()
+                                            {
+                                                let _ = request.reply.send(agent::error(
+                                                    "Upload inspection expired or SSH access changed",
+                                                ));
+                                                return;
+                                            }
+                                            match result {
+                                                Ok(BackendReply::AgentUploadSummary(summary)) => {
+                                                    app.agent.upload_summaries.insert(session_id, summary);
+                                                    app.agent.queue_approval(request, &context);
+                                                }
+                                                Err(error) => {
+                                                    let _ = request.reply.send(agent::error(
+                                                        format!("Upload inspection failed: {error}"),
+                                                    ));
+                                                }
+                                                _ => {
+                                                    let _ = request.reply.send(agent::error(
+                                                        "Unexpected upload inspection result",
+                                                    ));
+                                                }
+                                            }
+                                        },
+                                    );
+                                }
                             }
                         }
                         AgentAction::Execute { session_id, .. } => {
                             let background = !self.settings.on("ai_interactive");
+                            let foreground_ready = background
+                                || self
+                                    .agent_terminal(*session_id)
+                                    .is_some_and(Terminal::agent_prompt_available);
                             let grant = if background && mode == Mode::Ask {
                                 let grants = if self.agent.is_tunnel_request(&request) {
                                     &self.agent.tunnel_grants
@@ -519,7 +580,18 @@ impl App {
                             {
                                 self.activate(tab);
                             }
-                            if mode == Mode::Unrestricted || grant.is_some() {
+                            // Unrestricted background exec is safe to dispatch
+                            // automatically. Foreground commands still require
+                            // confirmation even when local checks report a prompt;
+                            // those checks cannot prove the remote shell is idle.
+                            // If local checks fail, reject rather than queue an
+                            // approval that the UI cannot safely accept yet.
+                            if !foreground_ready {
+                                let _ = request.reply.send(agent::error(
+                                    "Interactive shell unavailable. Return to an empty prompt or use background execution.",
+                                ));
+                            } else if (mode == Mode::Unrestricted && background) || grant.is_some()
+                            {
                                 self.dispatch_agent(request, grant);
                             } else {
                                 self.agent.queue_approval(request, context);
@@ -651,6 +723,7 @@ impl App {
         else {
             return;
         };
+        let approved = self.agent.upload_summaries.remove(&session_id);
         let now = Instant::now();
         if self.locked
             || !self.agent.active()
@@ -667,6 +740,12 @@ impl App {
         }
         let Some((endpoint, tab)) = self.agent_endpoint(session_id) else {
             let _ = request.reply.send(self.agent_session_error(session_id));
+            return;
+        };
+        let Some(approved) = approved else {
+            let _ = request.reply.send(agent::error(
+                "Approved upload manifest is unavailable; request a new inspection",
+            ));
             return;
         };
         let deadline = now
@@ -699,6 +778,7 @@ impl App {
                 local,
                 remote,
                 permit,
+                approved,
                 result_reply: request.reply.clone(),
                 display: display.clone(),
             },
@@ -791,6 +871,7 @@ impl App {
             remote,
         } = &request.action
         {
+            let summary = self.agent.upload_summaries.get(session_id).cloned();
             let name = self
                 .agent_sessions()
                 .into_iter()
@@ -813,11 +894,23 @@ impl App {
                     ui.label("Remote destination:");
                     ui.monospace(literal_text(remote.as_bytes()));
                 });
-                ui.label("Files or entire folders, including hidden files. No overwrite or directory merging. Check the source contents, transfer size and available server storage before approving. Interrupted transfers may leave partial results.");
+                if let Some(summary) = &summary {
+                    ui.label(format!(
+                        "Manifest: {} files, {} directories, {} bytes total",
+                        summary.file_count, summary.directory_count, summary.total_bytes
+                    ));
+                    if summary.total_bytes >= 1_000_000_000 {
+                        ui.colored_label(t.yellow, "Large transfer (1 GB or more). Verify remote storage and bandwidth before approving.");
+                    }
+                } else {
+                    ui.colored_label(t.red, "Upload manifest unavailable. Deny this request and retry.");
+                }
+                ui.label("Includes hidden files. No overwrite or directory merging. The source manifest is checked again before transfer. Each file is staged remotely and published only when complete. A cancelled multi-file upload may leave completed files, empty directories or hidden staging files.");
                 ui.label(format!("Request expires in {remaining}s"));
                 ui.horizontal(|ui| {
                     if ui.button("Deny").clicked() { return Some(false); }
-                    if ui.button("Upload").clicked() { return Some(true); }
+                    let label = if summary.as_ref().is_some_and(|summary| summary.total_bytes >= 1_000_000_000) { "Upload large transfer" } else { "Upload" };
+                    if ui.add_enabled(summary.is_some(), egui::Button::new(label)).clicked() { return Some(true); }
                     None
                 }).inner
             });
@@ -908,6 +1001,9 @@ impl App {
             if allow {
                 self.dispatch_agent_upload(request);
             } else {
+                if let AgentAction::Upload { session_id, .. } = &request.action {
+                    self.agent.upload_summaries.remove(session_id);
+                }
                 let _ = request.reply.send(agent::error("User denied upload"));
             }
             return;
@@ -943,10 +1039,12 @@ impl App {
         } else if request.authorized()
             && request.deadline > Instant::now()
             && self.agent.active()
-            && self.agent_mode() == Mode::Ask
+            && (self.agent_mode() == Mode::Ask
+                || (self.agent_mode() == Mode::Unrestricted && self.settings.on("ai_interactive")))
             && self.agent_endpoint(id).is_some()
         {
-            let grant = (!self.settings.on("ai_interactive")
+            let grant = (self.agent_mode() == Mode::Ask
+                && !self.settings.on("ai_interactive")
                 && matches!(self.agent.minutes, 5 | 15 | 30))
             .then(|| Instant::now() + Duration::from_secs(u64::from(self.agent.minutes) * 60));
             if let Some(deadline) = grant {
@@ -1047,6 +1145,42 @@ mod tests {
             id: u32,
             _: String,
         ) -> Result<russh_sftp::protocol::Status, Self::Error> {
+            Ok(russh_sftp::protocol::Status {
+                id,
+                status_code: Self::Error::Ok,
+                error_message: "OK".into(),
+                language_tag: "en".into(),
+            })
+        }
+        async fn rename(
+            &mut self,
+            id: u32,
+            old: String,
+            new: String,
+        ) -> Result<russh_sftp::protocol::Status, Self::Error> {
+            let mut files = self.0.lock().unwrap();
+            if files.contains_key(&new) || files.contains_key(&format!("{new}/")) {
+                return Err(Self::Error::Failure);
+            }
+            let bytes = files.remove(&old).ok_or(Self::Error::Failure)?;
+            files.insert(new, bytes);
+            Ok(russh_sftp::protocol::Status {
+                id,
+                status_code: Self::Error::Ok,
+                error_message: "OK".into(),
+                language_tag: "en".into(),
+            })
+        }
+        async fn remove(
+            &mut self,
+            id: u32,
+            path: String,
+        ) -> Result<russh_sftp::protocol::Status, Self::Error> {
+            self.0
+                .lock()
+                .unwrap()
+                .remove(&path)
+                .ok_or(Self::Error::Failure)?;
             Ok(russh_sftp::protocol::Status {
                 id,
                 status_code: Self::Error::Ok,
@@ -1475,9 +1609,14 @@ mod tests {
         assert_eq!(list.join().unwrap()["tabs"][0]["shell_confirmed"], true);
         let foreground = execute(&app, "pwd; echo foreground");
         pump(&mut app, &context, |app| {
-            assert!(app.agent.pending.is_none(), "first command must not prompt");
-            !app.agent.running.is_empty()
+            assert!(
+                app.agent.running.is_empty(),
+                "foreground command must wait for approval"
+            );
+            app.agent.pending.is_some()
         });
+        app.resolve_agent_permission(true);
+        pump(&mut app, &context, |app| !app.agent.running.is_empty());
         assert_eq!(app.active, Some(tab));
         assert_eq!(
             app.agent.activity.entries()[0].command,
@@ -1504,10 +1643,9 @@ mod tests {
         // Unrestricted foreground execution continues on the same PTY
         // after a nonzero exit and handles automatic cursor reports.
         let query = execute(&app, "echo cursor-query-fixture");
-        pump(&mut app, &context, |app| {
-            assert!(app.agent.pending.is_none());
-            query.is_finished()
-        });
+        pump(&mut app, &context, |app| app.agent.pending.is_some());
+        app.resolve_agent_permission(true);
+        pump(&mut app, &context, |_| query.is_finished());
         let result = query.join().unwrap();
         assert_eq!(result["ok"], true, "{result}");
         assert_eq!(result["exit_code"], 7);
@@ -1516,10 +1654,13 @@ mod tests {
         let tunnel_command = std::thread::spawn(move || {
             tunnel.request(json!({"action":"execute","session_id":id,"command":"echo tunnel fixture","operation_id":"tunnel-shell-fixture","wait_ms":4000}))
         });
-        pump(&mut app, &context, |app| {
-            assert!(app.agent.pending.is_none());
-            tunnel_command.is_finished()
-        });
+        pump(&mut app, &context, |app| app.agent.pending.is_some());
+        assert!(
+            app.agent
+                .is_tunnel_request(app.agent.pending.as_ref().unwrap())
+        );
+        app.resolve_agent_permission(true);
+        pump(&mut app, &context, |_| tunnel_command.is_finished());
         let result = tunnel_command.join().unwrap();
         assert_eq!(result["execution_mode"], "interactive_shell");
         assert_eq!(result["exit_code"], 7);
@@ -1531,13 +1672,9 @@ mod tests {
                 .contains("OpenAI tunnel")
         );
         let followup = execute(&app, "echo followup");
-        pump(&mut app, &context, |app| {
-            assert!(
-                app.agent.pending.is_none(),
-                "unrestricted followup must not prompt"
-            );
-            followup.is_finished()
-        });
+        pump(&mut app, &context, |app| app.agent.pending.is_some());
+        app.resolve_agent_permission(true);
+        pump(&mut app, &context, |_| followup.is_finished());
         assert_eq!(
             followup.join().unwrap()["execution_mode"],
             "interactive_shell"
@@ -1560,13 +1697,12 @@ mod tests {
                 .contains("Interactive shell unavailable")
         );
         app.terminals[0].receive(b"\x1b[?1049l");
-        // Returning to the shell after typing still needs no approval.
+        // Returning to the shell after typing still requires approval.
         assert!(app.terminals[0].send(&app.backend, b"\r".to_vec()));
         let resumed = execute(&app, "echo after manual input");
-        pump(&mut app, &context, |app| {
-            assert!(app.agent.pending.is_none());
-            resumed.is_finished()
-        });
+        pump(&mut app, &context, |app| app.agent.pending.is_some());
+        app.resolve_agent_permission(true);
+        pump(&mut app, &context, |_| resumed.is_finished());
         assert_eq!(
             resumed.join().unwrap()["execution_mode"],
             "interactive_shell"
@@ -2011,7 +2147,8 @@ mod tests {
         assert_eq!(recovered.join().unwrap()["stdout"], "fleet recovered");
         assert_eq!(app.terminals.len(), 2);
 
-        // Unrestricted access runs commands on either shell without prompting.
+        // Unrestricted background access is automatic; foreground shell
+        // commands still require approval because prompt detection is local.
         app.agent.stop();
         app.settings.set("ai_access", "unrestricted".into());
         app.settings.set("ai_interactive", "1".into());
@@ -2022,13 +2159,9 @@ mod tests {
                 &app,
                 json!({"action":"execute","session_id":session_id,"command":"echo multi-session fixture"}),
             );
-            pump(&mut app, &context, |app| {
-                assert!(
-                    app.agent.pending.is_none(),
-                    "unrestricted session must not prompt"
-                );
-                call.is_finished()
-            });
+            pump(&mut app, &context, |app| app.agent.pending.is_some());
+            app.resolve_agent_permission(true);
+            pump(&mut app, &context, |_| call.is_finished());
             let result = call.join().unwrap();
             assert_eq!(result["ok"], true, "{result}");
             assert_eq!(result["execution_mode"], "interactive_shell");
@@ -2070,7 +2203,7 @@ mod tests {
         assert_eq!(app.terminals.len(), 2);
         // File uploads use the actual loopback SFTP subsystem, never a real
         // server or user file. The fixture stores only bytes in memory.
-        let fixture_dir = tempfile::tempdir().unwrap();
+        let fixture_dir = crate::storage::test_private_tempdir();
         #[cfg(unix)]
         let fixture_root = std::fs::canonicalize(fixture_dir.path()).unwrap();
         #[cfg(windows)]
@@ -2184,6 +2317,8 @@ mod tests {
                 .unwrap()["status"],
             "queued"
         );
+        pump(&mut app, &context, |app| app.agent.pending.is_some());
+        app.resolve_agent_permission(true);
         pump(&mut app, &context, |app| {
             app.agent.running_on(Some(id))
                 && !app.terminals[first_tab(app)].agent_prompt_available()
@@ -2203,12 +2338,16 @@ mod tests {
             &app,
             json!({"action":"execute","session_id":id,"command":"echo post recovery"}),
         );
+        pump(&mut app, &context, |app| app.agent.pending.is_some());
+        app.resolve_agent_permission(true);
         pump(&mut app, &context, |_| follow_up.is_finished());
         assert_eq!(follow_up.join().unwrap()["exit_code"], 7);
         assert_eq!(
             post(&app, json!({"action":"execute","session_id":id,"command":"pager-fixture","operation_id":"pager-timeout","wait_ms":0,"timeout_secs":1})).join().unwrap()["status"],
             "queued"
         );
+        pump(&mut app, &context, |app| app.agent.pending.is_some());
+        app.resolve_agent_permission(true);
         pump(&mut app, &context, |app| {
             let term = &app.terminals[first_tab(app)];
             term.agent_prompt_available() && term.endpoint != Some(recovered_id)
@@ -2326,5 +2465,6 @@ mod tests {
         assert!(!rendered.contains('\x07'));
         assert!(rendered.contains("52;c;clipboard"));
         assert_eq!(literal_text("こんにちは".as_bytes()), "こんにちは");
+        assert_eq!(literal_text("a\u{202e}b".as_bytes()), "a\\u{202e}b");
     }
 }

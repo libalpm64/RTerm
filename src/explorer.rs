@@ -667,10 +667,11 @@ impl App {
                                 row.right()
                             })
                     };
+                    let display_name = crate::agent_upload::literal_text(entry.name.as_bytes());
                     theme::label(
                         ui,
                         name,
-                        &entry.name,
+                        &display_name,
                         FontId::monospace(11.0),
                         color,
                         Align2::LEFT_CENTER,
@@ -839,30 +840,35 @@ impl App {
 }
 
 fn list_local(path: &Path) -> std::io::Result<Vec<Entry>> {
-    let entries = std::fs::read_dir(path)?
-        .flatten()
-        .map(|entry| {
-            let metadata = entry.metadata().ok();
-            #[cfg(unix)]
-            let permissions = {
-                use std::os::unix::fs::PermissionsExt;
-                metadata
-                    .as_ref()
-                    .map(|value| value.permissions().mode() & 0o777)
-            };
-            #[cfg(not(unix))]
-            let permissions = None;
-            Entry {
-                name: entry.file_name().to_string_lossy().into_owned(),
-                directory: entry.file_type().is_ok_and(|kind| kind.is_dir()),
-                size: metadata.as_ref().map_or(0, |value| value.len()),
-                permissions,
-                modified: metadata
-                    .and_then(|value| value.modified().ok())
-                    .map(chrono::DateTime::<chrono::Local>::from),
-            }
-        })
-        .collect();
+    const MAX_DIRECTORY_ENTRIES: usize = 100_000;
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(path)?.flatten() {
+        if entries.len() == MAX_DIRECTORY_ENTRIES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Directory exceeds {MAX_DIRECTORY_ENTRIES} entries"),
+            ));
+        }
+        let metadata = entry.metadata().ok();
+        #[cfg(unix)]
+        let permissions = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata
+                .as_ref()
+                .map(|value| value.permissions().mode() & 0o777)
+        };
+        #[cfg(not(unix))]
+        let permissions = None;
+        entries.push(Entry {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            directory: entry.file_type().is_ok_and(|kind| kind.is_dir()),
+            size: metadata.as_ref().map_or(0, |value| value.len()),
+            permissions,
+            modified: metadata
+                .and_then(|value| value.modified().ok())
+                .map(chrono::DateTime::<chrono::Local>::from),
+        });
+    }
     Ok(entries)
 }
 
@@ -921,7 +927,6 @@ fn navigation_parent(path: &str) -> Option<&str> {
     (path.starts_with('/') && !path.trim_end_matches('/').is_empty()).then(|| remote_parent(path))
 }
 
-#[cfg(test)]
 #[test]
 fn path_field_keeps_geometry_on_hover_and_focus() {
     let context = egui::Context::default();
@@ -983,7 +988,6 @@ fn path_field_keeps_geometry_on_hover_and_focus() {
     );
 }
 
-#[cfg(test)]
 #[test]
 fn hidden_entries_can_be_filtered_without_reloading() {
     let entry = |name: &str, directory, size| Entry {
@@ -1023,7 +1027,6 @@ fn hidden_entries_can_be_filtered_without_reloading() {
     assert_eq!(listing.total_bytes, 5);
 }
 
-#[cfg(test)]
 #[test]
 fn parent_navigation_is_separate_from_real_files() {
     let entry = |name: &str, directory| Entry {

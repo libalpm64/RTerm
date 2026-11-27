@@ -1,6 +1,6 @@
 [advisories]
 # Release risk acceptance for maintenance-only notices, reviewed 2026-11-25.
-# See RELEASE.md. Do not add vulnerability, unsoundness or yank exceptions.
+# See docs/USAGE.md (Release builds). Do not add vulnerability, unsoundness or yank exceptions.
 ignore = [
     "RUSTSEC-2026-0543", # chrono: SFTP dependency and local timestamps
     "RUSTSEC-2026-0192", # ttf-parser: egui glyph rendering

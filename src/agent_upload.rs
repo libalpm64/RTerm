@@ -1,12 +1,14 @@
 //! Shared CLI/server validation. Paths are explicit, never shell-expanded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ManifestSummary {
+    pub(crate) file_count: usize,
+    pub(crate) directory_count: usize,
+    pub(crate) total_bytes: u64,
+    pub(crate) fingerprint: [u8; 32],
+}
+
 pub fn validate_paths(local: &str, remote: &str) -> Result<(), &'static str> {
-    let safe = |path: &str| {
-        !path.is_empty()
-            && path.len() <= 4096
-            && !path.chars().any(|c| {
-                c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-            })
-    };
+    let safe = |path: &str| !path.is_empty() && path.len() <= 4096 && !has_unsafe_text(path);
     #[cfg(windows)]
     let bytes = local.as_bytes();
     #[cfg(windows)]
@@ -36,6 +38,7 @@ pub fn validate_paths(local: &str, remote: &str) -> Result<(), &'static str> {
     }
     if !safe(remote)
         || !remote.starts_with('/')
+        || remote.contains('\\')
         || remote[1..]
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
@@ -43,6 +46,26 @@ pub fn validate_paths(local: &str, remote: &str) -> Result<(), &'static str> {
         return Err("Use an absolute remote path, without traversal or a trailing slash");
     }
     Ok(())
+}
+
+pub(crate) fn has_unsafe_text(text: &str) -> bool {
+    text.chars().any(is_unsafe_char)
+}
+
+pub(crate) fn is_unsafe_char(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+pub(crate) fn literal_text(bytes: &[u8]) -> String {
+    let mut text = String::new();
+    for ch in String::from_utf8_lossy(bytes).replace("\r\n", "\n").chars() {
+        match ch {
+            '\n' | '\t' => text.push(ch),
+            c if is_unsafe_char(c) => text.extend(c.escape_default()),
+            c => text.push(c),
+        }
+    }
+    text
 }
 
 pub(crate) fn invalid_windows_name(name: &str) -> bool {
@@ -66,4 +89,21 @@ pub(crate) fn invalid_windows_name(name: &str) -> bool {
                 )
             })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_paths_reject_native_separator_traversal() {
+        #[cfg(windows)]
+        let local = r"C:\tmp\source";
+        #[cfg(unix)]
+        let local = "/tmp/source";
+
+        assert!(validate_paths(local, "/safe/target").is_ok());
+        assert!(validate_paths(local, "/safe\\..\\outside").is_err());
+        assert!(validate_paths(local, "/safe\\target").is_err());
+    }
 }

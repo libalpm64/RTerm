@@ -132,10 +132,13 @@ impl Setup {
 
 #[cfg(target_os = "linux")]
 fn linux_desktop(home: &Path) -> PathBuf {
-    std::process::Command::new("xdg-user-dir")
-        .arg("DESKTOP")
-        .output()
-        .ok()
+    crate::tunnel::find_trusted_executable("xdg-user-dir")
+        .and_then(|client| {
+            std::process::Command::new(client)
+                .arg("DESKTOP")
+                .output()
+                .ok()
+        })
         .filter(|out| out.status.success())
         .and_then(|out| String::from_utf8(out.stdout).ok())
         .map(|out| PathBuf::from(out.trim_end_matches(['\r', '\n'])))

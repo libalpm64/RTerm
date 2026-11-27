@@ -60,6 +60,7 @@ impl Host<'_> {
             .unwrap_or(host);
         if host.is_empty()
             || host.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+            || crate::agent_upload::has_unsafe_text(host)
             || host.contains(['/', '\\', '@', '[', ']'])
             || (host.contains(':')
                 && host
@@ -81,7 +82,7 @@ impl Host<'_> {
             port => port.parse::<u16>().ok().filter(|&port| port != 0)?,
         };
         let user = unguard(self.username).trim();
-        if ssh && (user.is_empty() || user.chars().any(char::is_control)) {
+        if ssh && (user.is_empty() || crate::agent_upload::has_unsafe_text(user)) {
             return None;
         }
         let label = unguard(self.label).trim();
@@ -300,6 +301,14 @@ mod tests {
         assert_eq!(append_unique(&mut saved, parse(csv).unwrap().profiles), 0);
         assert_eq!(saved.len(), 2);
         assert!(matches!(&saved[0].connection, Connection::Ssh { config, .. } if config.use_agent));
+    }
+
+    #[test]
+    fn imported_hosts_reject_bidirectional_format_controls() {
+        let csv = "Label,Hostname/IP,Protocol,Username\nSpoofed,example\u{202e}.com,ssh,alice\n";
+        let imported = parse(csv.as_bytes()).unwrap();
+        assert!(imported.profiles.is_empty());
+        assert_eq!(imported.skipped, 1);
     }
 
     #[test]

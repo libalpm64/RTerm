@@ -8,10 +8,12 @@ use chacha20poly1305::XNonce;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
 
 const VAULT_MAGIC: &[u8; 4] = b"RTVL";
-const VAULT_VERSION: u16 = 2;
+const LEGACY_VAULT_VERSION: u16 = 2;
+const VAULT_VERSION: u16 = 3;
+const VAULT_SALT_LEN: usize = 16;
 pub(crate) const AGENT_AUDIT_LIMIT: usize = 250;
 
-pub(crate) struct VaultKey([u8; 32]);
+pub(crate) struct VaultKey([u8; 32], [u8; VAULT_SALT_LEN]);
 
 impl Drop for VaultKey {
     fn drop(&mut self) {
@@ -22,13 +24,30 @@ impl Drop for VaultKey {
 
 impl VaultKey {
     pub(crate) fn derive(password: &str) -> Self {
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let salt = nonce[..VAULT_SALT_LEN].try_into().unwrap();
+        Self::derive_with_salt(password, salt)
+    }
+
+    fn derive_with_salt(password: &str, salt: [u8; VAULT_SALT_LEN]) -> Self {
         let mut key = [0u8; 32];
-        let hash = blake3::hash(b"rterm-vault-v2");
-        let salt: &[u8; 16] = hash.as_bytes()[..16].try_into().unwrap();
         argon2::Argon2::default()
-            .hash_password_into(password.as_bytes(), salt, &mut key)
+            .hash_password_into(password.as_bytes(), &salt, &mut key)
             .expect("argon2 key derivation failed");
-        Self(key)
+        Self(key, salt)
+    }
+
+    fn from_data(password: &str, data: &[u8]) -> Result<(Self, bool), String> {
+        let version = vault_version(data)?;
+        let salt = if version == LEGACY_VAULT_VERSION {
+            legacy_vault_salt()
+        } else {
+            data[6..6 + VAULT_SALT_LEN].try_into().unwrap()
+        };
+        Ok((
+            Self::derive_with_salt(password, salt),
+            version == LEGACY_VAULT_VERSION,
+        ))
     }
 }
 
@@ -97,7 +116,87 @@ fn legacy_config_dirs() -> Vec<std::path::PathBuf> {
     candidates
 }
 
+fn read_legacy_config_file(path: &Path) -> Option<Vec<u8>> {
+    let parent = path.parent()?;
+    #[cfg(unix)]
+    if !unix_directory_is_private(parent) {
+        return None;
+    }
+    #[cfg(windows)]
+    if !windows_directory_is_not_shared_writable(parent) {
+        return None;
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let file = options.open(path).ok()?;
+        let metadata = file.metadata().ok()?;
+        let uid = unsafe { libc::geteuid() };
+        if !metadata.is_file()
+            || (metadata.uid() != uid && metadata.uid() != 0)
+            || metadata.nlink() != 1
+            || metadata.permissions().mode() & 0o022 != 0
+            || metadata.len() > MAX_CONFIG_FILE
+        {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_CONFIG_FILE.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .ok()?;
+        (bytes.len() as u64 <= MAX_CONFIG_FILE).then_some(bytes)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::{
+            fs::{MetadataExt, OpenOptionsExt},
+            io::AsRawHandle,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        options.custom_flags(0x00200000);
+        let file = options.open(path).ok()?;
+        let metadata = file.metadata().ok()?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0
+            || !metadata.is_file()
+            || metadata.file_attributes() & 0x400 != 0
+            || info.nNumberOfLinks != 1
+            || !windows_file_is_not_shared_writable(&file)
+            || metadata.file_size() > MAX_CONFIG_FILE
+        {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_CONFIG_FILE.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .ok()?;
+        (bytes.len() as u64 <= MAX_CONFIG_FILE).then_some(bytes)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let file = options.open(path).ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || metadata.len() > MAX_CONFIG_FILE {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_CONFIG_FILE.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .ok()?;
+        (bytes.len() as u64 <= MAX_CONFIG_FILE).then_some(bytes)
+    }
+}
+
 fn migrate_legacy_config(config_dir: &std::path::Path) {
+    if !ensure_private_config_dir(config_dir) {
+        return;
+    }
     let marker = config_dir.join(".legacy-migrated");
     if marker.exists() {
         return;
@@ -111,19 +210,297 @@ fn migrate_legacy_config(config_dir: &std::path::Path) {
         }
         for candidate in &candidates {
             let source = candidate.join(name);
-            if source == destination || !source.is_file() {
+            if source == destination {
                 continue;
             }
-            if std::fs::create_dir_all(config_dir).is_ok()
-                && std::fs::copy(&source, &destination).is_ok()
+            if let Some(bytes) = read_legacy_config_file(&source)
+                && write_atomic(&destination, &bytes).is_ok()
             {
                 break;
             }
         }
     }
     // Mark migration complete to prevent rediscovery
-    let _ = std::fs::create_dir_all(config_dir);
-    let _ = std::fs::write(marker, b"1");
+    let _ = write_atomic(&marker, b"1");
+}
+
+pub(crate) fn ensure_private_config_dir(config_dir: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+        if let Some(parent) = config_dir.parent()
+            && std::fs::create_dir_all(parent).is_err()
+        {
+            return false;
+        }
+        if let Some(parent) = config_dir.parent()
+            && !unix_directory_is_private(parent)
+        {
+            // Every ancestor must prevent another user from replacing the
+            // private directory entry after it has been checked.
+            return false;
+        }
+        match std::fs::DirBuilder::new().mode(0o700).create(config_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return false,
+        }
+        // Open the directory itself without following a final symlink. Apply
+        // permissions through the handle so a path swap cannot chmod a target.
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let Ok(directory) = options.open(config_dir) else {
+            return false;
+        };
+        let Ok(metadata) = directory.metadata() else {
+            return false;
+        };
+        if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+            return false;
+        }
+        return metadata.permissions().mode() & 0o777 == 0o700
+            || directory
+                .set_permissions(std::fs::Permissions::from_mode(0o700))
+                .is_ok();
+    }
+    #[cfg(windows)]
+    {
+        std::fs::create_dir_all(config_dir).is_ok() && windows_directory_is_private(config_dir)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::fs::create_dir_all(config_dir).is_ok()
+    }
+}
+
+#[cfg(windows)]
+fn windows_check_directory(path: &Path, check: fn(&std::fs::File) -> bool) -> bool {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).custom_flags(0x02000000 | 0x00200000);
+    options.open(path).is_ok_and(|directory| {
+        directory.metadata().is_ok_and(|metadata| {
+            metadata.is_dir() && metadata.file_attributes() & 0x400 == 0 && check(&directory)
+        })
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_directory_is_private(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    let mut directories = path.ancestors().collect::<Vec<_>>();
+    directories.reverse();
+    directories.iter().enumerate().all(|(index, directory)| {
+        let check = if index + 1 == directories.len() {
+            windows_file_is_private
+        } else {
+            windows_directory_is_not_replaceable
+        };
+        windows_check_directory(directory, check)
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_file_is_private(file: &std::fs::File) -> bool {
+    windows_acl_is_safe(file, false, false)
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_file_is_not_shared_writable(file: &std::fs::File) -> bool {
+    windows_acl_is_safe(file, true, false)
+}
+
+#[cfg(windows)]
+fn windows_directory_is_not_replaceable(file: &std::fs::File) -> bool {
+    windows_acl_is_safe(file, true, true)
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_directory_is_not_shared_writable(path: &Path) -> bool {
+    path.is_absolute()
+        && path.ancestors().all(|directory| {
+            windows_check_directory(directory, windows_directory_is_not_replaceable)
+        })
+}
+
+#[cfg(windows)]
+fn windows_acl_is_safe(file: &std::fs::File, allow_read_only: bool, directory: bool) -> bool {
+    use std::{ffi::c_void, os::windows::io::AsRawHandle, ptr};
+    use windows_sys::Win32::{
+        Foundation::LocalFree,
+        Security::Authorization::{ConvertStringSidToSidW, GetSecurityInfo, SE_FILE_OBJECT},
+        Security::{
+            ACCESS_ALLOWED_ACE, ACE_HEADER, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+            GetSecurityDescriptorDacl, OWNER_SECURITY_INFORMATION,
+        },
+    };
+
+    struct Allocation(*mut c_void);
+    impl Drop for Allocation {
+        fn drop(&mut self) {
+            unsafe { LocalFree(self.0) };
+        }
+    }
+
+    fn sid(value: &str) -> Option<Allocation> {
+        let value: Vec<u16> = value.encode_utf16().chain(Some(0)).collect();
+        let mut sid = ptr::null_mut();
+        if unsafe { ConvertStringSidToSidW(value.as_ptr(), &mut sid) } == 0 || sid.is_null() {
+            None
+        } else {
+            Some(Allocation(sid.cast()))
+        }
+    }
+
+    unsafe {
+        let mut owner = ptr::null_mut();
+        let mut dacl = ptr::null_mut();
+        let mut descriptor = ptr::null_mut();
+        if GetSecurityInfo(
+            file.as_raw_handle() as _,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        ) != 0
+            || descriptor.is_null()
+        {
+            return false;
+        }
+        let descriptor = Allocation(descriptor.cast());
+        let Ok(user) = crate::agent_ipc::user_sid() else {
+            return false;
+        };
+        let Some(user_sid) = sid(&user) else {
+            return false;
+        };
+        let Some(system_sid) = sid("S-1-5-18") else {
+            return false;
+        };
+        let Some(admins_sid) = sid("S-1-5-32-544") else {
+            return false;
+        };
+        let Some(installer_sid) =
+            sid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
+        else {
+            return false;
+        };
+        if owner.is_null()
+            || ![&user_sid, &system_sid, &admins_sid, &installer_sid]
+                .iter()
+                .any(|trusted| EqualSid(owner, trusted.0.cast()) != 0)
+        {
+            return false;
+        }
+        let Some(creator_sid) = sid("S-1-3-0") else {
+            return false;
+        };
+        let trusted = [user_sid, system_sid, admins_sid, installer_sid, creator_sid];
+        let mut present = 0;
+        let mut defaulted = 0;
+        if GetSecurityDescriptorDacl(descriptor.0.cast(), &mut present, &mut dacl, &mut defaulted)
+            == 0
+            || present == 0
+            || dacl.is_null()
+        {
+            return false;
+        }
+        for index in 0..(*dacl).AceCount as u32 {
+            let mut ace = ptr::null_mut();
+            if GetAce(dacl, index, &mut ace) == 0 || ace.is_null() {
+                return false;
+            }
+            let header = &*ace.cast::<ACE_HEADER>();
+            // Inherit-only ACEs do not grant access to this directory/file;
+            // their effective permissions are checked on each child instead.
+            if header.AceFlags & 0x08 != 0 {
+                continue;
+            }
+            match header.AceType {
+                0 => {
+                    let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+                    let trustee = ptr::addr_of!(allowed.SidStart).cast_mut().cast();
+                    let trusted_principal = trusted
+                        .iter()
+                        .any(|allowed| EqualSid(trustee, allowed.0.cast()) != 0);
+                    const WRITE_MASK: u32 = 0x40000000
+                        | 0x10000000
+                        | 0x00010000
+                        | 0x00040000
+                        | 0x00080000
+                        | 0x00000002
+                        | 0x00000004
+                        | 0x00000010
+                        | 0x00000100
+                        | 0x00000040;
+                    const DIRECTORY_REPLACE_MASK: u32 =
+                        0x10000000 | 0x00010000 | 0x00040000 | 0x00080000 | 0x00000040;
+                    let restricted = if directory {
+                        DIRECTORY_REPLACE_MASK
+                    } else {
+                        WRITE_MASK
+                    };
+                    if !trusted_principal && (!allow_read_only || allowed.Mask & restricted != 0) {
+                        return false;
+                    }
+                }
+                1 => {}
+                // Unknown ACE types may grant access through object or callback
+                // semantics; reject them rather than silently weakening checks.
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+#[cfg(unix)]
+fn safe_owned_directory(is_dir: bool, owner: u32, mode: u32, current_uid: u32) -> bool {
+    is_dir && (owner == current_uid || owner == 0) && (mode & 0o022 == 0 || mode & 0o1000 != 0)
+}
+
+#[cfg(unix)]
+pub(crate) fn unix_directory_is_private(path: &Path) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if !path.is_absolute() {
+        return false;
+    }
+    let current_uid = unsafe { libc::geteuid() };
+    let mut current = PathBuf::new();
+    path.components().all(|component| {
+        current.push(component);
+        if std::fs::symlink_metadata(&current).is_ok_and(|metadata| {
+            metadata.file_type().is_symlink()
+                && metadata.uid() != current_uid
+                && metadata.uid() != 0
+        }) {
+            return false;
+        }
+        std::fs::metadata(&current).is_ok_and(|metadata| {
+            safe_owned_directory(
+                metadata.is_dir(),
+                metadata.uid(),
+                metadata.permissions().mode(),
+                current_uid,
+            )
+        })
+    })
+}
+
+#[cfg(all(test, unix))]
+fn restrict_private_file(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn get_config_dir() -> std::path::PathBuf {
@@ -153,6 +530,29 @@ pub(crate) fn vault_exists() -> bool {
 
 // Backups use the existing encrypted vault format, not a plaintext export.
 const MAX_VAULT_BACKUP: u64 = 128 * 1024 * 1024;
+const MAX_CONFIG_FILE: u64 = 16 * 1024 * 1024;
+
+fn legacy_vault_salt() -> [u8; VAULT_SALT_LEN] {
+    blake3::hash(b"rterm-vault-v2").as_bytes()[..VAULT_SALT_LEN]
+        .try_into()
+        .unwrap()
+}
+
+fn vault_version(data: &[u8]) -> Result<u16, String> {
+    if data.len() < 6 || &data[..4] != VAULT_MAGIC {
+        return Err("Not an RTerm encrypted vault".into());
+    }
+    let version = u16::from_le_bytes([data[4], data[5]]);
+    let minimum = match version {
+        LEGACY_VAULT_VERSION => 46,
+        VAULT_VERSION => 6 + VAULT_SALT_LEN + 24 + 16,
+        _ => return Err("Unsupported vault version".into()),
+    };
+    if data.len() < minimum {
+        return Err("Truncated RTerm vault".into());
+    }
+    Ok(version)
+}
 
 fn read_vault_backup(path: &Path) -> Result<Vec<u8>, String> {
     let metadata = std::fs::metadata(path).map_err(|e| format!("Open vault: {e}"))?;
@@ -170,12 +570,120 @@ fn read_vault_backup(path: &Path) -> Result<Vec<u8>, String> {
     if bytes.len() as u64 > MAX_VAULT_BACKUP {
         return Err("Vault backup exceeds 128 MiB".into());
     }
-    if bytes.len() < 46 || &bytes[..4] != VAULT_MAGIC {
-        return Err("Not an RTerm encrypted vault".into());
+    vault_version(&bytes)?;
+    Ok(bytes)
+}
+
+pub(crate) fn read_private_config_file(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>, String> {
+    let directory = path.parent().ok_or("Missing config directory")?;
+    if !ensure_private_config_dir(directory) {
+        return Err("Unsafe RTerm config directory".into());
     }
-    if u16::from_le_bytes([bytes[4], bytes[5]]) != VAULT_VERSION {
-        return Err("Unsupported vault backup version".into());
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let file = match options.open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1
+        {
+            return Err("Config file must be a regular file owned only by this user".into());
+        }
+        if metadata.permissions().mode() & 0o077 != 0 {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| error.to_string())?;
+        }
+        if metadata.len() > max_bytes {
+            return Err("Config file exceeds its size limit".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if bytes.len() as u64 > max_bytes {
+            return Err("Config file exceeds its size limit".into());
+        }
+        Ok(Some(bytes))
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::{
+            fs::{MetadataExt, OpenOptionsExt},
+            io::AsRawHandle,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        options.custom_flags(0x00200000);
+        let file = match options.open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        if !metadata.is_file()
+            || metadata.file_attributes() & 0x400 != 0
+            || info.nNumberOfLinks != 1
+            || !windows_file_is_private(&file)
+        {
+            return Err("Config file must be a private regular file".into());
+        }
+        if metadata.file_size() > max_bytes {
+            return Err("Config file exceeds its size limit".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if bytes.len() as u64 > max_bytes {
+            return Err("Config file exceeds its size limit".into());
+        }
+        Ok(Some(bytes))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let file = match options.open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
+        if !file
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .is_file()
+        {
+            return Err("Config file must be a regular file".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if bytes.len() as u64 > max_bytes {
+            return Err("Config file exceeds its size limit".into());
+        }
+        Ok(Some(bytes))
+    }
+}
+
+fn read_private_vault(path: &Path) -> Result<Vec<u8>, String> {
+    let bytes = read_private_config_file(path, MAX_VAULT_BACKUP)?
+        .ok_or_else(|| "Vault file not found".to_string())?;
+    vault_version(&bytes)?;
     Ok(bytes)
 }
 
@@ -196,7 +704,7 @@ pub(crate) fn export_vault(destination: &Path, key: &VaultKey) -> Result<(), Str
 
 fn export_vault_at(path: &Path, destination: &Path, key: &VaultKey) -> Result<(), String> {
     let _lock = lock_storage(path)?;
-    let bytes = read_vault_backup(path)?;
+    let bytes = read_private_vault(path)?;
     decode_vault(&bytes, key)?;
     write_new_backup(destination, &bytes)
 }
@@ -208,7 +716,8 @@ pub(crate) struct VaultBackup {
 impl VaultBackup {
     pub(crate) fn read(path: &Path, password: &str) -> Result<Self, String> {
         let bytes = read_vault_backup(path)?;
-        decode_vault(&bytes, &VaultKey::derive(password))?;
+        let (key, _) = VaultKey::from_data(password, &bytes)?;
+        decode_vault(&bytes, &key)?;
         Ok(Self { bytes })
     }
 }
@@ -234,7 +743,7 @@ fn import_vault_at(
             return Err("An existing vault must be explicitly replaced".into());
         }
         let key = current_key.ok_or("Unlock the existing vault before replacing it")?;
-        let bytes = read_vault_backup(&path)?;
+        let bytes = read_private_vault(&path)?;
         decode_vault(&bytes, key)?;
         let mut file = tempfile::Builder::new()
             .prefix("vault-before-import-")
@@ -330,10 +839,7 @@ fn update_vault(
         }
         Vault::default()
     } else {
-        decode_vault(
-            &std::fs::read(path).map_err(|error| error.to_string())?,
-            key,
-        )?
+        decode_vault(&read_private_vault(path)?, key)?
     };
     update(&mut vault);
     let bytes = encode_vault(&vault, key)?;
@@ -343,16 +849,78 @@ fn update_vault(
 
 pub(crate) fn lock_storage(path: &Path) -> Result<std::fs::File, String> {
     let directory = path.parent().ok_or("Missing storage directory")?;
-    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path.with_extension("lock"))
-        .map_err(|error| error.to_string())?;
-    file.lock().map_err(|error| error.to_string())?;
-    Ok(file)
+    if !ensure_private_config_dir(directory) {
+        return Err("Unsafe RTerm storage directory".into());
+    }
+    let lock_path = path.with_extension("lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let file = options
+            .open(&lock_path)
+            .map_err(|error| error.to_string())?;
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1
+        {
+            return Err("Unsafe RTerm storage lock file".into());
+        }
+        if metadata.permissions().mode() & 0o077 != 0 {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| error.to_string())?;
+        }
+        file.lock().map_err(|error| error.to_string())?;
+        Ok(file)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::{
+            fs::{MetadataExt, OpenOptionsExt},
+            io::AsRawHandle,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        options.custom_flags(0x00200000).share_mode(3);
+        let file = options
+            .open(&lock_path)
+            .map_err(|error| error.to_string())?;
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        if !metadata.is_file()
+            || metadata.file_attributes() & 0x400 != 0
+            || info.nNumberOfLinks != 1
+            || !windows_file_is_private(&file)
+        {
+            return Err("Unsafe RTerm storage lock file".into());
+        }
+        file.lock().map_err(|error| error.to_string())?;
+        Ok(file)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let file = options
+            .open(&lock_path)
+            .map_err(|error| error.to_string())?;
+        if !file
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .is_file()
+        {
+            return Err("Unsafe RTerm storage lock file".into());
+        }
+        file.lock().map_err(|error| error.to_string())?;
+        Ok(file)
+    }
 }
 
 fn encode_vault(vault: &Vault, key: &VaultKey) -> Result<Vec<u8>, String> {
@@ -388,63 +956,81 @@ fn encode_vault(vault: &Vault, key: &VaultKey) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     buf.extend_from_slice(VAULT_MAGIC);
     buf.extend_from_slice(&VAULT_VERSION.to_le_bytes());
+    buf.extend_from_slice(&key.1);
     buf.extend_from_slice(&nonce);
     buf.extend_from_slice(&ciphertext);
     Ok(buf)
 }
 
 pub(crate) fn load_vault(password: &str) -> Result<(Vault, VaultKey), String> {
-    let config_dir = get_config_dir();
-    let data = std::fs::read(config_dir.join("vault.dat")).map_err(|e| e.to_string())?;
-    let key = VaultKey::derive(password);
-    Ok((decode_vault(&data, &key)?, key))
+    load_vault_at(&get_config_dir().join("vault.dat"), password)
+}
+
+fn load_vault_at(path: &Path, password: &str) -> Result<(Vault, VaultKey), String> {
+    let _lock = lock_storage(path)?;
+    let data = read_private_vault(path)?;
+    let (key, legacy) = VaultKey::from_data(password, &data)?;
+    let vault = decode_vault(&data, &key)?;
+    if legacy {
+        // Upgrade the shared-salt format only after successful authentication.
+        let key = VaultKey::derive(password);
+        write_atomic(path, &encode_vault(&vault, &key)?)?;
+        Ok((vault, key))
+    } else {
+        Ok((vault, key))
+    }
 }
 
 fn decode_vault(data: &[u8], key: &VaultKey) -> Result<Vault, String> {
-    if data.len() < 46 || &data[..4] != VAULT_MAGIC {
-        return Err("wrong password or corrupted vault".to_string());
-    }
-    let nonce = XNonce::from_slice(&data[6..30]);
-    let ciphertext = &data[30..];
+    let (nonce, ciphertext) =
+        match vault_version(data).map_err(|_| "wrong password or corrupted vault".to_string())? {
+            LEGACY_VAULT_VERSION => (XNonce::from_slice(&data[6..30]), &data[30..]),
+            VAULT_VERSION => (
+                XNonce::from_slice(&data[6 + VAULT_SALT_LEN..6 + VAULT_SALT_LEN + 24]),
+                &data[6 + VAULT_SALT_LEN + 24..],
+            ),
+            _ => unreachable!(),
+        };
     let cipher = XChaCha20Poly1305::new_from_slice(&key.0).unwrap();
     match cipher.decrypt(nonce, ciphertext) {
         Ok(plaintext) => {
-            let json_str = zeroize::Zeroizing::new(
-                String::from_utf8(plaintext).map_err(|_| "invalid utf8".to_string())?,
-            );
+            let plaintext = zeroize::Zeroizing::new(plaintext);
             let mut container: serde_json::Value =
-                serde_json::from_str(&json_str).map_err(|_| "invalid json".to_string())?;
-            let sessions = container
-                .get("profiles")
-                .or_else(|| container.get("sessions"))
-                .and_then(|sessions| sessions.as_array())
-                .map(|sessions| {
-                    sessions
-                        .iter()
-                        .filter_map(|session| {
-                            serde_json::from_value::<Profile>(session.clone())
+                serde_json::from_slice(&plaintext).map_err(|_| "invalid json".to_string())?;
+            let sessions = match container
+                .as_object_mut()
+                .and_then(|map| map.remove("profiles").or_else(|| map.remove("sessions")))
+            {
+                Some(serde_json::Value::Array(sessions)) => sessions
+                    .into_iter()
+                    .filter_map(|session| {
+                        if session.get("connection").is_some() {
+                            serde_json::from_value::<Profile>(session).ok()
+                        } else {
+                            serde_json::from_value::<SshConfig>(session)
                                 .ok()
-                                .or_else(|| {
-                                    serde_json::from_value::<SshConfig>(session.clone())
-                                        .ok()
-                                        .map(Profile::from)
-                                })
-                        })
-                        .collect()
-                })
+                                .map(Profile::from)
+                        }
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let keys: Vec<SshKey> = container
+                .as_object_mut()
+                .and_then(|map| map.remove("keys"))
+                .and_then(|value| serde_json::from_value(value).ok())
                 .unwrap_or_default();
-            let keys = container
-                .get("keys")
-                .and_then(|s| serde_json::from_value(s.clone()).ok())
-                .unwrap_or_default();
-            let agent_audit = container
-                .get("agent_audit")
-                .and_then(|entries| entries.as_array())
-                .into_iter()
-                .flatten()
-                .filter_map(|entry| serde_json::from_value(entry.clone()).ok())
-                .take(AGENT_AUDIT_LIMIT)
-                .collect();
+            let agent_audit: VecDeque<AgentAuditEntry> = match container
+                .as_object_mut()
+                .and_then(|map| map.remove("agent_audit"))
+            {
+                Some(serde_json::Value::Array(entries)) => entries
+                    .into_iter()
+                    .filter_map(|entry| serde_json::from_value(entry).ok())
+                    .take(AGENT_AUDIT_LIMIT)
+                    .collect(),
+                _ => VecDeque::new(),
+            };
             let openai_tunnel = container
                 .as_object_mut()
                 .and_then(|map| map.remove("openai_tunnel"))
@@ -475,13 +1061,13 @@ fn save_settings_at(path: &Path, entries: &[(&str, String)]) -> Result<(), Strin
     // Serialize read-modify-write operations and never replace a corrupt or
     // unreadable settings file with an empty object.
     let _lock = lock_storage(path)?;
-    let mut settings: serde_json::Map<String, serde_json::Value> = match std::fs::read(path) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).map_err(|error| format!("Read settings: {error}"))?
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
-        Err(error) => return Err(format!("Read settings: {error}")),
-    };
+    let mut settings: serde_json::Map<String, serde_json::Value> =
+        match read_private_config_file(path, MAX_CONFIG_FILE)? {
+            Some(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|error| format!("Read settings: {error}"))?
+            }
+            None => Default::default(),
+        };
     settings.extend(
         entries
             .iter()
@@ -495,8 +1081,14 @@ fn save_settings_at(path: &Path, entries: &[(&str, String)]) -> Result<(), Strin
 
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let directory = path.parent().ok_or("Missing destination directory")?;
-    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    if !ensure_private_config_dir(directory) {
+        return Err("Unsafe RTerm storage directory".into());
+    }
     let mut file = tempfile::NamedTempFile::new_in(directory).map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    if !windows_file_is_private(file.as_file()) {
+        return Err("Config file permissions are not private".into());
+    }
     file.write_all(bytes)
         .and_then(|()| file.as_file().sync_all())
         .map_err(|error| error.to_string())?;
@@ -504,9 +1096,79 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn private_temp_dir() -> Result<PathBuf, String> {
+    let directory = get_config_dir().join("tmp");
+    if ensure_private_config_dir(&directory) {
+        Ok(directory)
+    } else {
+        Err("Unsafe RTerm temporary directory".into())
+    }
+}
+
+fn private_temp_file_in(
+    directory: &Path,
+    prefix: &str,
+    suffix: &str,
+) -> std::io::Result<tempfile::NamedTempFile> {
+    let file = tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(suffix)
+        .tempfile_in(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let metadata = file.as_file().metadata()?;
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Temporary file is not private",
+            ));
+        }
+    }
+    #[cfg(windows)]
+    if !windows_file_is_private(file.as_file()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Temporary file permissions are not private",
+        ));
+    }
+    Ok(file)
+}
+
+pub(crate) fn create_private_temp_file(
+    prefix: &str,
+    suffix: &str,
+) -> std::io::Result<tempfile::NamedTempFile> {
+    let directory = private_temp_dir()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error))?;
+    private_temp_file_in(&directory, prefix, suffix)
+}
+
+#[cfg(test)]
+pub(crate) fn test_private_tempdir() -> tempfile::TempDir {
+    #[cfg(windows)]
+    {
+        let parent = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .expect("APPDATA is required for private Windows test directories");
+        tempfile::Builder::new()
+            .prefix("rterm-test-")
+            .tempdir_in(parent)
+            .unwrap()
+    }
+    #[cfg(not(windows))]
+    {
+        tempfile::tempdir().unwrap()
+    }
+}
+
 pub(crate) fn load_profiles() -> Vec<Profile> {
-    std::fs::read(get_config_dir().join("sessions.json"))
+    read_private_config_file(&get_config_dir().join("sessions.json"), MAX_CONFIG_FILE)
         .ok()
+        .flatten()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
 }
@@ -551,9 +1213,8 @@ pub(crate) fn delete_vault() -> Result<(), String> {
 
 pub(crate) fn load_setting(key: &str) -> Option<String> {
     let path = get_settings_path();
-    let settings: serde_json::Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())?;
+    let bytes = read_private_config_file(&path, MAX_CONFIG_FILE).ok()??;
+    let settings: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     settings
         .get(key)
         .and_then(|v| v.as_str())
@@ -653,9 +1314,12 @@ pub(crate) fn parse_key(name: &str, private: &str, public: &str) -> Result<SshKe
 
 pub(crate) fn write_key(key: &SshKey) -> Result<(), String> {
     let directory = ssh_dir();
-    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let private = directory.join(crate::backend::safe_name(&key.name)?);
-    let public = directory.join(format!("{}.pub", key.name));
+    if !ensure_private_config_dir(&directory) {
+        return Err("Unsafe SSH key directory".into());
+    }
+    let name = crate::backend::safe_name(&key.name)?;
+    let private = directory.join(name);
+    let public = directory.join(format!("{name}.pub"));
     let mut private_file =
         tempfile::NamedTempFile::new_in(&directory).map_err(|error| error.to_string())?;
     let mut public_file =
@@ -677,6 +1341,9 @@ pub(crate) fn write_key(key: &SshKey) -> Result<(), String> {
 pub(crate) fn list_keys() -> Vec<serde_json::Value> {
     let dir = ssh_dir();
     let mut keys = Vec::new();
+    if !ensure_private_config_dir(&dir) {
+        return keys;
+    }
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(_) => return keys,
@@ -690,9 +1357,13 @@ pub(crate) fn list_keys() -> Vec<serde_json::Value> {
         {
             continue;
         }
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let content = match read_private_config_file(&path, MAX_CONFIG_FILE)
+            .ok()
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+        {
+            Some(content) => content,
+            None => continue,
         };
         if !content.contains("BEGIN") || !content.contains("PRIVATE KEY") {
             continue;
@@ -729,8 +1400,12 @@ pub(crate) fn list_keys() -> Vec<serde_json::Value> {
 
 pub(crate) fn delete_key(path: &str) -> Result<(), String> {
     let path = PathBuf::from(path);
-    if path.parent() != Some(ssh_dir().as_path()) {
+    let directory = ssh_dir();
+    if path.parent() != Some(directory.as_path()) {
         return Err("SSH key is outside the key directory".into());
+    }
+    if !ensure_private_config_dir(&directory) {
+        return Err("Unsafe SSH key directory".into());
     }
     std::fs::remove_file(&path).map_err(|error| error.to_string())?;
     let mut public = path.into_os_string();
@@ -742,7 +1417,9 @@ pub(crate) fn delete_key(path: &str) -> Result<(), String> {
     }
 }
 pub(crate) fn remove_profiles() -> Result<(), String> {
-    match std::fs::remove_file(get_config_dir().join("sessions.json")) {
+    let path = get_config_dir().join("sessions.json");
+    let _lock = lock_storage(&path)?;
+    match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.to_string()),
@@ -753,14 +1430,183 @@ pub(crate) fn remove_profiles() -> Result<(), String> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn config_parent_requires_a_trusted_owner() {
+        assert!(safe_owned_directory(true, 1000, 0o755, 1000));
+        assert!(safe_owned_directory(true, 0, 0o1777, 1000));
+        assert!(!safe_owned_directory(true, 2000, 0o755, 1000));
+        assert!(!safe_owned_directory(true, 2000, 0o1777, 1000));
+        assert!(!safe_owned_directory(true, 1000, 0o777, 1000));
+        assert!(!safe_owned_directory(false, 1000, 0o700, 1000));
+    }
+
+    #[test]
+    fn legacy_migration_accepts_only_trusted_regular_files() {
+        let temp = test_private_tempdir();
+        let trusted = temp.path().join("trusted");
+        std::fs::create_dir(&trusted).unwrap();
+        let source = trusted.join("settings.json");
+        std::fs::write(&source, br#"{"ai_access":"ask"}"#).unwrap();
+        assert_eq!(
+            read_legacy_config_file(&source).unwrap(),
+            br#"{"ai_access":"ask"}"#
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+            let shared = temp.path().join("shared");
+            std::fs::create_dir(&shared).unwrap();
+            std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let untrusted = shared.join("settings.json");
+            std::fs::write(&untrusted, br#"{"ai_access":"unrestricted"}"#).unwrap();
+            assert!(read_legacy_config_file(&untrusted).is_none());
+
+            let alias = trusted.join("linked.json");
+            symlink(&source, &alias).unwrap();
+            assert!(read_legacy_config_file(&alias).is_none());
+            let hardlink = trusted.join("hardlinked.json");
+            std::fs::hard_link(&source, &hardlink).unwrap();
+            assert!(read_legacy_config_file(&hardlink).is_none());
+        }
+    }
+
+    #[test]
+    fn private_temp_files_have_restricted_permissions() {
+        let directory = test_private_tempdir();
+        let file = private_temp_file_in(directory.path(), "rterm-output-", ".log").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let metadata = file.as_file().metadata().unwrap();
+            assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+            assert_eq!(metadata.nlink(), 1);
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        }
+        #[cfg(windows)]
+        assert!(windows_file_is_private(file.as_file()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn config_directory_and_files_require_private_windows_acls() {
+        let temp = test_private_tempdir();
+        let config = temp.path().join("rterm");
+        assert!(ensure_private_config_dir(&config));
+        let path = config.join("settings.json");
+        write_atomic(&path, br#"{"ai_access":"ask"}"#).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        assert!(windows_file_is_private(&file));
+        assert!(
+            read_private_config_file(&path, MAX_CONFIG_FILE)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_directory_and_migrated_files_are_private() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = test_private_tempdir();
+        let config = temp.path().join("rterm");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ensure_private_config_dir(&config));
+        assert_eq!(
+            std::fs::symlink_metadata(&config)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+
+        let copied = config.join("vault.dat");
+        std::fs::write(&copied, b"encrypted vault").unwrap();
+        std::fs::set_permissions(&copied, std::fs::Permissions::from_mode(0o644)).unwrap();
+        restrict_private_file(&copied).unwrap();
+        assert_eq!(
+            std::fs::metadata(&copied).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let target = temp.path().join("target");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&target, &alias).unwrap();
+        assert!(!ensure_private_config_dir(&alias));
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+
+        let shared = temp.path().join("shared");
+        let private_child = shared.join("rterm");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::create_dir(&private_child).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!ensure_private_config_dir(&private_child));
+
+        let vault_path = config.join("vault.dat");
+        let key = VaultKey::derive("private file fixture");
+        write_atomic(&vault_path, &encode_vault(&Vault::default(), &key).unwrap()).unwrap();
+        std::fs::set_permissions(&vault_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_private_vault(&vault_path).is_ok());
+        assert_eq!(
+            std::fs::metadata(&vault_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let vault_symlink = config.join("vault-symlink.dat");
+        let vault_hardlink = config.join("vault-hardlink.dat");
+        symlink(&vault_path, &vault_symlink).unwrap();
+        std::fs::hard_link(&vault_path, &vault_hardlink).unwrap();
+        assert!(read_private_vault(&vault_symlink).is_err());
+        assert!(read_private_vault(&vault_hardlink).is_err());
+
+        let config_symlink = config.join("settings-symlink.json");
+        let config_hardlink = config.join("settings-hardlink.json");
+        let settings = config.join("settings-target.json");
+        std::fs::write(&settings, b"{\"ai_access\":\"ask\"}").unwrap();
+        symlink(&settings, &config_symlink).unwrap();
+        std::fs::hard_link(&settings, &config_hardlink).unwrap();
+        assert!(read_private_config_file(&config_symlink, MAX_CONFIG_FILE).is_err());
+        assert!(read_private_config_file(&config_hardlink, MAX_CONFIG_FILE).is_err());
+    }
+
+    fn legacy_vault(password: &str) -> Vec<u8> {
+        let key = VaultKey::derive_with_salt(password, legacy_vault_salt());
+        let plaintext = serde_json::to_vec(&serde_json::json!({
+            "v": 2,
+            "profiles": [{
+                "name": "Legacy profile",
+                "connection": {"type": "local", "shell": "bash"}
+            }]
+        }))
+        .unwrap();
+        let cipher = XChaCha20Poly1305::new_from_slice(&key.0).unwrap();
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let ciphertext = cipher.encrypt(&nonce, plaintext.as_slice()).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(VAULT_MAGIC);
+        bytes.extend_from_slice(&LEGACY_VAULT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&nonce);
+        bytes.extend_from_slice(&ciphertext);
+        bytes
+    }
+
     #[test]
     fn imported_ssh_credentials_are_written_only_to_an_existing_vault() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_private_tempdir();
         let path = dir.path().join("vault.dat");
         let export = dir.path().join("hosts_export_test.csv");
         std::fs::write(&export, "Label,Hostname/IP,Protocol,Username,Password,KeyPath,Passphrase\nImported,test.example,ssh,alice,fixture-netcatty-password,/test/key,fixture-key-passphrase\n").unwrap();
         let incoming = || crate::session_import::read(&export).unwrap().profiles;
-        let key = VaultKey([42; 32]);
+        let key = VaultKey([42; 32], [42; VAULT_SALT_LEN]);
         assert!(import_vault_profiles_at(&path, &key, incoming()).is_err());
         assert!(!path.exists());
         update_vault(&path, &key, true, |vault| {
@@ -805,7 +1651,7 @@ mod tests {
 
     #[test]
     fn settings_updates_preserve_other_keys_and_corrupt_files() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_private_tempdir();
         let path = dir.path().join("new-config/settings.json");
         save_settings_at(&path, &[("font_size", "13".into())]).unwrap();
         save_settings_at(&path, &[("sftp_show_hidden", "1".into())]).unwrap();
@@ -820,12 +1666,12 @@ mod tests {
 
     #[test]
     fn vault_backup_roundtrip_preserves_encrypted_contents_and_previous_vault() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_private_tempdir();
         let source = dir.path().join("source.dat");
         let exported = dir.path().join("portable.rterm-vault");
         let destination = dir.path().join("restored");
         let key = VaultKey::derive("fixture backup password");
-        let previous_key = VaultKey([9; 32]);
+        let previous_key = VaultKey([9; 32], [9; VAULT_SALT_LEN]);
         update_vault(&source, &key, true, |vault| {
             vault.profiles.push(Profile {
                 name: "Backup session".into(),
@@ -891,10 +1737,44 @@ mod tests {
     }
 
     #[test]
+    fn legacy_shared_salt_vaults_migrate_after_successful_unlock() {
+        const PASSWORD: &str = "legacy fixture password";
+        let dir = test_private_tempdir();
+        let path = dir.path().join("vault.dat");
+        let backup_path = dir.path().join("legacy-backup.rterm-vault");
+        let original = legacy_vault(PASSWORD);
+        write_atomic(&path, &original).unwrap();
+        write_atomic(&backup_path, &original).unwrap();
+
+        assert!(VaultBackup::read(&backup_path, "incorrect password").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let backup = VaultBackup::read(&backup_path, PASSWORD).unwrap();
+        assert_eq!(backup.bytes, original);
+
+        let (vault, key) = load_vault_at(&path, PASSWORD).unwrap();
+        assert_eq!(vault.profiles[0].name, "Legacy profile");
+        assert_eq!(vault.profiles[0].subtitle(), "bash");
+
+        let migrated = std::fs::read(&path).unwrap();
+        assert_eq!(vault_version(&migrated), Ok(VAULT_VERSION));
+        assert_ne!(&migrated[6..6 + VAULT_SALT_LEN], &legacy_vault_salt());
+        assert_eq!(decode_vault(&migrated, &key).unwrap().profiles.len(), 1);
+        assert!(!VaultKey::from_data(PASSWORD, &migrated).unwrap().1);
+    }
+
+    #[test]
+    fn equal_passwords_receive_independent_vault_salts() {
+        let first = VaultKey::derive("same password");
+        let second = VaultKey::derive("same password");
+        assert_ne!(first.1, second.1);
+        assert_ne!(first.0, second.0);
+    }
+
+    #[test]
     fn vault_import_rejects_invalid_files_and_rolls_back_on_settings_failure() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_private_tempdir();
         let file = dir.path().join("incoming.rterm-vault");
-        let key = VaultKey([7; 32]);
+        let key = VaultKey([7; 32], [7; VAULT_SALT_LEN]);
         let mut bytes = encode_vault(&Vault::default(), &key).unwrap();
         std::fs::write(&file, b"not a vault").unwrap();
         assert!(read_vault_backup(&file).is_err());
@@ -907,7 +1787,8 @@ mod tests {
         std::fs::write(&file, &bytes).unwrap();
         assert!(decode_vault(&read_vault_backup(&file).unwrap(), &key).is_err());
         let original = encode_vault(&Vault::default(), &key).unwrap();
-        let replacement = encode_vault(&Vault::default(), &VaultKey([8; 32])).unwrap();
+        let replacement =
+            encode_vault(&Vault::default(), &VaultKey([8; 32], [8; VAULT_SALT_LEN])).unwrap();
         let settings = dir.path().join("settings.json");
         std::fs::write(&settings, b"invalid settings").unwrap();
         let path = dir.path().join("vault.dat");
@@ -939,9 +1820,9 @@ mod tests {
 
     #[test]
     fn audit_commands_survive_encrypted_vault_updates() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_private_tempdir();
         let path = dir.path().join("vault.dat");
-        let key = VaultKey([7; 32]);
+        let key = VaultKey([7; 32], [7; VAULT_SALT_LEN]);
         let command = "echo vault-audit-fixture";
         let tunnel_id = "tunnel_0123456789abcdef0123456789abcdef";
         let runtime_key = "sk-fixture-only-not-an-openai-key";
@@ -994,7 +1875,7 @@ mod tests {
                     .any(|window| window == secret.as_bytes())
             );
         }
-        assert!(decode_vault(&bytes, &VaultKey([8; 32])).is_err());
+        assert!(decode_vault(&bytes, &VaultKey([8; 32], [8; VAULT_SALT_LEN])).is_err());
         let vault = decode_vault(&bytes, &key).unwrap();
         assert_eq!(vault.profiles[0].name, "Updated profile");
         assert_eq!(vault.agent_audit[0].command, command);

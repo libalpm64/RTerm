@@ -29,6 +29,21 @@ pub(crate) fn target(host: &str, port: u16) -> String {
     )
 }
 
+pub(crate) fn display_host(host: &str) -> String {
+    host.chars()
+        .map(|character| match character {
+            '\\' => "\\\\".into(),
+            character
+                if character.is_ascii_graphic()
+                    && !crate::agent_upload::is_unsafe_char(character) =>
+            {
+                character.to_string()
+            }
+            character => format!("\\u{{{:04X}}}", character as u32),
+        })
+        .collect()
+}
+
 pub(crate) struct Store {
     path: Option<PathBuf>,
     memory: BTreeMap<String, Key>,
@@ -46,12 +61,13 @@ impl Store {
         let Some(path) = &self.path else {
             return Ok(self.memory.clone());
         };
-        match std::fs::read(path) {
-            Ok(bytes) => {
+        match crate::storage::read_private_config_file(path, 16 * 1024 * 1024)
+            .map_err(|error| format!("Read known hosts: {error}"))?
+        {
+            Some(bytes) => {
                 serde_json::from_slice(&bytes).map_err(|error| format!("Read known hosts: {error}"))
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
-            Err(error) => Err(format!("Read known hosts: {error}")),
+            None => Ok(BTreeMap::new()),
         }
     }
 
@@ -91,7 +107,7 @@ mod tests {
 
     #[test]
     fn known_hosts_persist_and_require_the_expected_key_for_rotation() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::storage::test_private_tempdir();
         let path = temp.path().join("known-hosts.json");
         let open = || Store {
             path: Some(path.clone()),
@@ -117,5 +133,34 @@ mod tests {
         assert_eq!(open().list().unwrap()[&host], next);
         reloaded.change(&host, Some(&next), None).unwrap();
         assert!(open().list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn host_display_escapes_unicode_and_directional_controls() {
+        assert_eq!(
+            display_host("exаmple\u{202e}.com"),
+            "ex\\u{0430}mple\\u{202E}.com"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn known_hosts_rejects_symlinks_and_hardlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = crate::storage::test_private_tempdir();
+        let path = dir.path().join("known-hosts.json");
+        let target = dir.path().join("trusted.json");
+        std::fs::write(&target, b"{}").unwrap();
+        symlink(&target, &path).unwrap();
+        let store = Store {
+            path: Some(path.clone()),
+            memory: BTreeMap::new(),
+        };
+        assert!(store.list().is_err());
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::hard_link(&target, &path).unwrap();
+        assert!(store.list().is_err());
     }
 }

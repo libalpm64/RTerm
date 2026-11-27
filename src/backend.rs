@@ -123,8 +123,14 @@ pub(crate) enum Command {
         local: String,
         remote: String,
         permit: crate::agent::Permit,
+        approved: crate::agent_upload::ManifestSummary,
         result_reply: crate::agent::Reply,
         display: AgentDisplay,
+    },
+    AgentUploadInspect {
+        local: String,
+        remote: String,
+        permit: crate::agent::Permit,
     },
     Sftp {
         id: u32,
@@ -138,6 +144,7 @@ pub(crate) enum Reply {
     Files { path: String, entries: Vec<Entry> },
     Done,
     Agent(serde_json::Value),
+    AgentUploadSummary(crate::agent_upload::ManifestSummary),
 }
 
 impl Reply {
@@ -197,6 +204,7 @@ impl Backend {
             writers: self.writers.clone(),
             events: self.events.clone(),
             sftp: sftp::Service::default(),
+            upload_inspections: Arc::new(tokio::sync::Semaphore::new(2)),
         };
         runtime.spawn(worker.run(receiver));
         Ok(RunningWorker { sender, runtime })
@@ -308,7 +316,6 @@ impl Drop for Backend {
     }
 }
 
-#[cfg(test)]
 #[tokio::test(flavor = "current_thread")]
 async fn full_output_queue_yields_to_other_tasks() {
     let context = egui::Context::default();
@@ -331,7 +338,6 @@ async fn full_output_queue_yields_to_other_tasks() {
     producer.await.unwrap();
 }
 
-#[cfg(test)]
 #[test]
 fn ssh_input_waits_for_shell_writer_and_preserves_order() {
     use crate::terminal::{Kind, Terminal, TerminalOptions};
@@ -375,7 +381,6 @@ fn ssh_input_waits_for_shell_writer_and_preserves_order() {
     assert!(!terminal.send(&backend, b"x".to_vec()));
 }
 
-#[cfg(test)]
 #[test]
 fn fullscreen_viewport_fits_and_retries_remote_resize() {
     use crate::terminal::{Kind, Terminal, TerminalOptions};
@@ -461,6 +466,7 @@ struct Worker {
     writers: Writers,
     events: Events,
     sftp: sftp::Service,
+    upload_inspections: Arc<tokio::sync::Semaphore>,
 }
 
 enum SshSetup {
@@ -518,6 +524,7 @@ impl Worker {
                 local,
                 remote,
                 permit,
+                approved,
                 result_reply,
                 display,
             } = command
@@ -527,7 +534,10 @@ impl Worker {
                 tokio::spawn(async move {
                     let result = match session {
                         Some(session) => {
-                            sftp::agent_upload(&session, &local, &remote, permit, &display).await
+                            sftp::agent_upload(
+                                &session, &local, &remote, permit, &display, approved,
+                            )
+                            .await
                         }
                         None => Err("SSH session closed".into()),
                     };
@@ -544,6 +554,29 @@ impl Worker {
                     if success {
                         events.send_async(BackendEvent::RemoteChanged(id)).await;
                     }
+                });
+                continue;
+            }
+            if let Command::AgentUploadInspect {
+                local,
+                remote,
+                permit,
+            } = command
+            {
+                let events = self.events.clone();
+                let inspections = self.upload_inspections.clone();
+                tokio::spawn(async move {
+                    let result = async {
+                        let _slot = inspections
+                            .acquire_owned()
+                            .await
+                            .map_err(|_| "Upload inspection unavailable".to_owned())?;
+                        let summary = sftp::inspect_agent_upload(&local, &remote, &permit).await?;
+                        Ok(Reply::AgentUploadSummary(summary))
+                    }
+                    .await;
+                    let _ = reply.send(result);
+                    events.context.request_repaint();
                 });
                 continue;
             }
@@ -677,6 +710,7 @@ impl Worker {
             }
             Command::AgentExec { .. }
             | Command::AgentUpload { .. }
+            | Command::AgentUploadInspect { .. }
             | Command::AgentShell { .. } => Err("Agent operation was not dispatched".into()),
             Command::Sftp { .. } => Err("SFTP operation was not dispatched".into()),
         }

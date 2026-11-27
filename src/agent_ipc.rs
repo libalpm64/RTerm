@@ -29,7 +29,7 @@ use windows_sys::Win32::{
 
 pub use crate::agent_protocol::{MAX_REQUEST, MAX_RESPONSE, read_frame, write_frame};
 
-fn user_sid() -> io::Result<String> {
+pub(crate) fn user_sid() -> io::Result<String> {
     struct Token(HANDLE);
     impl Drop for Token {
         fn drop(&mut self) {
@@ -65,6 +65,52 @@ fn user_sid() -> io::Result<String> {
         }
         let result = String::from_utf16(std::slice::from_raw_parts(sid, n))
             .map_err(|_| io::Error::other("Invalid user SID"));
+        LocalFree(sid.cast());
+        result
+    }
+}
+
+fn process_user_sid(process: HANDLE) -> io::Result<String> {
+    struct Token(HANDLE);
+    impl Drop for Token {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    unsafe {
+        let mut token = ptr::null_mut();
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let token = Token(token);
+        let mut len = 0;
+        GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &mut len);
+        if len == 0 || len > 65536 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut buffer = vec![0usize; (len as usize).div_ceil(std::mem::size_of::<usize>())];
+        if GetTokenInformation(
+            token.0,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            len,
+            &mut len,
+        ) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let user = &*buffer.as_ptr().cast::<TOKEN_USER>();
+        let mut sid = ptr::null_mut();
+        if ConvertSidToStringSidW(user.User.Sid, &mut sid) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut length = 0;
+        while *sid.add(length) != 0 {
+            length += 1;
+        }
+        let result = String::from_utf16(std::slice::from_raw_parts(sid, length))
+            .map_err(|_| io::Error::other("Invalid process user SID"));
         LocalFree(sid.cast());
         result
     }
@@ -133,11 +179,18 @@ fn verify_server(
         if process.is_null() {
             return Err(io::Error::last_os_error());
         }
+        let process_sid = process_user_sid(process);
         let result = QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &mut len);
         let error = io::Error::last_os_error();
         CloseHandle(process);
         if result == 0 {
             return Err(error);
+        }
+        if process_sid? != user_sid()? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Unexpected RTerm IPC server user",
+            ));
         }
     }
     let actual = std::fs::canonicalize(OsString::from_wide(&buf[..len as usize]))?;
@@ -266,6 +319,14 @@ mod tests {
             );
         }
         assert_protected_user_dacl(&LocalAllocation(descriptor), "S-1-5-18");
+    }
+
+    #[test]
+    fn process_user_sid_matches_the_current_account() {
+        assert_eq!(
+            process_user_sid(unsafe { GetCurrentProcess() }).unwrap(),
+            user_sid().unwrap()
+        );
     }
 
     #[test]

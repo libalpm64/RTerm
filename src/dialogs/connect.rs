@@ -492,6 +492,10 @@ fn required(value: &str, label: &str) -> Result<String, String> {
     let value = value.trim();
     if value.is_empty() {
         Err(format!("{label} is required"))
+    } else if crate::agent_upload::has_unsafe_text(value) {
+        Err(format!(
+            "{label} contains unsupported control or direction characters"
+        ))
     } else {
         Ok(value.into())
     }

@@ -558,7 +558,7 @@ impl Settings {
         if self.get("ai_access") == "unrestricted" {
             ui.colored_label(
                 t.yellow,
-                crate::i18n::tr(ui, "Unrestricted allows SSH commands without approval."),
+                crate::i18n::tr(ui, "Unrestricted skips approval for background commands; foreground terminal commands still require approval."),
             );
         }
         self.flag(
@@ -889,7 +889,6 @@ fn legacy_background_preference_does_not_enable_interactive_execution() {
     assert!(opted_in.on("ai_interactive"));
 }
 
-#[cfg(test)]
 #[test]
 fn settings_rows_fit_wrapped_descriptions() {
     check_wrapped_rows(
@@ -960,7 +959,6 @@ fn check_wrapped_rows(locale: &'static str, first: (&str, &str), second: (&str, 
     }
 }
 
-#[cfg(test)]
 #[test]
 fn settings_scrollbar_reserves_space_and_clips_rows() {
     let ctx = egui::Context::default();

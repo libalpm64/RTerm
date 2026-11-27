@@ -90,7 +90,7 @@ On Windows use `New-Item -ItemType Directory -Force target/release-notices` inst
 * macOS: provision Developer ID Application and Installer identities and a notarytool keychain profile. Set RTERM_SIGN=1 and RTERM_MAC_APP_IDENTITY and RTERM_MAC_INSTALLER_IDENTITY and RTERM_MAC_NOTARY_PROFILE. Run `sh packaging/macos/package.sh target/release 2.0.0 arm64 dist` with the appropriate version and architecture. Verify signing and notarization.
 * Linux: use the packaging scripts and run `bash packaging/linux/test_install.sh` as an unprivileged user with gio installed. Run the tunnel tests with bash packaging/test_fetch_tunnel_client.sh (requires jq and zip). Run ShellCheck on the shell scripts.
 
-Verify installs and upgrades and uninstalls plus local terminal and SSH and SFTP and vault and language and agent permission behavior. The legacy vault's shared derivation salt still needs a future migration to per-vault random salts. Publish only artifacts built from the intended committed revision with matching SHA-256 checksums.
+Verify installs and upgrades and uninstalls plus local terminal and SSH and SFTP and vault and language and agent permission behavior. Legacy version-2 vaults are upgraded to per-vault random derivation salts after a successful unlock; imported legacy backups upgrade on their next unlock. Publish only artifacts built from the intended committed revision with matching SHA-256 checksums.
 
 ## SSH host verification
 

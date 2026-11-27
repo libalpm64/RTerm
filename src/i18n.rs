@@ -282,7 +282,8 @@ fn linux_fontconfig_face(code: &str) -> Option<(std::path::PathBuf, u32)> {
         "zh-TW" => "zh-tw",
         _ => return None,
     };
-    let output = std::process::Command::new("fc-match")
+    let client = crate::tunnel::find_trusted_executable("fc-match")?;
+    let output = std::process::Command::new(client)
         .args([
             "--format",
             "%{file}\n%{index}\n",

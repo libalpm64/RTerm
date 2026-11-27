@@ -21,7 +21,6 @@ pub(crate) fn window() -> Arc<egui::IconData> {
     .clone()
 }
 
-#[cfg(test)]
 #[test]
 fn launcher_icon_remains_available() {
     let launcher = window();
