@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 
 impl Activity {
     pub(in crate::app) fn saved(&self) -> &VecDeque<AgentAuditEntry> {
@@ -251,19 +252,21 @@ fn viewer_buttons_review_exact_scope_and_cancel_is_non_destructive() {
     let refs: Vec<_> = entries.iter().collect();
     // Real egui input drives each review and cancel.
     let render = |viewer: &mut Viewer, events| {
-        context.run(
+        context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))),
                 events,
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    if viewer.deletion.is_some() {
-                        assert!(!viewer.confirm_delete(ui, theme), "cancel must not confirm");
-                    } else {
-                        viewer.show(ui, theme, &refs, true, None);
-                    }
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        if viewer.deletion.is_some() {
+                            assert!(!viewer.confirm_delete(ui, theme), "cancel must not confirm");
+                        } else {
+                            viewer.show(ui, theme, &refs, true, None);
+                        }
+                    })
                 });
             },
         )

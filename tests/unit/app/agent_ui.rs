@@ -1,5 +1,7 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 use russh::{Channel, ChannelId, server};
+use russh_sftp::protocol::SftpHandle;
 use std::sync::atomic::AtomicUsize;
 
 const PAGER_PROBE: &str = "test ! -t 0 && test ! -t 1 && test ! -t 2 || exit 99\n\
@@ -37,13 +39,17 @@ impl russh_sftp::server::Handler for TestSftp {
     ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
         let path = if path == "." { "/".into() } else { path };
         self.1.remove(&path);
-        Ok(russh_sftp::protocol::Handle { id, handle: path })
+        Ok(russh_sftp::protocol::Handle {
+            id,
+            handle: path.into(),
+        })
     }
     async fn readdir(
         &mut self,
         id: u32,
-        path: String,
+        path: SftpHandle,
     ) -> Result<russh_sftp::protocol::Name, Self::Error> {
+        let path = String::from_utf8(path.as_ref().to_vec()).map_err(|_| Self::Error::Failure)?;
         if !self.1.insert(path.clone()) {
             return Err(Self::Error::Eof);
         }
@@ -99,19 +105,24 @@ impl russh_sftp::server::Handler for TestSftp {
     async fn fstat(
         &mut self,
         id: u32,
-        handle: String,
+        handle: SftpHandle,
     ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
-        self.stat(id, handle).await
+        self.stat(
+            id,
+            String::from_utf8(handle.as_ref().to_vec()).map_err(|_| Self::Error::Failure)?,
+        )
+        .await
     }
     async fn read(
         &mut self,
         id: u32,
-        handle: String,
+        handle: SftpHandle,
         offset: u64,
         len: u32,
     ) -> Result<russh_sftp::protocol::Data, Self::Error> {
         let files = self.0.lock().unwrap();
-        let data = files.get(&handle).ok_or(Self::Error::NoSuchFile)?;
+        let handle = std::str::from_utf8(handle.as_ref()).map_err(|_| Self::Error::Failure)?;
+        let data = files.get(handle).ok_or(Self::Error::NoSuchFile)?;
         let start = offset as usize;
         if start >= data.len() {
             return Err(Self::Error::Eof);
@@ -162,20 +173,25 @@ impl russh_sftp::server::Handler for TestSftp {
         }
         Ok(russh_sftp::protocol::Handle {
             id,
-            handle: filename,
+            handle: filename.into(),
         })
     }
     async fn write(
         &mut self,
         id: u32,
-        handle: String,
+        handle: SftpHandle,
         offset: u64,
         data: Vec<u8>,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let mut files = self.0.lock().unwrap();
-        let bytes = files.get_mut(&handle).ok_or(Self::Error::Failure)?;
-        assert_eq!(offset, bytes.len() as u64);
-        bytes.extend_from_slice(&data);
+        let handle = std::str::from_utf8(handle.as_ref()).map_err(|_| Self::Error::Failure)?;
+        let bytes = files.get_mut(handle).ok_or(Self::Error::Failure)?;
+        let offset = offset as usize;
+        let end = offset + data.len();
+        if bytes.len() < end {
+            bytes.resize(end, 0);
+        }
+        bytes[offset..end].copy_from_slice(&data);
         Ok(russh_sftp::protocol::Status {
             id,
             status_code: Self::Error::Ok,
@@ -186,7 +202,7 @@ impl russh_sftp::server::Handler for TestSftp {
     async fn close(
         &mut self,
         id: u32,
-        _: String,
+        _: SftpHandle,
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         Ok(russh_sftp::protocol::Status {
             id,
@@ -1705,6 +1721,61 @@ fn agent_discovery_and_approval_work_without_any_painted_frame() {
     assert!(!raise);
 }
 
+#[test]
+fn logic_only_services_agent_without_replaying_stale_input() {
+    let context = egui::Context::default();
+    let mut app = App::test_fixture(&context);
+    app.settings.set("ai_access", "ask".into());
+    app.settings.set("ai_interactive", "1".into());
+    app.start_agent(&context);
+    let mut frame = eframe::Frame::_new_kittest();
+
+    // Leave a stale key event in the last real pass, as egui does when
+    // a compositor stops delivering frames.
+    let _ = context.run_test_pass(
+        egui::RawInput {
+            events: vec![egui::Event::Text("fixture".into())],
+            ..Default::default()
+        },
+        |_| {},
+    );
+    let prior_activity = Instant::now() - Duration::from_secs(5);
+    app.last_activity = prior_activity;
+    let last_service = app.last_service;
+    let pass = context.cumulative_pass_nr();
+    let request = app
+        .agent
+        .bridge
+        .as_ref()
+        .unwrap()
+        .test_ipc(json!({"action":"list_sessions"}));
+    let mut hidden = egui::RawInput {
+        focused: false,
+        ..Default::default()
+    };
+    hidden
+        .viewports
+        .get_mut(&egui::ViewportId::ROOT)
+        .unwrap()
+        .minimized = Some(true);
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !request.is_finished() {
+        let _ = context.run_logic(&hidden, |ctx| eframe::App::logic(&mut app, ctx, &mut frame));
+        assert_eq!(
+            app.last_activity, prior_activity,
+            "hidden ticks must not replay input"
+        );
+        assert_eq!(context.cumulative_pass_nr(), pass, "logic must not paint");
+        assert!(Instant::now() < deadline, "logic-only discovery timed out");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(app.last_service > last_service);
+    assert_eq!(request.join().unwrap()["ok"], true);
+    assert!(!app.agent.take_attention_request());
+    app.stop_agent();
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires a running Wayland desktop; opens and minimizes an isolated fixture window"]
@@ -1733,10 +1804,11 @@ fn native_wayland_minimized_agent_discovery() {
     }
 
     impl eframe::App for Probe {
-        fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+            let context = &root.ctx().clone();
             // Deliberately never service the app from paint. Some compositors
             // continue to paint thumbnails of minimized windows.
-            egui::CentralPanel::default().show(context, |ui| {
+            egui::CentralPanel::default().show(root, |ui| {
                 ui.label("RTerm minimized test fixture");
             });
             self.frames.fetch_add(1, Ordering::Relaxed);
@@ -2053,8 +2125,12 @@ fn sftp_only_authenticates_without_shell_and_transfers_files() {
             app.poll(&context);
             assert!(
                 Instant::now() < deadline,
-                "SFTP fixture timed out; message {:?}",
-                app.message
+                "SFTP fixture timed out; message {:?}; transfers {:?}",
+                app.message,
+                app.transfers
+                    .values()
+                    .map(|row| (&row.text, row.error))
+                    .collect::<Vec<_>>()
             );
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -2092,7 +2168,7 @@ fn sftp_only_authenticates_without_shell_and_transfers_files() {
     let name = "New fixture folder";
     let path = crate::backend::join_remote(&directory, name);
     let render_folder = |app: &mut App, events| {
-        context.run(
+        context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -2102,9 +2178,11 @@ fn sftp_only_authenticates_without_shell_and_transfers_files() {
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| app.explorer_workspace(ui, ui.max_rect()));
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(root, |ui| app.explorer_workspace(ui, ui.max_rect()))
+                });
             },
         )
     };

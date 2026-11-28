@@ -1,6 +1,6 @@
 use super::*;
 use russh_sftp::{
-    protocol::{File, Handle, Name, Status, StatusCode},
+    protocol::{File, Handle, Name, SftpHandle, Status, StatusCode},
     server,
 };
 
@@ -27,7 +27,7 @@ impl server::Handler for DirectoryFixture {
             handle: "dir".into(),
         })
     }
-    async fn readdir(&mut self, id: u32, _: String) -> Result<Name, Self::Error> {
+    async fn readdir(&mut self, id: u32, _: SftpHandle) -> Result<Name, Self::Error> {
         if self.batch == 3 {
             return Err(StatusCode::Eof);
         }
@@ -40,7 +40,7 @@ impl server::Handler for DirectoryFixture {
                 .collect(),
         })
     }
-    async fn close(&mut self, id: u32, _: String) -> Result<Status, Self::Error> {
+    async fn close(&mut self, id: u32, _: SftpHandle) -> Result<Status, Self::Error> {
         Ok(Status {
             id,
             status_code: StatusCode::Ok,

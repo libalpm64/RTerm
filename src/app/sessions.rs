@@ -21,12 +21,12 @@ impl FolderUi {
     }
 
     pub(super) fn editing(&self, context: &egui::Context) -> bool {
-        self.draft.is_some() && context.memory(|m| m.has_focus(egui::Id::new(FOLDER_EDITOR_ID)))
+        self.draft.is_some() && context.memory(|m| m.has_focus(egui::Id::unique(FOLDER_EDITOR_ID)))
     }
 
     pub(super) fn cancel(&mut self, context: &egui::Context) {
         self.draft = None;
-        let id = egui::Id::new(FOLDER_EDITOR_ID);
+        let id = egui::Id::unique(FOLDER_EDITOR_ID);
         context.memory_mut(|m| m.surrender_focus(id));
         context.data_mut(|data| data.remove::<egui::text_edit::TextEditState>(id));
     }
@@ -260,7 +260,11 @@ impl App {
         let header = top_band(rect, 22.0);
         let title =
             header.with_max_x((icon_slot(header, 1).left() - 2.0).max(header.left() + 34.0));
-        let drop = ui.interact(title, ui.id().with("session-root-drop"), Sense::hover());
+        let drop = ui.interact(
+            title,
+            ui.scope_id().with("session-root-drop"),
+            Sense::hover(),
+        );
         if self.file_interaction_allowed() && drop.dnd_hover_payload::<SessionDrag>().is_some() {
             theme::band(ui, title, t.hover, None);
         }
@@ -379,7 +383,7 @@ impl App {
                     let response = ui
                         .interact(
                             row,
-                            ui.id().with(("session-folder", folder)),
+                            ui.scope_id().with(("session-folder", folder)),
                             Sense::click(),
                         )
                         .on_hover_text(folder);
@@ -592,7 +596,7 @@ impl App {
         );
         let button = header.with_max_x(header.right() - 24.0);
         if ui
-            .interact(button, ui.id().with("history-header"), Sense::click())
+            .interact(button, ui.scope_id().with("history-header"), Sense::click())
             .clicked()
         {
             self.history_visible = !self.history_visible;
@@ -668,7 +672,7 @@ fn folder_editor(
         Icon::Folder,
         t.yellow,
     );
-    let id = egui::Id::new(FOLDER_EDITOR_ID);
+    let id = egui::Id::unique(FOLDER_EDITOR_ID);
     let initial = std::mem::take(&mut draft.focus);
     if initial {
         ui.ctx()
@@ -691,10 +695,10 @@ fn folder_editor(
         .font(t.chrome_font(11.0))
         .hint_text(crate::i18n::tr(ui, "New Folder"))
         .margin(egui::Margin::ZERO)
-        .frame(false)
+        .frame(egui::Frame::NONE)
         .desired_width(field.width())
         .min_size(field.size())
-        .vertical_align(egui::Align::Center)
+        .align(egui::Align2::LEFT_CENTER)
         .show(&mut editor)
         .response;
     if initial {
@@ -753,7 +757,11 @@ fn root_drop_target(
     action: &mut Option<SessionAction>,
     label: bool,
 ) {
-    let response = ui.interact(rect, ui.id().with(("session-root", label)), Sense::hover());
+    let response = ui.interact(
+        rect,
+        ui.scope_id().with(("session-root", label)),
+        Sense::hover(),
+    );
     if enabled && response.dnd_hover_payload::<SessionDrag>().is_some() {
         theme::band(ui, rect, t.hover, None);
         if let Some(drag) = response.dnd_release_payload::<SessionDrag>() {
@@ -788,7 +796,7 @@ fn session_row(
     let response = ui
         .interact(
             row,
-            ui.id().with(("saved-session-row", index)),
+            ui.scope_id().with(("saved-session-row", index)),
             Sense::click_and_drag(),
         )
         .on_hover_text(&detail);
@@ -896,7 +904,7 @@ pub(super) fn compact_filter(
             .id_salt(id)
             .hint_text(egui::RichText::new(crate::i18n::tr(ui, "Filter")).color(t.dim))
             .font(t.chrome_font(10.0))
-            .frame(false)
+            .frame(egui::Frame::NONE)
             .margin(egui::Margin::symmetric(1, 0)),
     );
     ui.painter().hline(

@@ -216,8 +216,9 @@ To isolate the cost of the window and renderer from the application and shell, u
 - `src/backend.rs` routes typed commands. `src/backend/connection.rs` handles address normalization, authentication, and terminal transports. `src/backend/sftp.rs` manages remote files and transfers.
 - `src/storage.rs` handles settings, saved profiles, keys, and vault compatibility.
 - `tests/unit/` contains the unit tests and fixtures, separated from production code.
-- `vendor/eframe/` pins the existing eframe 0.33.3 API with a small native
-  event-loop patch for non-rendering agent service and window activation.
+- `vendor/eframe/` uses eframe 0.37.0 with separate logic/UI lifecycle hooks and
+  native event-loop patches for non-rendering agent service, window activation,
+  and nonblocking Wayland presentation.
   See `vendor/eframe/RTerm-PATCH.md` for the patch provenance and limitations.
 
 The bundled fonts are distributed under their respective SIL Open Font Licenses in `assets/`.

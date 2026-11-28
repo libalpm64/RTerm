@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 
 #[tokio::test(flavor = "current_thread")]
 async fn full_output_queue_yields_to_other_tasks() {
@@ -87,7 +88,7 @@ fn fullscreen_viewport_fits_and_retries_remote_resize() {
     terminal.endpoint = Some(id);
     let highlighter = crate::highlight::Highlighter::new(true, "");
     let render = |terminal: &mut Terminal, width: f32, height: f32, time: f64| {
-        let _ = context.run(
+        let _ = context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -97,19 +98,21 @@ fn fullscreen_viewport_fits_and_retries_remote_resize() {
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    terminal.show(
-                        ui,
-                        ui.max_rect(),
-                        &backend,
-                        &options,
-                        &highlighter,
-                        false,
-                        false,
-                        false,
-                        None,
-                        None,
-                    );
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        terminal.show(
+                            ui,
+                            ui.max_rect(),
+                            &backend,
+                            &options,
+                            &highlighter,
+                            false,
+                            false,
+                            false,
+                            None,
+                            None,
+                        );
+                    })
                 });
             },
         );

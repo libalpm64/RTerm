@@ -181,8 +181,11 @@ impl App {
                 Rect::from_center_size(pos2(x + width / 2.0, rect.center().y), vec2(width, 24.0));
             x += width;
             let clicked = if labeled {
-                let response =
-                    ui.interact(button, ui.id().with(("key-action", label)), Sense::click());
+                let response = ui.interact(
+                    button,
+                    ui.scope_id().with(("key-action", label)),
+                    Sense::click(),
+                );
                 if response.hovered() {
                     theme::band(ui, button, t.hover, None);
                 }
@@ -295,12 +298,7 @@ impl App {
                 }
                 let current = index == selected;
                 response.widget_info(|| {
-                    egui::WidgetInfo::selected(
-                        egui::WidgetType::SelectableLabel,
-                        true,
-                        current,
-                        name,
-                    )
+                    egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, current, name)
                 });
                 if current || response.hovered() || response.has_focus() {
                     ui.painter().rect_filled(row, 0.0, t.hover);

@@ -341,12 +341,27 @@ impl Benchmark {
 }
 
 impl eframe::App for Benchmark {
-    fn update(&mut self, context: &egui::Context, frame: &mut eframe::Frame) {
+    fn raw_input_hook(&mut self, context: &egui::Context, raw: &mut egui::RawInput) {
+        self.app.raw_input_hook(context, raw);
+    }
+
+    fn native_background_update(&mut self, context: &egui::Context) -> (Option<Instant>, bool) {
+        self.app.native_background_update(context)
+    }
+
+    fn logic(&mut self, context: &egui::Context, frame: &mut eframe::Frame) {
+        if !matches!(self.stage, Stage::Finished) {
+            self.app.logic(context, frame);
+        }
+    }
+
+    fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let context = &root.ctx().clone();
         // A close request can be followed by another update before the window exits.
         if matches!(self.stage, Stage::Finished) {
             return;
         }
-        self.app.update(context, frame);
+        self.app.ui(root, frame);
         match self.step() {
             Ok(false) => {
                 context.request_repaint_after(Duration::from_millis(10));
@@ -384,11 +399,30 @@ struct IdleBenchmark {
 }
 
 impl eframe::App for IdleBenchmark {
-    fn update(&mut self, context: &egui::Context, frame: &mut eframe::Frame) {
+    fn raw_input_hook(&mut self, context: &egui::Context, raw: &mut egui::RawInput) {
         if let Some(app) = &mut self.app {
-            app.update(context, frame);
+            app.raw_input_hook(context, raw);
+        }
+    }
+
+    fn native_background_update(&mut self, context: &egui::Context) -> (Option<Instant>, bool) {
+        self.app
+            .as_mut()
+            .map_or((None, false), |app| app.native_background_update(context))
+    }
+
+    fn logic(&mut self, context: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(app) = &mut self.app {
+            app.logic(context, frame);
+        }
+    }
+
+    fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let context = &root.ctx().clone();
+        if let Some(app) = &mut self.app {
+            app.ui(root, frame);
         } else {
-            egui::CentralPanel::default().show(context, |_| {});
+            egui::CentralPanel::default().show(root, |_| {});
         }
         if self.finished {
             return;

@@ -203,7 +203,7 @@ impl KnownHosts {
         theme: Theme,
     ) -> bool {
         let max = (context.content_rect().size() - vec2(48.0, 48.0)).max(vec2(1.0, 1.0));
-        let response = egui::Modal::new(egui::Id::new("known-ssh-hosts")).show(context, |ui| {
+        let response = egui::Modal::new(egui::Id::unique("known-ssh-hosts")).show(context, |ui| {
             egui::Resize::default()
                 .id_salt("known-hosts-size")
                 .default_size(vec2(760.0, 480.0).min(max))

@@ -93,7 +93,7 @@ impl App {
         if let Some(prompt) = self.host_trust.pending.front() {
             let changed = prompt.trusted.is_some();
             let response =
-                egui::Modal::new(egui::Id::new("ssh-host-verification")).show(context, |ui| {
+                egui::Modal::new(egui::Id::unique("ssh-host-verification")).show(context, |ui| {
                     ui.set_width(460.0);
                     ui.heading(crate::i18n::tr(
                         ui,

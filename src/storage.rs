@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use chacha20poly1305::XChaCha20Poly1305;
 use chacha20poly1305::XNonce;
-use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
+use chacha20poly1305::aead::{Aead, Generate, KeyInit};
 
 const VAULT_MAGIC: &[u8; 4] = b"RTVL";
 const LEGACY_VAULT_VERSION: u16 = 2;
@@ -23,7 +23,7 @@ impl Drop for VaultKey {
 
 impl VaultKey {
     pub(crate) fn derive(password: &str) -> Self {
-        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let nonce = XNonce::generate();
         let salt = nonce[..VAULT_SALT_LEN].try_into().unwrap();
         Self::derive_with_salt(password, salt)
     }
@@ -995,7 +995,7 @@ fn encode_vault(vault: &Vault, key: &VaultKey) -> Result<Vec<u8>, String> {
         return Err("Encrypted vault exceeds 128 MiB; existing vault was not changed".into());
     }
     let cipher = XChaCha20Poly1305::new_from_slice(&key.0).unwrap();
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let nonce = XNonce::generate();
     let ciphertext = cipher
         .encrypt(&nonce, json.as_slice())
         .map_err(|e| format!("encrypt error: {:?}", e))?;
@@ -1030,9 +1030,9 @@ fn load_vault_at(path: &Path, password: &str) -> Result<(Vault, VaultKey), Strin
 fn decode_vault(data: &[u8], key: &VaultKey) -> Result<Vault, String> {
     let (nonce, ciphertext) =
         match vault_version(data).map_err(|_| "wrong password or corrupted vault".to_string())? {
-            LEGACY_VAULT_VERSION => (XNonce::from_slice(&data[6..30]), &data[30..]),
+            LEGACY_VAULT_VERSION => (<&XNonce>::try_from(&data[6..30]).unwrap(), &data[30..]),
             VAULT_VERSION => (
-                XNonce::from_slice(&data[6 + VAULT_SALT_LEN..6 + VAULT_SALT_LEN + 24]),
+                <&XNonce>::try_from(&data[6 + VAULT_SALT_LEN..6 + VAULT_SALT_LEN + 24]).unwrap(),
                 &data[6 + VAULT_SALT_LEN + 24..],
             ),
             _ => unreachable!(),

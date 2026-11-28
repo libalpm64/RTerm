@@ -279,11 +279,11 @@ impl FolderDraft {
 }
 
 fn folder_editor_id() -> egui::Id {
-    egui::Id::new("inline-folder-name")
+    egui::Id::unique("inline-folder-name")
 }
 
 fn path_editor_id(remote: bool) -> egui::Id {
-    egui::Id::new(("explorer-path", remote))
+    egui::Id::unique(("explorer-path", remote))
 }
 
 fn reset_editor(context: &egui::Context, id: egui::Id) {
@@ -946,7 +946,7 @@ impl App {
         let response = ui
             .interact(
                 divider,
-                ui.id().with("file-workspace-divider"),
+                ui.scope_id().with("file-workspace-divider"),
                 Sense::drag(),
             )
             .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
@@ -985,12 +985,12 @@ impl App {
         theme::band(ui, tabs, t.bar, Some(t.border));
         let local = ui.interact(
             tabs.with_max_x(tabs.center().x),
-            ui.id().with(("explorer-tab", 0)),
+            ui.scope_id().with(("explorer-tab", 0)),
             Sense::click(),
         );
         let sftp = ui.interact(
             tabs.with_min_x(tabs.center().x),
-            ui.id().with(("explorer-tab", 1)),
+            ui.scope_id().with(("explorer-tab", 1)),
             Sense::click(),
         );
         let show_remote = if local.clicked() {
@@ -1055,7 +1055,7 @@ impl App {
             );
             ui.interact(
                 slot,
-                ui.id()
+                ui.scope_id()
                     .with(("new-folder-disabled", slot.center().y.to_bits())),
                 Sense::hover(),
             )
@@ -1127,7 +1127,7 @@ impl App {
                         Align2::LEFT_CENTER,
                     );
                 }
-                ui.interact(title, ui.id().with("sftp-status"), Sense::hover())
+                ui.interact(title, ui.scope_id().with("sftp-status"), Sense::hover())
                     .on_hover_text(status);
             } else {
                 let band = top_band(rect.with_min_y(start), 20.0);
@@ -1449,7 +1449,7 @@ impl App {
                 .with_max_x((header.right() - 22.0).max(header.left()));
             let name_response = ui.interact(
                 header.with_max_x(split),
-                ui.id().with(("sort-name", remote)),
+                ui.scope_id().with(("sort-name", remote)),
                 Sense::click(),
             );
             if name_response.clicked() {
@@ -1457,7 +1457,7 @@ impl App {
             }
             let date_response = ui.interact(
                 date_rect,
-                ui.id().with(("sort-date", remote)),
+                ui.scope_id().with(("sort-date", remote)),
                 Sense::click(),
             );
             if date_response.clicked() {
@@ -1822,7 +1822,8 @@ impl App {
             let paths = ui.input_mut(|input| {
                 std::mem::take(&mut input.raw.dropped_files)
                     .into_iter()
-                    .filter_map(|file| file.path)
+                    .map(|file| file.path().to_path_buf())
+                    .filter(|path| !path.as_os_str().is_empty())
                     .collect::<Vec<_>>()
             });
             if !paths.is_empty() {
@@ -2145,11 +2146,11 @@ fn inline_folder_row(
         .font(t.chrome_font(11.0))
         .text_color(t.text)
         .hint_text(crate::i18n::tr(ui, "New Folder"))
-        .frame(false)
+        .frame(egui::Frame::NONE)
         .margin(egui::Margin::ZERO)
         .desired_width(field.width())
         .min_size(field.size())
-        .vertical_align(egui::Align::Center)
+        .align(egui::Align2::LEFT_CENTER)
         .show(&mut child)
         .response;
     if initial {
@@ -2221,11 +2222,11 @@ fn path_field(
         .id(id)
         .font(t.chrome_font(11.0))
         .text_color(t.text)
-        .frame(false)
+        .frame(egui::Frame::NONE)
         .margin(egui::Margin::ZERO)
         .desired_width(rect.width())
         .min_size(rect.size())
-        .vertical_align(egui::Align::Center)
+        .align(egui::Align2::LEFT_CENTER)
         .show(&mut child)
 }
 

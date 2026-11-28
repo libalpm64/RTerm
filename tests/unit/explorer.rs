@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 
 #[test]
 fn paired_file_panes_align_paths_headers_and_rows() {
@@ -15,15 +16,17 @@ fn paired_file_panes_align_paths_headers_and_rows() {
     );
     app.explorer.expanded = true;
     let render = |app: &mut App, width| {
-        context.run(
+        context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 600.0))),
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| app.explorer_workspace(ui, ui.max_rect()));
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(root, |ui| app.explorer_workspace(ui, ui.max_rect()))
+                });
             },
         )
     };
@@ -96,15 +99,17 @@ fn single_sftp_pane_status_stays_compact_and_centered() {
         app.explorer.remote_id = connected.then_some(42);
         app.explorer.loading = loading;
         let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(280.0, 500.0));
-        let output = context.run(
+        let output = context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(rect),
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| app.explorer_panel(ui, rect));
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(root, |ui| app.explorer_panel(ui, rect))
+                });
             },
         );
         let status = output.shapes.iter().find(|shape| {
@@ -166,30 +171,32 @@ fn path_field_keeps_geometry_on_hover_and_focus() {
     theme.apply(&context);
     theme::install_fonts(&context);
     let rect = Rect::from_min_size(pos2(20.0, 40.0), vec2(180.0, 24.0));
-    let id = egui::Id::new("test-path");
+    let id = egui::Id::unique("test-path");
     let mut path = "/home/user".to_owned();
     let render = |path: &mut String, events: Vec<egui::Event>| {
         let mut geometry = None;
-        let _ = context.run(
+        let _ = context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))),
                 events,
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    let before = ui.min_rect();
-                    let output = path_field(ui, rect, id, path, theme);
-                    assert_eq!(
-                        ui.min_rect(),
-                        before,
-                        "path field must not expand its parent"
-                    );
-                    geometry = Some((
-                        output.response.rect,
-                        output.galley_pos,
-                        output.text_clip_rect,
-                    ));
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        let before = ui.min_rect();
+                        let output = path_field(ui, rect, id, path, theme);
+                        assert_eq!(
+                            ui.min_rect(),
+                            before,
+                            "path field must not expand its parent"
+                        );
+                        geometry = Some((
+                            output.response.rect,
+                            output.galley_pos,
+                            output.text_clip_rect,
+                        ));
+                    })
                 });
             },
         );
@@ -197,7 +204,10 @@ fn path_field_keeps_geometry_on_hover_and_focus() {
     };
     let baseline = render(&mut path, vec![]);
     assert_eq!(baseline.0, rect);
-    assert_eq!(baseline.2, rect);
+    // egui 0.37 clips the text atom to its content rather than the full widget.
+    // The address field still has a fixed hit target and cannot paint outside it.
+    assert!(rect.contains_rect(baseline.2));
+    assert!(baseline.2.is_positive());
     let hover = rect.center();
     assert_eq!(
         render(&mut path, vec![egui::Event::PointerMoved(hover)]),
@@ -213,7 +223,8 @@ fn path_field_keeps_geometry_on_hover_and_focus() {
     path = "/very/long/remote/directory/that/must/not/expand/the/location/bar".into();
     let long = render(&mut path, vec![]);
     assert_eq!(long.0, rect);
-    assert_eq!(long.2, rect);
+    assert!(rect.contains_rect(long.2));
+    assert!(long.2.is_positive());
     assert_eq!(
         render(&mut path, vec![egui::Event::PointerMoved(hover)]),
         long
@@ -410,18 +421,20 @@ fn local_file_drag_hovers_open_folder_and_prompts_for_move() {
     app.explorer.load_local(temp.path().to_owned());
     let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
     let render = |app: &mut App, events| {
-        ctx.run(
+        ctx.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(rect),
                 events,
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| {
-                        app.explorer_side(ui, rect, false, false);
-                    });
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(root, |ui| {
+                            app.explorer_side(ui, rect, false, false);
+                        })
+                });
             },
         )
     };
@@ -480,17 +493,14 @@ fn local_file_drag_hovers_open_folder_and_prompts_for_move() {
 fn native_sftp_workspace_preview() {
     use winit::platform::wayland::EventLoopBuilderExtWayland;
     struct Preview {
+        screenshot: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<egui::ColorImage>>>>,
         app: App,
         frames: u32,
     }
     impl eframe::App for Preview {
-        fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-            if let Some(image) = ctx.input(|input| {
-                input.events.iter().find_map(|event| match event {
-                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                    _ => None,
-                })
-            }) {
+        fn ui(&mut self, root: &mut egui::Ui, _: &mut eframe::Frame) {
+            let ctx = &root.ctx().clone();
+            if let Some(image) = self.screenshot.lock().unwrap().take() {
                 image::save_buffer(
                     "target/linux-sftp-workspace-preview.png",
                     image.as_raw(),
@@ -504,12 +514,17 @@ fn native_sftp_workspace_preview() {
             }
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ctx, |ui| {
+                .show(root, |ui| {
                     self.app.explorer_workspace(ui, ui.max_rect());
                 });
             self.frames += 1;
             if self.frames == 5 {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                let screenshot = self.screenshot.clone();
+                let repaint = ctx.clone();
+                ctx.request_screenshot(move |image| {
+                    *screenshot.lock().unwrap() = Some(image);
+                    repaint.request_repaint();
+                });
             }
             ctx.request_repaint_after(Duration::from_millis(60));
         }
@@ -549,7 +564,11 @@ fn native_sftp_workspace_preview() {
             app.explorer.expanded = true;
             app.explorer.remote.filter_open = true;
             app.explorer.remote.date_filter = app.explorer.remote.date_bounds;
-            Ok(Box::new(Preview { app, frames: 0 }))
+            Ok(Box::new(Preview {
+                app,
+                frames: 0,
+                screenshot: Default::default(),
+            }))
         }),
     )
     .unwrap();
@@ -659,22 +678,24 @@ fn local_folder_plus_works_in_expanded_compact_and_docked_views() {
         app.explorer.expanded = expanded;
         app.explorer.remote_active = false;
         let render = |app: &mut App, events| {
-            context.run(
+            context.run_test_pass(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 600.0))),
                     events,
                     ..Default::default()
                 },
                 |ctx| {
-                    egui::CentralPanel::default()
-                        .frame(egui::Frame::NONE)
-                        .show(ctx, |ui| {
-                            if docked {
-                                app.explorer_panel(ui, ui.max_rect());
-                            } else {
-                                app.explorer_workspace(ui, ui.max_rect());
-                            }
-                        });
+                    ctx.root_ui(|root| {
+                        egui::CentralPanel::default()
+                            .frame(egui::Frame::NONE)
+                            .show(root, |ui| {
+                                if docked {
+                                    app.explorer_panel(ui, ui.max_rect());
+                                } else {
+                                    app.explorer_workspace(ui, ui.max_rect());
+                                }
+                            })
+                    });
                 },
             )
         };
@@ -759,16 +780,18 @@ fn inline_folder_validation_keeps_editor_and_navigation_discards_draft() {
     app.explorer.refresh_local();
     app.new_local_folder();
     let render = |app: &mut App, events| {
-        context.run(
+        context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(240.0, 600.0))),
                 events,
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| app.explorer_panel(ui, ui.max_rect()));
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(root, |ui| app.explorer_panel(ui, ui.max_rect()))
+                });
             },
         )
     };
@@ -814,16 +837,18 @@ fn folder_and_remote_path_editor_state_stays_bounded_across_churn() {
     assert!(app.can_create_local_folder());
     app.explorer.expanded = true;
     let render = |app: &mut App, events| {
-        context.run(
+        context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 600.0))),
                 events,
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| app.explorer_workspace(ui, ui.max_rect()));
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(root, |ui| app.explorer_workspace(ui, ui.max_rect()))
+                });
             },
         )
     };

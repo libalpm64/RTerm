@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 
 fn fixture() -> (Terminal, Backend, mpsc::Receiver<Vec<u8>>) {
     let context = egui::Context::default();
@@ -137,40 +138,42 @@ impl NativeFixture {
             }
         }
         self.term.service(&self.backend, &self.context, false);
-        let _ = self.context.run(
+        let _ = self.context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(self.width, 600.0))),
                 events,
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| {
-                        let (response, _, error) = self.term.show(
-                            ui,
-                            ui.max_rect(),
-                            &self.backend,
-                            &self.options,
-                            &self.highlighter,
-                            true,
-                            true,
-                            true,
-                            None,
-                            None,
-                        );
-                        assert!(error.is_none(), "{error:?}");
-                        assert!(response.has_focus());
-                        let layout = terminal_viewport(
-                            ui,
-                            ui.max_rect(),
-                            &self.options,
-                            self.term.fullscreen_layout,
-                            true,
-                        );
-                        self.bounds = layout.rect;
-                        self.cell = layout.cell;
-                    });
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(root, |ui| {
+                            let (response, _, error) = self.term.show(
+                                ui,
+                                ui.max_rect(),
+                                &self.backend,
+                                &self.options,
+                                &self.highlighter,
+                                true,
+                                true,
+                                true,
+                                None,
+                                None,
+                            );
+                            assert!(error.is_none(), "{error:?}");
+                            assert!(response.has_focus());
+                            let layout = terminal_viewport(
+                                ui,
+                                ui.max_rect(),
+                                &self.options,
+                                self.term.fullscreen_layout,
+                                true,
+                            );
+                            self.bounds = layout.rect;
+                            self.cell = layout.cell;
+                        })
+                });
             },
         );
     }

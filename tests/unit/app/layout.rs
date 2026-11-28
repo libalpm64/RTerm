@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 
 #[test]
 fn expanded_file_workspace_hides_session_tabs_and_restores_them() {
@@ -18,16 +19,18 @@ fn expanded_file_workspace_hides_session_tabs_and_restores_them() {
     app.activate(1);
     assert!(app.splits.split(1, 2, crate::app::splits::Direction::Right));
     let render = |app: &mut App, width: f32, events: Vec<egui::Event>| {
-        context.run(
+        context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 800.0))),
                 events,
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| app.center(ui, ui.max_rect()));
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(root, |ui| app.center(ui, ui.max_rect()))
+                });
             },
         )
     };
@@ -110,22 +113,24 @@ fn folder_creation_button_works_in_fullscreen_and_docked_sftp() {
         app.terminals[0].sftp_ready = sftp_only;
         assert!(app.can_create_sftp_folder());
         let render = |app: &mut App, events| {
-            context.run(
+            context.run_test_pass(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
                     events,
                     ..Default::default()
                 },
                 |ctx| {
-                    egui::CentralPanel::default()
-                        .frame(egui::Frame::NONE)
-                        .show(ctx, |ui| {
-                            if expanded || sftp_only {
-                                app.explorer_workspace(ui, ui.max_rect());
-                            } else {
-                                app.explorer_panel(ui, ui.max_rect().with_max_x(240.0));
-                            }
-                        });
+                    ctx.root_ui(|root| {
+                        egui::CentralPanel::default()
+                            .frame(egui::Frame::NONE)
+                            .show(root, |ui| {
+                                if expanded || sftp_only {
+                                    app.explorer_workspace(ui, ui.max_rect());
+                                } else {
+                                    app.explorer_panel(ui, ui.max_rect().with_max_x(240.0));
+                                }
+                            })
+                    });
                 },
             )
         };
@@ -167,33 +172,35 @@ fn file_manager_header_only_contains_workspace_controls() {
     let mut app = App::test_fixture(&context);
     for (expanded, width) in [(true, 1200.0), (true, 350.0), (false, 1200.0)] {
         app.explorer.expanded = expanded;
-        let _ = context.run(
+        let _ = context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 600.0))),
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| {
-                        let id = ui.id();
-                        let bounds = ui.max_rect();
-                        app.explorer_workspace(ui, bounds);
-                        let header = top_band(bounds, 30.0);
-                        let queue = ctx
-                            .read_response(id.with("Transfer queue"))
-                            .expect("queue control");
-                        let toggle = ctx
-                            .read_response(id.with(if expanded {
-                                "Restore Filer"
-                            } else {
-                                "Expand Filer"
-                            }))
-                            .expect("workspace control");
-                        assert_eq!(queue.rect, icon_slot(header, 1));
-                        assert_eq!(toggle.rect, icon_slot(header, 0));
-                        assert!(ctx.read_response(id.with("Refresh")).is_none());
-                    });
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(root, |ui| {
+                            let id = ui.scope_id();
+                            let bounds = ui.max_rect();
+                            app.explorer_workspace(ui, bounds);
+                            let header = top_band(bounds, 30.0);
+                            let queue = ctx
+                                .read_response(id.with("Transfer queue"))
+                                .expect("queue control");
+                            let toggle = ctx
+                                .read_response(id.with(if expanded {
+                                    "Restore Filer"
+                                } else {
+                                    "Expand Filer"
+                                }))
+                                .expect("workspace control");
+                            assert_eq!(queue.rect, icon_slot(header, 1));
+                            assert_eq!(toggle.rect, icon_slot(header, 0));
+                            assert!(ctx.read_response(id.with("Refresh")).is_none());
+                        })
+                });
             },
         );
     }
@@ -207,16 +214,18 @@ fn transfer_card_preserves_file_panes_and_queue_is_opt_in() {
     app.explorer
         .accept_initial_listing(42, "/fixture".into(), vec![]);
     let render = |app: &mut App, events| {
-        context.run(
+        context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
                 events,
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| app.center(ui, ui.max_rect()));
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(root, |ui| app.center(ui, ui.max_rect()))
+                });
             },
         )
     };
@@ -438,7 +447,10 @@ fn native_neovim_accepts_arrows_escape_search_and_quit() {
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &context, &mut raw);
-        let _ = context.run(raw, |ctx| eframe::App::update(app, ctx, &mut frame));
+        let _ = context.run_test_pass(raw, |ctx| {
+            eframe::App::logic(app, ctx, &mut frame);
+            ctx.root_ui(|root| eframe::App::ui(app, root, &mut frame));
+        });
     };
     fn wait_for(
         app: &mut App,
@@ -545,17 +557,19 @@ fn wallpaper_is_exclusive_to_main_terminal_tabs() {
     app.bottom_shell = Some(Terminal::new(2, "Shell".into(), Kind::Local, &options));
     app.bottom_open = true;
     let mut split = 0.0;
-    let output = context.run(
+    let output = context.run_test_pass(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
             ..Default::default()
         },
         |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                let bounds = ui.max_rect();
-                split = bounds.bottom() - 200.0;
-                app.center(ui, bounds.with_max_y(split));
-                app.bottom_panel(ui, bounds.with_min_y(split));
+            ctx.root_ui(|root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    let bounds = ui.max_rect();
+                    split = bounds.bottom() - 200.0;
+                    app.center(ui, bounds.with_max_y(split));
+                    app.bottom_panel(ui, bounds.with_min_y(split));
+                })
             });
         },
     );
@@ -601,14 +615,16 @@ fn remote_connection_status_does_not_enter_terminal_grid() {
     );
     let render = |app: &mut App, font: f32| {
         app.settings.set("font_size", font.to_string());
-        context.run(
+        context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(420.0, 450.0))),
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    app.center(ui, ui.max_rect());
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        app.center(ui, ui.max_rect());
+                    })
                 });
             },
         )
@@ -693,7 +709,10 @@ fn remote_connection_status_does_not_enter_terminal_grid() {
         };
         eframe::App::raw_input_hook(&mut app, &context, &mut raw);
         assert_eq!(app.terminal_navigation.len(), 4);
-        let _ = context.run(raw, |ctx| eframe::App::update(&mut app, ctx, &mut frame));
+        let _ = context.run_test_pass(raw, |ctx| {
+            eframe::App::logic(&mut app, ctx, &mut frame);
+            ctx.root_ui(|root| eframe::App::ui(&mut app, root, &mut frame));
+        });
         let mut got = vec![0; expected.len()];
         stream.read_exact(&mut got).unwrap();
         assert_eq!(got, expected);
@@ -731,12 +750,16 @@ fn fullscreen_keyboard_zoom_uses_visible_font_and_keeps_ui_scale() {
         let mut raw = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
             time: Some(time),
-            modifiers,
-            events,
+            events: std::iter::once(egui::Event::ModifiersChanged(modifiers))
+                .chain(events)
+                .collect(),
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &context, &mut raw);
-        context.run(raw, |ctx| eframe::App::update(app, ctx, &mut frame))
+        context.run_test_pass(raw, |ctx| {
+            eframe::App::logic(app, ctx, &mut frame);
+            ctx.root_ui(|root| eframe::App::ui(app, root, &mut frame));
+        })
     };
     render(&mut app, vec![], 0.0);
     let fitted = app.terminals[0].zoom_base(options.font);
@@ -810,6 +833,8 @@ fn fullscreen_wheel_zoom_and_bottom_keyboard_zoom_are_independent() {
         vec![
             egui::Event::PointerMoved(position),
             egui::Event::MouseWheel {
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
                 unit: egui::MouseWheelUnit::Line,
                 delta: vec2(0.0, delta),
                 modifiers,
@@ -820,12 +845,16 @@ fn fullscreen_wheel_zoom_and_bottom_keyboard_zoom_are_independent() {
         let mut raw = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
             time: Some(time),
-            modifiers,
-            events,
+            events: std::iter::once(egui::Event::ModifiersChanged(modifiers))
+                .chain(events)
+                .collect(),
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &context, &mut raw);
-        context.run(raw, |ctx| eframe::App::update(app, ctx, &mut frame))
+        context.run_test_pass(raw, |ctx| {
+            eframe::App::logic(app, ctx, &mut frame);
+            ctx.root_ui(|root| eframe::App::ui(app, root, &mut frame));
+        })
     };
     render(&mut app, vec![], 0.0);
     let fitted = app.zoom_base(Some(1));
@@ -890,14 +919,16 @@ fn ctrl_wheel_zooms_only_terminal_and_consumes_scroll() {
             command: ctrl,
             ..Default::default()
         };
-        let _ = context.run(
+        let _ = context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
                 time: Some(time),
-                modifiers,
                 events: vec![
+                    egui::Event::ModifiersChanged(modifiers),
                     egui::Event::PointerMoved(pos),
                     egui::Event::MouseWheel {
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Wheel,
                         unit: egui::MouseWheelUnit::Line,
                         delta: vec2(0.0, delta),
                         modifiers,
@@ -905,7 +936,10 @@ fn ctrl_wheel_zooms_only_terminal_and_consumes_scroll() {
                 ],
                 ..Default::default()
             },
-            |ctx| eframe::App::update(app, ctx, frame),
+            |ctx| {
+                eframe::App::logic(app, ctx, frame);
+                ctx.root_ui(|root| eframe::App::ui(app, root, frame));
+            },
         );
         app.settings.terminal().font
     };
@@ -914,12 +948,12 @@ fn ctrl_wheel_zooms_only_terminal_and_consumes_scroll() {
         render(&mut app, &mut frame, pos2(600.0, 300.0), 1.0, true, 0.0),
         original
     );
-    assert_eq!(context.input(|input| input.raw_scroll_delta.y), 0.0);
+    assert_eq!(crate::theme::raw_scroll_delta(&context).y, 0.0);
     assert_eq!(
         render(&mut app, &mut frame, pos2(600.0, 300.0), 1.0, false, 0.01),
         original + 1.0
     );
-    assert!(context.input(|input| input.raw_scroll_delta.y) > 0.0);
+    assert!(crate::theme::raw_scroll_delta(&context).y > 0.0);
     assert_eq!(
         render(&mut app, &mut frame, pos2(100.0, 300.0), 1.0, true, 0.02),
         original + 1.0
@@ -987,7 +1021,7 @@ fn applying_settings_switches_all_supported_languages() {
             code
         };
         assert_eq!(crate::i18n::current(&context), expected, "{code}");
-        let _ = context.run(Default::default(), |ctx| {
+        let _ = context.run_test_pass(Default::default(), |ctx| {
             for key in [
                 "Settings",
                 "Apply",
@@ -1019,12 +1053,12 @@ fn interface_scale_applies_at_startup_and_when_settings_change() {
     let mut settings = Settings::benchmark_defaults();
     settings.set("interface_scale", "125".into());
     let mut app = App::with_settings(&context, settings, false);
-    let _ = context.run(Default::default(), |_| {});
+    let _ = context.run_test_pass(Default::default(), |_| {});
     assert_eq!(context.zoom_factor(), 1.25);
 
     app.settings.set("interface_scale", "100".into());
     app.apply_settings(&context);
-    let _ = context.run(Default::default(), |_| {});
+    let _ = context.run_test_pass(Default::default(), |_| {});
     assert_eq!(context.zoom_factor(), 1.0);
 }
 
@@ -1045,12 +1079,15 @@ fn workspace_and_dialogs_have_unique_widget_ids() {
     let mut frame = eframe::Frame::_new_kittest();
     let check = |app: &mut App, frame: &mut eframe::Frame| {
         for _ in 0..2 {
-            let output = context.run(
+            let output = context.run_test_pass(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
                     ..Default::default()
                 },
-                |ctx| eframe::App::update(app, ctx, frame),
+                |ctx| {
+                    eframe::App::logic(app, ctx, frame);
+                    ctx.root_ui(|root| eframe::App::ui(app, root, frame));
+                },
             );
             for shape in output.shapes {
                 if let egui::Shape::Text(text) = &shape.shape {
@@ -1098,12 +1135,15 @@ fn bottom_shell_keeps_its_session_and_restores_focus() {
     assert_eq!(app.selected().unwrap().tab, 2);
     let mut frame = eframe::Frame::_new_kittest();
     let render = |app: &mut App, frame: &mut eframe::Frame| {
-        let _ = context.run(
+        let _ = context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
                 ..Default::default()
             },
-            |ctx| eframe::App::update(app, ctx, frame),
+            |ctx| {
+                eframe::App::logic(app, ctx, frame);
+                ctx.root_ui(|root| eframe::App::ui(app, root, frame));
+            },
         );
     };
     render(&mut app, &mut frame);

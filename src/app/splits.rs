@@ -168,7 +168,7 @@ impl Node {
                 let response = ui
                     .interact(
                         divider,
-                        ui.id().with(("terminal-split", *id)),
+                        ui.scope_id().with(("terminal-split", *id)),
                         if interactive {
                             Sense::DRAG
                         } else {

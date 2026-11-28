@@ -208,13 +208,13 @@ impl Settings {
             );
             let response = ui.interact(
                 row,
-                ui.id().with(("settings-category", index)),
+                ui.scope_id().with(("settings-category", index)),
                 Sense::click(),
             );
             let label = crate::i18n::tr(ui, title);
             response.widget_info(|| {
                 egui::WidgetInfo::selected(
-                    egui::WidgetType::SelectableLabel,
+                    egui::Role::ListBoxOption,
                     true,
                     self.page == index,
                     label,

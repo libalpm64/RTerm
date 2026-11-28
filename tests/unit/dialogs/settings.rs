@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 
 #[test]
 fn legacy_background_preference_does_not_enable_interactive_execution() {
@@ -44,7 +45,7 @@ fn check_wrapped_rows(locale: &'static str, first: (&str, &str), second: (&str, 
     let description = crate::i18n::text(&ctx, first.1);
     let next_title = crate::i18n::text(&ctx, second.0);
     for width in [260.0, 430.0, 650.0] {
-        let output = ctx.run(
+        let output = ctx.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -53,9 +54,11 @@ fn check_wrapped_rows(locale: &'static str, first: (&str, &str), second: (&str, 
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    setting_row(ui, t, first, |ui| ui.button("Toggle"));
-                    setting_row(ui, t, second, |ui| ui.button("Toggle"));
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        setting_row(ui, t, first, |ui| ui.button("Toggle"));
+                        setting_row(ui, t, second, |ui| ui.button("Toggle"));
+                    })
                 });
             },
         );
@@ -93,7 +96,7 @@ fn settings_scrollbar_reserves_space_and_clips_rows() {
         let mut bounds = egui::Rect::NOTHING;
         let mut inner = egui::Rect::NOTHING;
         let mut offset = 0.0;
-        let output = ctx.run(
+        let output = ctx.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -104,13 +107,15 @@ fn settings_scrollbar_reserves_space_and_clips_rows() {
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    bounds = ui.available_rect_before_wrap();
-                    let result =
-                        settings_scroll(ui, t, 1, 180.0, |ui| settings.appearance_page(ui, t));
-                    inner = result.inner_rect;
-                    offset = result.state.offset.y;
-                    assert!(result.content_size.y > inner.height());
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        bounds = ui.available_rect_before_wrap();
+                        let result =
+                            settings_scroll(ui, t, 1, 180.0, |ui| settings.appearance_page(ui, t));
+                        inner = result.inner_rect;
+                        offset = result.state.clamped_offset().y;
+                        assert!(result.content_size.y > inner.height());
+                    })
                 });
             },
         );
@@ -128,6 +133,8 @@ fn settings_scrollbar_reserves_space_and_clips_rows() {
         vec![
             egui::Event::PointerMoved(inner.center()),
             egui::Event::MouseWheel {
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
                 unit: egui::MouseWheelUnit::Point,
                 delta: vec2(0.0, -220.0),
                 modifiers: egui::Modifiers::NONE,
@@ -160,7 +167,7 @@ fn software_update_is_a_dedicated_settings_page() {
     let mut password = String::new();
     let mut seen = false;
     let render = |settings: &mut Settings, password: &mut String, seen: &mut bool, events| {
-        context.run(
+        context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -170,10 +177,12 @@ fn software_update_is_a_dedicated_settings_page() {
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    settings.show(ui, Theme::dark(), password, false, |_, section| {
-                        *seen |= matches!(section, SettingsSection::Update);
-                    });
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        settings.show(ui, Theme::dark(), password, false, |_, section| {
+                            *seen |= matches!(section, SettingsSection::Update);
+                        });
+                    })
                 });
             },
         )
@@ -220,7 +229,7 @@ fn settings_sidebar_reaches_header_edge_and_aligns_labels() {
     settings.page = 7;
     for width in [520.0, 710.0] {
         let render = |settings: &mut Settings, password: &mut String, events| {
-            context.run(
+            context.run_test_pass(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,

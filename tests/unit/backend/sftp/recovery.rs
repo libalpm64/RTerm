@@ -1,6 +1,6 @@
 use super::*;
 use russh_sftp::{
-    protocol::{Attrs, Data, FileAttributes, Handle, Status, StatusCode},
+    protocol::{Attrs, Data, FileAttributes, Handle, SftpHandle, Status, StatusCode},
     server,
 };
 use std::sync::Mutex as StdMutex;
@@ -85,7 +85,10 @@ impl server::Handler for Fixture {
         if !files.data.contains_key(&path) {
             return Err(StatusCode::NoSuchFile);
         }
-        Ok(Handle { id, handle: path })
+        Ok(Handle {
+            id,
+            handle: path.into(),
+        })
     }
 
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
@@ -102,20 +105,25 @@ impl server::Handler for Fixture {
         self.stat(id, path).await
     }
 
-    async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
-        self.stat(id, handle).await
+    async fn fstat(&mut self, id: u32, handle: SftpHandle) -> Result<Attrs, Self::Error> {
+        self.stat(
+            id,
+            String::from_utf8(handle.as_ref().to_vec()).map_err(|_| StatusCode::Failure)?,
+        )
+        .await
     }
 
     async fn read(
         &mut self,
         id: u32,
-        path: String,
+        path: SftpHandle,
         offset: u64,
         len: u32,
     ) -> Result<Data, Self::Error> {
+        let path = std::str::from_utf8(path.as_ref()).map_err(|_| StatusCode::Failure)?;
         let mut files = self.0.lock().unwrap();
         files.reads.push((offset, len));
-        let data = files.data.get(&path).ok_or(StatusCode::NoSuchFile)?;
+        let data = files.data.get(path).ok_or(StatusCode::NoSuchFile)?;
         let offset = offset as usize;
         if offset >= data.len() {
             return Err(StatusCode::Eof);
@@ -129,16 +137,17 @@ impl server::Handler for Fixture {
     async fn write(
         &mut self,
         id: u32,
-        path: String,
+        path: SftpHandle,
         offset: u64,
         data: Vec<u8>,
     ) -> Result<Status, Self::Error> {
+        let path = std::str::from_utf8(path.as_ref()).map_err(|_| StatusCode::Failure)?;
         let mut files = self.0.lock().unwrap();
         if files.fail_writes && offset >= CHECKPOINT_BYTES {
             return Err(StatusCode::Failure);
         }
         files.writes.push(offset);
-        let target = files.data.get_mut(&path).ok_or(StatusCode::NoSuchFile)?;
+        let target = files.data.get_mut(path).ok_or(StatusCode::NoSuchFile)?;
         let offset = offset as usize;
         let end = offset + data.len();
         if end > target.len() {
@@ -148,7 +157,7 @@ impl server::Handler for Fixture {
         Ok(ok(id))
     }
 
-    async fn close(&mut self, id: u32, _: String) -> Result<Status, Self::Error> {
+    async fn close(&mut self, id: u32, _: SftpHandle) -> Result<Status, Self::Error> {
         Ok(ok(id))
     }
 

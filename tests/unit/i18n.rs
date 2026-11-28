@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 
 fn placeholders(text: &str) -> Vec<&str> {
     assert!(!text.contains(['｛', '｝']), "full-width braces: {text}");
@@ -103,13 +104,15 @@ fn malformed_placeholders_are_rejected() {
 fn inserted_values_are_not_interpreted_as_templates() {
     let ctx = egui::Context::default();
     set(&ctx, "de");
-    let _ = ctx.run(Default::default(), |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let source = "Permanently delete “{name}”?";
-            assert_eq!(
-                format(ui, source, &[("name", "{count}"), ("count", "42")]),
-                translate("de", source).replace("{name}", "{count}")
-            );
+    let _ = ctx.run_test_pass(Default::default(), |ctx| {
+        ctx.root_ui(|root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                let source = "Permanently delete “{name}”?";
+                assert_eq!(
+                    format(ui, source, &[("name", "{count}"), ("count", "42")]),
+                    translate("de", source).replace("{name}", "{count}")
+                );
+            })
         });
     });
 }
@@ -125,18 +128,20 @@ fn selector_uses_native_language_names_in_english() {
     assert!(CHOICES.contains(&("ru", "Русский")));
     let ctx = egui::Context::default();
     crate::theme::install_fonts(&ctx);
-    let _ = ctx.run(Default::default(), |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            assert_eq!(current(ctx), "en");
-            for &(code, label) in CHOICES {
-                let displayed = choice_label(ui, code, label);
-                assert!(ui.fonts_mut(|fonts| {
-                    fonts.has_glyphs(&egui::FontId::monospace(12.0), displayed)
-                }));
-                if !SCRIPT_LOCALES.contains(&code) || system_font(code).is_some() {
-                    assert_eq!(displayed, label, "{code}");
+    let _ = ctx.run_test_pass(Default::default(), |ctx| {
+        ctx.root_ui(|root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                assert_eq!(current(ctx), "en");
+                for &(code, label) in CHOICES {
+                    let displayed = choice_label(ui, code, label);
+                    assert!(ui.fonts_mut(|fonts| {
+                        fonts.has_glyphs(&egui::FontId::monospace(12.0), displayed)
+                    }));
+                    if !SCRIPT_LOCALES.contains(&code) || system_font(code).is_some() {
+                        assert_eq!(displayed, label, "{code}");
+                    }
                 }
-            }
+            })
         });
     });
 }
@@ -171,7 +176,7 @@ fn script_fonts_or_readable_english_fallback() {
                 "installed Fontconfig font must activate {code}"
             );
         }
-        let _ = ctx.run(Default::default(), |ctx| {
+        let _ = ctx.run_test_pass(Default::default(), |ctx| {
             let label = text(ctx, "Settings");
             ctx.fonts_mut(|fonts| {
                 assert!(
@@ -186,17 +191,14 @@ fn script_fonts_or_readable_english_fallback() {
 
 #[test]
 fn script_font_collections_are_borrowed_and_shared_across_faces() {
-    use std::borrow::Cow;
     let mut distinct = BTreeMap::new();
     for (&code, (path, index)) in &SYSTEM_FONTS.faces {
         let font = system_font(code).expect("accepted face");
         assert_eq!(font.index, *index);
-        let Cow::Borrowed(bytes) = font.font else {
-            panic!("system fonts must not make egui clone their backing data");
-        };
+        let bytes = font.bytes();
         assert!(ab_glyph::FontRef::try_from_slice_and_index(bytes, *index).is_ok());
         let again = system_font(code).unwrap();
-        assert_eq!(bytes.as_ptr(), again.font.as_ptr());
+        assert_eq!(bytes.as_ptr(), again.bytes().as_ptr());
         assert_eq!(bytes.as_ptr(), SYSTEM_FONTS.collections[path].as_ptr());
         if let Some(previous) = distinct.insert(path, bytes.as_ptr()) {
             assert_eq!(
@@ -248,7 +250,7 @@ fn repeated_locale_switches_keep_shared_font_backing_and_glyph_coverage() {
     {
         set(&ctx, code);
         crate::theme::install_fonts(&ctx);
-        let _ = ctx.run(Default::default(), |ctx| {
+        let _ = ctx.run_test_pass(Default::default(), |ctx| {
             ctx.fonts_mut(|fonts| {
                 let definitions = fonts.definitions();
                 let family = &definitions.families[&egui::FontFamily::Monospace];
@@ -260,7 +262,7 @@ fn repeated_locale_switches_keep_shared_font_backing_and_glyph_coverage() {
                     assert_eq!(first, &format!("System script {code}"));
                     let face = &definitions.font_data[first];
                     assert_eq!(face.index, expected.index);
-                    assert_eq!(face.font.as_ptr(), expected.font.as_ptr());
+                    assert_eq!(face.bytes().as_ptr(), expected.bytes().as_ptr());
                 }
                 for &(lang, label) in CHOICES {
                     if SCRIPT_LOCALES.contains(&lang) && system_font(lang).is_some() {

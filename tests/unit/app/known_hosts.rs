@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 
 fn key(algorithm: &str, fingerprint: &str) -> Key {
     Key {
@@ -117,22 +118,25 @@ fn renders_only_visible_rows_and_can_scroll_to_the_last_host() {
     let context = egui::Context::default();
     crate::theme::install_fonts(&context);
     Theme::dark().apply(&context);
-    let render = |viewer: &mut KnownHosts| {
+    let render = |viewer: &mut KnownHosts, events: Vec<egui::Event>| {
         let mut result = None;
-        let frame = context.run(
+        let frame = context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 480.0))),
+                events,
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    result = Some(viewer.table(ui));
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        result = Some(viewer.table(ui));
+                    })
                 });
             },
         );
         (result.unwrap(), frame.shapes.len())
     };
-    let (top, shapes) = render(&mut viewer);
+    let (top, shapes) = render(&mut viewer, vec![]);
     assert_eq!(top.inner.start, 0);
     assert!(
         top.inner.len() < 32,
@@ -140,16 +144,30 @@ fn renders_only_visible_rows_and_can_scroll_to_the_last_host() {
         top.inner
     );
     assert!(shapes < 400, "too many paint shapes: {shapes}");
-    let mut state = top.state;
-    state.offset.y = top.content_size.y - top.inner_rect.height();
-    state.store(&context, top.id);
-    let (bottom, shapes) = render(&mut viewer);
+    let pointer = top.inner_rect.center();
+    let _ = render(
+        &mut viewer,
+        vec![
+            egui::Event::PointerMoved(pointer),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(0.0, -2.0 * top.content_size.y),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+    );
+    for _ in 0..30 {
+        let _ = render(&mut viewer, vec![]);
+    }
+    let (bottom, shapes) = render(&mut viewer, vec![]);
     assert_eq!(bottom.inner.end, 10_000);
     assert!(bottom.inner.len() < 32, "{:?}", bottom.inner);
     assert!(shapes < 400, "too many paint shapes: {shapes}");
     viewer.query = "server-00001".into();
     viewer.change_query();
-    let (filtered, _) = render(&mut viewer);
+    let (filtered, _) = render(&mut viewer, vec![]);
     assert_eq!(filtered.inner, 0..1);
     eprintln!(
         "10,000 keys: top {:?}, bottom {:?}, {} paint shapes at bottom",
@@ -167,7 +185,7 @@ fn modal_fits_typical_and_compact_desktops() {
     for size in [vec2(1200.0, 800.0), vec2(640.0, 420.0), vec2(500.0, 340.0)] {
         let rect = Rect::from_min_size(pos2(0.0, 0.0), size);
         for _ in 0..3 {
-            let _ = context.run(
+            let _ = context.run_test_pass(
                 egui::RawInput {
                     screen_rect: Some(rect),
                     ..Default::default()
@@ -178,7 +196,7 @@ fn modal_fits_typical_and_compact_desktops() {
             );
         }
         let area = context
-            .memory(|memory| memory.area_rect(egui::Id::new("known-ssh-hosts")))
+            .memory(|memory| memory.area_rect(egui::Id::unique("known-ssh-hosts")))
             .unwrap();
         assert!(
             rect.expand(1.0).contains_rect(area),
@@ -189,7 +207,7 @@ fn modal_fits_typical_and_compact_desktops() {
     viewer.confirming = true;
     let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(500.0, 340.0));
     for _ in 0..3 {
-        let _ = context.run(
+        let _ = context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(rect),
                 ..Default::default()
@@ -198,7 +216,7 @@ fn modal_fits_typical_and_compact_desktops() {
         );
     }
     let area = context
-        .memory(|memory| memory.area_rect(egui::Id::new("known-ssh-hosts")))
+        .memory(|memory| memory.area_rect(egui::Id::unique("known-ssh-hosts")))
         .unwrap();
     assert!(
         rect.expand(1.0).contains_rect(area),
@@ -214,26 +232,20 @@ fn native_known_hosts_preview() {
     use winit::platform::wayland::EventLoopBuilderExtWayland;
     let path = std::path::PathBuf::from("target/linux-known-hosts-fixture-preview.png");
     struct Preview {
+        screenshot: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<egui::ColorImage>>>>,
         viewer: KnownHosts,
         store: Store,
         frames: u32,
         path: std::path::PathBuf,
     }
     impl eframe::App for Preview {
-        fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+            let ctx = &root.ctx().clone();
+            egui::CentralPanel::default().show(root, |ui| {
                 ui.heading("RTerm — synthetic Known Hosts fixture");
             });
-            self.viewer.show(ctx, &mut self.store, Theme::dark());
-            if let Some(image) = ctx.input(|input| {
-                input.events.iter().find_map(|event| {
-                    if let egui::Event::Screenshot { image, .. } = event {
-                        Some(image.clone())
-                    } else {
-                        None
-                    }
-                })
-            }) {
+            self.viewer.show(root, &mut self.store, Theme::dark());
+            if let Some(image) = self.screenshot.lock().unwrap().take() {
                 image::save_buffer(
                     &self.path,
                     image.as_raw(),
@@ -247,7 +259,12 @@ fn native_known_hosts_preview() {
             }
             self.frames += 1;
             if self.frames == 5 {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                let screenshot = self.screenshot.clone();
+                let repaint = ctx.clone();
+                ctx.request_screenshot(move |image| {
+                    *screenshot.lock().unwrap() = Some(image);
+                    repaint.request_repaint();
+                });
             }
             ctx.request_repaint_after(Duration::from_millis(60));
         }
@@ -275,6 +292,7 @@ fn native_known_hosts_preview() {
             viewer.selected.insert(2);
             viewer.selected.insert(6);
             Ok(Box::new(Preview {
+                screenshot: Default::default(),
                 viewer,
                 store: Store::new(false),
                 frames: 0,

@@ -156,12 +156,12 @@ pub(crate) fn preference(raw: &str) -> &'static str {
 
 pub(crate) fn current(context: &egui::Context) -> &'static str {
     context
-        .data(|data| data.get_temp::<&'static str>(egui::Id::new(ID)))
+        .data(|data| data.get_temp::<&'static str>(egui::Id::unique(ID)))
         .unwrap_or("en")
 }
 
 pub(crate) fn set(context: &egui::Context, code: &'static str) {
-    context.data_mut(|data| data.insert_temp(egui::Id::new(ID), code));
+    context.data_mut(|data| data.insert_temp(egui::Id::unique(ID), code));
 }
 
 fn translate<'a>(code: &str, english: &'a str) -> &'a str {

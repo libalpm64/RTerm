@@ -1419,13 +1419,12 @@ impl App {
         let options = ui.ctx().options(|options| options.input_options);
         let notches = ui.input_mut(|input| {
             let mut notches = 0.0;
-            let mut consumed = egui::Vec2::ZERO;
-            let page_height = input.viewport_rect().height();
             input.events.retain(|event| {
                 let egui::Event::MouseWheel {
                     unit,
                     delta,
                     modifiers,
+                    ..
                 } = event
                 else {
                     return true;
@@ -1433,29 +1432,12 @@ impl App {
                 if !(modifiers.ctrl || modifiers.mac_cmd) || delta.y == 0.0 {
                     return true;
                 }
-                let mut points = match unit {
-                    egui::MouseWheelUnit::Line => *delta * options.line_scroll_speed,
-                    egui::MouseWheelUnit::Point => *delta,
-                    egui::MouseWheelUnit::Page => *delta * page_height,
-                };
                 notches += match unit {
                     egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => delta.y,
                     egui::MouseWheelUnit::Point => delta.y / options.line_scroll_speed.max(1.0),
                 };
-                // Match egui's raw delta conversion so this wheel event cannot
-                // also scroll the terminal or send arrows to a curses program.
-                let horizontal = modifiers.matches_any(options.horizontal_scroll_modifier);
-                let vertical = modifiers.matches_any(options.vertical_scroll_modifier);
-                if horizontal && !vertical {
-                    points = vec2(points.x + points.y, 0.0);
-                }
-                if vertical && !horizontal {
-                    points = vec2(0.0, points.x + points.y);
-                }
-                consumed += points;
                 false
             });
-            input.raw_scroll_delta -= consumed;
             notches
         });
         if notches != 0.0 {

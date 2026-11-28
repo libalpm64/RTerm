@@ -119,7 +119,7 @@ impl Theme {
         style.visuals.menu_corner_radius = 0.into();
         style.visuals.popup_shadow = egui::Shadow::NONE;
         style.visuals.widgets.noninteractive.corner_radius = 0.into();
-        context.set_style(style);
+        context.set_global_style(style);
     }
 
     pub(crate) fn chrome_font(self, size: f32) -> FontId {
@@ -259,12 +259,7 @@ pub(crate) fn paint_tab(
 ) {
     let rect = response.rect;
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
-            ui.is_enabled(),
-            selected,
-            title,
-        )
+        egui::WidgetInfo::selected(egui::Role::Tab, ui.is_enabled(), selected, title)
     });
     // The strip owns its background. Hover changes the label color while focus stays inside the tab.
     if response.has_focus() && !selected && !response.hovered() {
@@ -299,13 +294,13 @@ pub(crate) fn paint_tab(
 pub(crate) fn button(
     ui: &mut egui::Ui,
     rect: Rect,
-    id: impl std::hash::Hash,
+    id: impl egui::AsIdSalt,
     text: &str,
     font: FontId,
     foreground: Color32,
     theme: Theme,
 ) -> Response {
-    let response = ui.interact(rect, ui.id().with(id), Sense::click());
+    let response = ui.interact(rect, ui.scope_id().with(id), Sense::click());
     if response.hovered() {
         ui.painter().rect_filled(rect, 0.0, theme.hover);
     }
@@ -358,7 +353,7 @@ pub(crate) fn icon_button(
     glyph: Icon,
     t: Theme,
 ) -> Response {
-    let response = ui.interact(rect, ui.id().with(id), Sense::click());
+    let response = ui.interact(rect, ui.scope_id().with(id), Sense::click());
     if response.hovered() {
         ui.painter().rect_filled(rect, 0.0, t.hover);
     }
@@ -544,3 +539,39 @@ pub(crate) fn icon(ui: &egui::Ui, rect: Rect, glyph: Icon, color: Color32) {
 #[cfg(test)]
 #[path = "../tests/unit/theme.rs"]
 mod tests;
+
+/// Unsmoothed scroll distance from unconsumed wheel events. Terminal input
+/// uses its own line-based accumulation, not egui's kinetic scroll smoothing.
+pub(crate) fn raw_scroll_delta(context: &egui::Context) -> egui::Vec2 {
+    let options = context.options(|options| options.input_options);
+    context.input(|input| {
+        input
+            .events
+            .iter()
+            .filter_map(|event| {
+                let egui::Event::MouseWheel {
+                    unit,
+                    delta,
+                    modifiers,
+                    ..
+                } = event
+                else {
+                    return None;
+                };
+                let mut delta = match unit {
+                    egui::MouseWheelUnit::Point => *delta,
+                    egui::MouseWheelUnit::Line => *delta * options.line_scroll_speed,
+                    egui::MouseWheelUnit::Page => *delta * input.viewport_rect().height(),
+                };
+                let horizontal = modifiers.matches_any(options.horizontal_scroll_modifier);
+                let vertical = modifiers.matches_any(options.vertical_scroll_modifier);
+                if horizontal && !vertical {
+                    delta = vec2(delta.x + delta.y, 0.0);
+                } else if vertical && !horizontal {
+                    delta = vec2(0.0, delta.x + delta.y);
+                }
+                Some(delta)
+            })
+            .fold(egui::Vec2::ZERO, |sum, delta| sum + delta)
+    })
+}

@@ -21,8 +21,9 @@ fn minimized_redraw_does_not_busy_poll_without_agent() {
         minimized: Arc<AtomicBool>,
     }
     impl eframe::App for Probe {
-        fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        fn ui(&mut self, root: &mut egui::Ui, _: &mut eframe::Frame) {
+            let ctx = &root.ctx().clone();
+            egui::CentralPanel::default().show(root, |ui| {
                 ui.label("RTerm idle scheduling fixture");
             });
             if self.start.elapsed() > Duration::from_millis(700)

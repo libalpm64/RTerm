@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 
 #[tokio::test]
 async fn ssh_unicode_typing_ime_and_paste_round_trip() {
@@ -164,7 +165,7 @@ async fn ssh_unicode_typing_ime_and_paste_round_trip() {
         if bracketed {
             terminal.receive(b"\x1b[?2004h");
         }
-        let _ = ctx.run(
+        let _ = ctx.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -174,21 +175,25 @@ async fn ssh_unicode_typing_ime_and_paste_round_trip() {
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    ui.memory_mut(|m| m.request_focus(ui.id().with(("terminal", terminal.tab))));
-                    let (_, _, error) = terminal.show(
-                        ui,
-                        ui.max_rect(),
-                        &backend,
-                        &options,
-                        &highlighter,
-                        true,
-                        true,
-                        false,
-                        None,
-                        None,
-                    );
-                    assert!(error.is_none(), "{error:?}");
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        ui.memory_mut(|m| {
+                            m.request_focus(ui.scope_id().with(("terminal", terminal.tab)))
+                        });
+                        let (_, _, error) = terminal.show(
+                            ui,
+                            ui.max_rect(),
+                            &backend,
+                            &options,
+                            &highlighter,
+                            true,
+                            true,
+                            false,
+                            None,
+                            None,
+                        );
+                        assert!(error.is_none(), "{error:?}");
+                    })
                 });
             },
         );

@@ -678,7 +678,7 @@ fn modal(name: &str, t: Theme) -> egui::Modal {
         .corner_radius(0)
         .inner_margin(egui::Margin::symmetric(DIALOG_INSET, 0))
         .shadow(egui::Shadow::NONE);
-    egui::Modal::new(egui::Id::new(name))
+    egui::Modal::new(egui::Id::unique(name))
         .frame(frame)
         .backdrop_color(Color32::from_black_alpha(125))
 }

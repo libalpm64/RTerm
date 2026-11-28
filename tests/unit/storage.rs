@@ -247,7 +247,7 @@ fn legacy_vault(password: &str) -> Vec<u8> {
     }))
     .unwrap();
     let cipher = XChaCha20Poly1305::new_from_slice(&key.0).unwrap();
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let nonce = XNonce::generate();
     let ciphertext = cipher.encrypt(&nonce, plaintext.as_slice()).unwrap();
     let mut bytes = Vec::new();
     bytes.extend_from_slice(VAULT_MAGIC);
@@ -255,6 +255,37 @@ fn legacy_vault(password: &str) -> Vec<u8> {
     bytes.extend_from_slice(&nonce);
     bytes.extend_from_slice(&ciphertext);
     bytes
+}
+
+#[test]
+fn vault_cipher_upgrade_preserves_existing_ciphertext() {
+    // Generated with chacha20poly1305 0.10.1 using a fixed fixture key
+    // and nonce. No real vault or credentials are involved.
+    let ciphertext = [
+        0xb8, 0xce, 0x23, 0x86, 0xc7, 0x27, 0x84, 0x1d, 0xd8, 0xa3, 0x59, 0xc5, 0xa1, 0x5a, 0xb9,
+        0xd1, 0x45, 0x89, 0x41, 0x0c, 0x40, 0x5e, 0x5c, 0x18, 0xd7, 0xbd, 0xfb, 0x5b, 0xe5, 0xd9,
+        0x21, 0x0b, 0xda, 0x5b, 0x44, 0x5b, 0x0f, 0xf3, 0xbf, 0x66, 0xd4, 0x70, 0x7c, 0x23, 0x79,
+        0xf6, 0x73, 0xb8, 0xb5, 0xa3, 0x76, 0x86, 0xfe, 0x01, 0x57, 0xa7, 0x32, 0x43, 0x69, 0x97,
+        0x8f, 0x15, 0x1b, 0x91, 0x97, 0x31, 0x77, 0xc3, 0x92, 0x95, 0xa5, 0x56, 0x8d, 0x8e, 0xd0,
+        0x20, 0x73, 0x66, 0xc0, 0x17, 0xf4, 0x51, 0xed, 0x19, 0x0a, 0xed, 0xe4, 0xda, 0xf0, 0x88,
+        0x32, 0x98, 0xea, 0x2b, 0x0c, 0x34, 0xc3, 0x2f, 0x50, 0x98, 0x96, 0x38, 0xe3, 0x49, 0x87,
+        0x31, 0xad, 0xef, 0xce, 0x98, 0xd8, 0x55, 0xda, 0xd1, 0x75, 0xda, 0x4c,
+    ];
+    let key = VaultKey([42; 32], [11; VAULT_SALT_LEN]);
+    let mut bytes = VAULT_MAGIC.to_vec();
+    bytes.extend_from_slice(&VAULT_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&key.1);
+    bytes.extend_from_slice(&[7; 24]);
+    bytes.extend_from_slice(&ciphertext);
+    let vault = decode_vault(&bytes, &key).unwrap();
+    assert_eq!(vault.profiles.len(), 1);
+    assert_eq!(vault.profiles[0].name, "Compatibility fixture");
+    assert!(
+        matches!(&vault.profiles[0].connection, Connection::Local { shell } if shell == "fixture")
+    );
+    let cipher = XChaCha20Poly1305::new_from_slice(&key.0).unwrap();
+    let nonce = XNonce::from([7; 24]);
+    assert_eq!(cipher.encrypt(&nonce, br#"{"v":2,"profiles":[{"name":"Compatibility fixture","connection":{"type":"local","shell":"fixture"}}]}"#.as_slice()).unwrap(), ciphertext);
 }
 
 #[test]
@@ -563,10 +594,54 @@ pub(crate) fn test_private_tempdir() -> tempfile::TempDir {
             .tempdir_in(parent)
             .unwrap()
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        test_private_tempdir_in(&std::env::temp_dir())
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         tempfile::tempdir().unwrap()
     }
+}
+
+// macOS exposes its temporary directory through system aliases such as
+// /var -> /private/var. Resolve the fixture parent *before* creating the
+// directory so tests intended to exercise regular uploads don't accidentally
+// pass a symlink to the strict source validator. Never canonicalize a
+// user-supplied upload source in production to bypass these checks.
+#[cfg(unix)]
+fn test_private_tempdir_in(parent: &Path) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = parent
+        .canonicalize()
+        .expect("resolve test temporary directory");
+    tempfile::Builder::new()
+        .prefix("rterm-test-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(parent)
+        .unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn private_fixture_directory_resolves_symlinked_temp_parent() {
+    use std::os::unix::fs::symlink;
+    let root = test_private_tempdir();
+    let actual = root.path().join("actual");
+    let alias = root.path().join("alias");
+    std::fs::create_dir(&actual).unwrap();
+    symlink(&actual, &alias).unwrap();
+
+    let fixture = test_private_tempdir_in(&alias);
+    assert_eq!(fixture.path().parent(), Some(actual.as_path()));
+    assert_eq!(fixture.path(), fixture.path().canonicalize().unwrap());
+    assert!(unix_directory_is_private(fixture.path()));
+    assert!(fixture.path().ancestors().all(|path| {
+        !std::fs::symlink_metadata(path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    }));
 }
 
 #[test]

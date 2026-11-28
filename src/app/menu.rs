@@ -24,9 +24,8 @@ impl App {
                 vec2(width, rect.height() - inset * 2.0),
             );
             x += width + 0.0;
-            let response = ui.interact(bounds, ui.id().with(("menu", name)), Sense::click());
-            response
-                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, title));
+            let response = ui.interact(bounds, ui.scope_id().with(("menu", name)), Sense::click());
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, title));
             let popup = styled_menu(egui::Popup::menu(&response), t).show(|ui| {
                 let mut items = menu_entries(name, self.agent.active()).to_vec();
                 if name == "AI" && self.agent.active() && self.tunnel_profile.is_some() {
@@ -275,8 +274,7 @@ fn menu_row(
                 Sense::hover()
             },
         );
-        response
-            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
         let highlighted = enabled && (response.hovered() || response.has_focus());
         let fg = if !enabled {
             t.dim

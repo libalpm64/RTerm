@@ -208,7 +208,7 @@ impl EventListener for TerminalEvents {
 }
 
 pub(crate) fn terminal_focus_id() -> egui::Id {
-    egui::Id::new("rterm-terminal-keyboard-owner")
+    egui::Id::unique("rterm-terminal-keyboard-owner")
 }
 
 pub(crate) struct Terminal {
@@ -754,7 +754,7 @@ impl Terminal {
         wallpaper: Option<&crate::background::Wallpaper>,
     ) -> (egui::Response, Vec<String>, Option<String>) {
         let mut error = None;
-        let id = ui.id().with(("terminal", self.tab));
+        let id = ui.scope_id().with(("terminal", self.tab));
         let viewport = rect;
         if let Err(failure) = self.prepare_local(ui, viewport, options, backend) {
             self.mark_closed();
@@ -920,6 +920,8 @@ impl Terminal {
                 - preview_offset;
             ui.output_mut(|output| {
                 output.ime = Some(egui::output::IMEOutput {
+                    purpose: egui::IMEPurpose::Terminal,
+                    should_interrupt_composition: false,
                     rect,
                     cursor_rect: Rect::from_min_size(origin, cell),
                 });
@@ -1146,7 +1148,7 @@ impl Terminal {
         let travel = height - thumb;
         let response = ui.interact(
             rect,
-            ui.id().with(("terminal-scrollbar", self.tab)),
+            ui.scope_id().with(("terminal-scrollbar", self.tab)),
             if allow_input {
                 Sense::CLICK | Sense::DRAG
             } else {
@@ -1273,7 +1275,7 @@ impl Terminal {
             // The terminal already has line-based scrolling. Egui's generic
             // easing spreads a wheel notch across several frames and makes SSH
             // scrollback feel delayed even though the history is entirely local.
-            self.scroll_remainder += ui.input(|input| input.raw_scroll_delta.y) / cell.y;
+            self.scroll_remainder += crate::theme::raw_scroll_delta(ui.ctx()).y / cell.y;
             let lines = self.scroll_remainder.trunc() as i32;
             if lines != 0 {
                 let mode = *self.grid.mode();

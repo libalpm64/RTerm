@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 use egui::{Event, PointerButton, Pos2, RawInput};
 
 #[test]
@@ -43,18 +44,20 @@ fn geometry_drag_and_narrow_window_restore() {
     let large = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
     let mut render = |rect: Rect, events| {
         let mut panes = Vec::new();
-        let _ = context.run(
+        let _ = context.run_test_pass(
             RawInput {
                 screen_rect: Some(large),
                 events,
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| {
-                        panes = splits.layout(ui, rect, Some(4), Theme::dark(), true);
-                    });
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(root, |ui| {
+                            panes = splits.layout(ui, rect, Some(4), Theme::dark(), true);
+                        })
+                });
             },
         );
         panes
@@ -166,7 +169,10 @@ fn real_pty_input_is_exclusive_across_panes_and_bottom_shell() {
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &context, &mut raw);
-        let _ = context.run(raw, |ctx| eframe::App::update(app, ctx, &mut frame));
+        let _ = context.run_test_pass(raw, |ctx| {
+            eframe::App::logic(app, ctx, &mut frame);
+            ctx.root_ui(|root| eframe::App::ui(app, root, &mut frame));
+        });
     };
     fn wait_for(
         app: &mut App,
@@ -333,7 +339,10 @@ fn header_remove_does_not_focus_or_close_inactive_session() {
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &context, &mut raw);
-        let _ = context.run(raw, |ctx| eframe::App::update(app, ctx, &mut frame));
+        let _ = context.run_test_pass(raw, |ctx| {
+            eframe::App::logic(app, ctx, &mut frame);
+            ctx.root_ui(|root| eframe::App::ui(app, root, &mut frame));
+        });
     };
     render(&mut app, vec![]);
     // Left pane header's remove button, with right pane focused.
@@ -360,7 +369,10 @@ fn dragging_tabs_to_panes_swaps_or_replaces_existing_sessions() {
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &context, &mut raw);
-        context.run(raw, |ctx| eframe::App::update(app, ctx, &mut frame))
+        context.run_test_pass(raw, |ctx| {
+            eframe::App::logic(app, ctx, &mut frame);
+            ctx.root_ui(|root| eframe::App::ui(app, root, &mut frame));
+        })
     };
     let output = render(&mut app, vec![]);
     let label_center = |output: &egui::FullOutput, label: &str| {
@@ -407,17 +419,14 @@ fn dragging_tabs_to_panes_swaps_or_replaces_existing_sessions() {
 fn native_split_preview() {
     use winit::platform::wayland::EventLoopBuilderExtWayland;
     struct Preview {
+        screenshot: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<egui::ColorImage>>>>,
         app: App,
         frames: u32,
     }
     impl eframe::App for Preview {
-        fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-            if let Some(image) = ctx.input(|input| {
-                input.events.iter().find_map(|event| match event {
-                    Event::Screenshot { image, .. } => Some(image.clone()),
-                    _ => None,
-                })
-            }) {
+        fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
+            let ctx = &root.ctx().clone();
+            if let Some(image) = self.screenshot.lock().unwrap().take() {
                 image::save_buffer(
                     "target/linux-freetype-fixture-preview.png",
                     image.as_raw(),
@@ -430,7 +439,8 @@ fn native_split_preview() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
             }
-            self.app.update(ctx, frame);
+            self.app.logic(ctx, frame);
+            self.app.ui(root, frame);
             if self.frames == 2 {
                 for term in &mut self.app.terminals {
                     term.receive(
@@ -440,7 +450,12 @@ fn native_split_preview() {
             }
             self.frames += 1;
             if self.frames == 6 {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                let screenshot = self.screenshot.clone();
+                let repaint = ctx.clone();
+                ctx.request_screenshot(move |image| {
+                    *screenshot.lock().unwrap() = Some(image);
+                    repaint.request_repaint();
+                });
             }
             ctx.request_repaint_after(Duration::from_millis(60));
         }
@@ -465,7 +480,11 @@ fn native_split_preview() {
             app.terminals[0].name = "Terminal 1".into();
             app.terminals[1].name = "Terminal 2".into();
             app.split_existing(2, Direction::Right);
-            Ok(Box::new(Preview { app, frames: 0 }))
+            Ok(Box::new(Preview {
+                app,
+                frames: 0,
+                screenshot: Default::default(),
+            }))
         }),
     )
     .unwrap();
@@ -478,6 +497,7 @@ fn native_split_preview() {
 fn native_bash_split_cursor_probe() {
     use winit::platform::wayland::EventLoopBuilderExtWayland;
     struct Probe {
+        screenshot: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<egui::ColorImage>>>>,
         app: App,
         phase: u8,
         settled: Option<Instant>,
@@ -488,7 +508,8 @@ fn native_bash_split_cursor_probe() {
         fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut RawInput) {
             self.app.raw_input_hook(ctx, raw);
         }
-        fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
+            let ctx = &root.ctx().clone();
             let prompt_ready = |term: &Terminal| {
                 !term.starting()
                     && term.visible_line_matches(|line| line.ends_with('$') || line.ends_with('#'))
@@ -526,14 +547,14 @@ fn native_bash_split_cursor_probe() {
             {
                 println!("RIGHT INPUT {:?}", self.app.terminals[1].status());
                 self.phase = 4;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                let screenshot = self.screenshot.clone();
+                let repaint = ctx.clone();
+                ctx.request_screenshot(move |image| {
+                    *screenshot.lock().unwrap() = Some(image);
+                    repaint.request_repaint();
+                });
             }
-            if let Some(image) = ctx.input(|input| {
-                input.events.iter().find_map(|event| match event {
-                    Event::Screenshot { image, .. } => Some(image.clone()),
-                    _ => None,
-                })
-            }) {
+            if let Some(image) = self.screenshot.lock().unwrap().take() {
                 image::save_buffer(
                     "target/linux-native-bash-split-probe.png",
                     image.as_raw(),
@@ -558,9 +579,15 @@ fn native_bash_split_cursor_probe() {
                         .collect::<Vec<_>>()
                 );
                 self.phase = 5;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                let screenshot = self.screenshot.clone();
+                let repaint = ctx.clone();
+                ctx.request_screenshot(move |image| {
+                    *screenshot.lock().unwrap() = Some(image);
+                    repaint.request_repaint();
+                });
             }
-            self.app.update(ctx, frame);
+            self.app.logic(ctx, frame);
+            self.app.ui(root, frame);
             ctx.request_repaint_after(Duration::from_millis(40));
         }
     }
@@ -604,6 +631,7 @@ fn native_bash_split_cursor_probe() {
             app.sessions_sidebar = None;
             app.new_local();
             Ok(Box::new(Probe {
+                screenshot: Default::default(),
                 app,
                 phase: 0,
                 settled: None,
@@ -655,7 +683,10 @@ exec /bin/bash --noprofile --norc -i
                 ..Default::default()
             };
             eframe::App::raw_input_hook(app, &context, &mut raw);
-            let _ = context.run(raw, |ctx| eframe::App::update(app, ctx, &mut frame));
+            let _ = context.run_test_pass(raw, |ctx| {
+                eframe::App::logic(app, ctx, &mut frame);
+                ctx.root_ui(|root| eframe::App::ui(app, root, &mut frame));
+            });
         };
         render(&mut app, initial_width, vec![]);
         std::thread::sleep(Duration::from_millis(delay));

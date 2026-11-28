@@ -215,7 +215,7 @@ impl Terminal {
         let detail = time.map_or_else(|| detail.clone(), |time| format!("{detail} · {time}"));
         ui.interact(
             area,
-            ui.id().with(("command-mark", self.tab, id.get())),
+            ui.scope_id().with(("command-mark", self.tab, id.get())),
             Sense::hover(),
         )
         .on_hover_text(detail);

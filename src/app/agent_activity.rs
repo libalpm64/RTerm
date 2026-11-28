@@ -348,7 +348,7 @@ impl App {
         let mut open = true;
         let recording = self.settings.on("ai_audit_vault") && self.vault_key.is_some();
         let activity = &self.agent.activity;
-        let frame = egui::Frame::window(&context.style());
+        let frame = egui::Frame::window(&context.global_style());
         let frame = frame.inner_margin(egui::Margin {
             top: 2,
             bottom: 2,
@@ -358,7 +358,7 @@ impl App {
             egui::RichText::new(crate::i18n::text(context, "AI Activity"))
                 .font(theme::strong(13.0)),
         )
-        .id(egui::Id::new("agent-activity-window"))
+        .id(egui::Id::unique("agent-activity-window"))
         .frame(frame)
         .open(&mut open)
         .default_size(vec2(760.0, 475.0))
@@ -716,8 +716,11 @@ impl Viewer {
                             );
                         }
                     });
-                    let response =
-                        ui.interact(row.response.rect, ui.id().with(&entry.id), Sense::click());
+                    let response = ui.interact(
+                        row.response.rect,
+                        ui.scope_id().with(&entry.id),
+                        Sense::click(),
+                    );
                     if response.clicked() {
                         self.selected = Some(entry.id.clone());
                     }

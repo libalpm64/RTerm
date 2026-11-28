@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 
 fn fixture_profile(name: &str) -> Profile {
     Profile {
@@ -11,18 +12,20 @@ fn fixture_profile(name: &str) -> Profile {
 }
 
 fn render(app: &mut App, context: &egui::Context, events: Vec<egui::Event>) -> egui::FullOutput {
-    context.run(
+    context.run_test_pass(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(320.0, 600.0))),
             events,
             ..Default::default()
         },
         |ctx| {
-            egui::CentralPanel::default()
-                .frame(egui::Frame::NONE)
-                .show(ctx, |ui| {
-                    app.session_panel(ui, ui.max_rect());
-                });
+            ctx.root_ui(|root| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(root, |ui| {
+                        app.session_panel(ui, ui.max_rect());
+                    })
+            });
         },
     )
 }
@@ -76,7 +79,9 @@ fn inline_session_folder_creation_cancel_and_rename() {
     let _ = render(&mut app, &ctx, vec![key(Key::Enter)]);
     assert!(app.session_folders.contains("Production"));
     assert!(app.session_folder_ui.draft.is_none());
-    assert!(egui::text_edit::TextEditState::load(&ctx, egui::Id::new(FOLDER_EDITOR_ID)).is_none());
+    assert!(
+        egui::text_edit::TextEditState::load(&ctx, egui::Id::unique(FOLDER_EDITOR_ID)).is_none()
+    );
 
     click(&mut app, &ctx, pos2(286.0, 11.0));
     let _ = render(

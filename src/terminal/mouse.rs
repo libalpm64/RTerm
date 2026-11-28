@@ -184,7 +184,7 @@ impl Terminal {
             }
         }
         if over && !modifiers.shift {
-            self.scroll_remainder += ui.input(|input| input.raw_scroll_delta.y) / cell.y;
+            self.scroll_remainder += crate::theme::raw_scroll_delta(ui.ctx()).y / cell.y;
             let lines = self.scroll_remainder.trunc() as i32;
             self.scroll_remainder -= lines as f32;
             if let Some(pos) = ui.input(|input| input.pointer.hover_pos()) {

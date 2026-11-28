@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.85.0"
 name = "alacritty_terminal"
-version = "0.25.1"
+version = "0.26.0"
 authors = [
     "Christian Duerr <contact@christianduerr.com>",
     "Joe Wilm <joe@jwilm.com>",
@@ -98,7 +98,7 @@ default-features = false
 version = "0.2.0"
 
 [target."cfg(unix)".dependencies.signal-hook]
-version = "0.3.10"
+version = "0.4.3"
 
 [target."cfg(windows)".dependencies.miow]
 version = "0.6.0"

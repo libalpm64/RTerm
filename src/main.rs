@@ -15,6 +15,9 @@ mod background;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod desktop_shortcut;
 mod dialogs;
+#[cfg(test)]
+#[path = "../tests/unit/egui_test.rs"]
+mod egui_test;
 mod explorer;
 mod highlight;
 mod host_keys;

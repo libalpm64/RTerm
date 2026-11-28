@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 
 #[test]
 fn jpeg_wallpaper_decodes_and_rejects_invalid_images() {
@@ -135,7 +136,7 @@ fn terminal_keeps_wallpaper_in_normal_and_alternate_screens() {
             ..options
         };
         let mut viewport = Rect::NOTHING;
-        let output = ctx.run(
+        let output = ctx.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(
                     pos2(0.0, 0.0),
@@ -144,20 +145,22 @@ fn terminal_keeps_wallpaper_in_normal_and_alternate_screens() {
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    viewport = ui.max_rect().with_max_x(ui.max_rect().right() - 100.0);
-                    terminal.show(
-                        ui,
-                        viewport,
-                        &backend,
-                        &options,
-                        &highlighter,
-                        false,
-                        false,
-                        false,
-                        preview,
-                        background,
-                    );
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        viewport = ui.max_rect().with_max_x(ui.max_rect().right() - 100.0);
+                        terminal.show(
+                            ui,
+                            viewport,
+                            &backend,
+                            &options,
+                            &highlighter,
+                            false,
+                            false,
+                            false,
+                            preview,
+                            background,
+                        );
+                    })
                 });
             },
         );

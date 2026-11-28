@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 use serde_json::{Value, json};
 
 const OLD: &str = "1111111111111111111111111111111111111111";
@@ -152,7 +153,7 @@ fn installation_requires_a_separate_confirm_click() {
         pending: None,
     };
     let render = |updater: &mut Updater, events| {
-        context.run(
+        context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -162,7 +163,9 @@ fn installation_requires_a_separate_confirm_click() {
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| updater.show(ui, Theme::dark()));
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| updater.show(ui, Theme::dark()))
+                });
             },
         )
     };
@@ -504,7 +507,7 @@ fn update_page_shows_only_essential_controls_and_status() {
     let mut updater = Updater::default();
     let render = |updater: &mut Updater| {
         context
-            .run(
+            .run_test_pass(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -513,8 +516,10 @@ fn update_page_shows_only_essential_controls_and_status() {
                     ..Default::default()
                 },
                 |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        updater.show(ui, Theme::dark());
+                    ctx.root_ui(|root| {
+                        egui::CentralPanel::default().show(root, |ui| {
+                            updater.show(ui, Theme::dark());
+                        })
                     });
                 },
             )
@@ -579,7 +584,7 @@ fn update_version_and_actions_have_clear_horizontal_spacing() {
     t.apply(&context);
     let mut updater = Updater::default();
     for width in [330.0, 540.0] {
-        let output = context.run(
+        let output = context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -588,7 +593,9 @@ fn update_version_and_actions_have_clear_horizontal_spacing() {
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| updater.show(ui, t));
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| updater.show(ui, t))
+                });
             },
         );
         let label = |predicate: &dyn Fn(&str) -> bool| {

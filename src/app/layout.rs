@@ -60,7 +60,7 @@ impl App {
                             ui.allocate_space(vec2((name_width + 50.0).min(233.0), tab_height));
                         let response = ui.interact(
                             tab,
-                            ui.id().with(("session-tab", terminal.tab)),
+                            ui.scope_id().with(("session-tab", terminal.tab)),
                             Sense::click_and_drag(),
                         );
                         let active = self.active == Some(terminal.tab) && !self.show_keys;
@@ -233,7 +233,7 @@ impl App {
                     if self.keys.open {
                         let (_, rect) = ui.allocate_space(vec2(107.0, tab_height));
                         let response =
-                            ui.interact(rect, ui.id().with("ssh-keys-tab"), Sense::click());
+                            ui.interact(rect, ui.scope_id().with("ssh-keys-tab"), Sense::click());
                         if self.show_keys || response.hovered() {
                             theme::band(ui, rect, t.bg, None);
                         }
@@ -506,7 +506,11 @@ impl App {
             Stroke::new(1.0_f32, t.border),
         );
         let tab = header.with_max_x(header.left() + 90.0);
-        let response = ui.interact(tab, ui.id().with("bottom-shell-toggle"), Sense::click());
+        let response = ui.interact(
+            tab,
+            ui.scope_id().with("bottom-shell-toggle"),
+            Sense::click(),
+        );
         if self.bottom_open || response.hovered() {
             theme::band(ui, tab, t.hover, None);
         }
@@ -631,7 +635,7 @@ impl App {
                 let response = ui
                     .interact(
                         divider,
-                        ui.id().with("transfer-queue-divider"),
+                        ui.scope_id().with("transfer-queue-divider"),
                         Sense::drag(),
                     )
                     .on_hover_cursor(egui::CursorIcon::ResizeVertical)
@@ -1033,7 +1037,7 @@ impl App {
         let response = ui
             .interact(
                 toggle,
-                ui.id().with("transfer-queue-toggle"),
+                ui.scope_id().with("transfer-queue-toggle"),
                 Sense::click(),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -1273,7 +1277,7 @@ impl App {
             pos2(body.right() - width - 10.0, body.bottom() - height - 10.0),
             vec2(width, height),
         );
-        egui::Area::new(ui.id().with("transfer-card"))
+        egui::Area::new(ui.scope_id().with("transfer-card"))
             .order(egui::Order::Foreground)
             .fixed_pos(area.min)
             .default_size(area.size())
@@ -1371,7 +1375,7 @@ impl App {
         if !valid {
             return;
         }
-        // egui processes focus navigation before App::update, including Escape
+        // egui processes focus navigation before App::ui, including Escape
         // surrendering focus and Tab moving to a different widget. Stash only
         // terminal navigation events and restore them in original order after
         // begin_pass. This also works on the very first focused frame, when
@@ -1445,9 +1449,9 @@ impl App {
 
 impl eframe::App for App {
     fn native_background_update(&mut self, context: &egui::Context) -> (Option<Instant>, bool) {
-        // This hook runs on the same native thread as update(), with no
+        // This hook runs on the same native thread as logic()/ui(), with no
         // concurrent access to profiles, terminals, approvals or vault keys.
-        // Visible frames already service the queue; only fill in missed frames.
+        // The normal logic pass services the queue; fill in missed passes.
         const INTERVAL: Duration = Duration::from_millis(50);
         let idle_wake = self.enforce_idle_lock(context);
         if (self.agent.active() || self.openai_tunnel.is_some())
@@ -1462,16 +1466,24 @@ impl eframe::App for App {
     }
 
     fn raw_input_hook(&mut self, context: &egui::Context, raw: &mut egui::RawInput) {
+        if !raw.events.is_empty() {
+            self.last_activity = Instant::now();
+        }
         self.capture_terminal_navigation(context, raw);
     }
 
-    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
-        self.restore_terminal_navigation(context);
-        if context.input(|input| !input.events.is_empty()) {
-            self.last_activity = Instant::now();
-        }
+    fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.enforce_idle_lock(context);
         self.service_backend_and_agent(context);
+        if context.input(|input| input.viewport().close_requested()) && !self.exit_confirmed {
+            context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.request_exit(context);
+        }
+    }
+
+    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let context = &root.ctx().clone();
+        self.restore_terminal_navigation(context);
         if !self.file_interaction_allowed()
             || (self.show_keys || (!self.file_workspace_active() && self.sidebar.is_none()))
         {
@@ -1482,10 +1494,6 @@ impl eframe::App for App {
             || self.file_workspace_active()
         {
             self.session_folder_ui.cancel(context);
-        }
-        if context.input(|input| input.viewport().close_requested()) && !self.exit_confirmed {
-            context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.request_exit(context);
         }
         self.settle_wheel_zoom(context);
         if self.dialog.is_none()
@@ -1498,7 +1506,7 @@ impl eframe::App for App {
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.theme.bg))
-            .show(context, |ui| {
+            .show(root, |ui| {
                 if self.locked {
                     self.lock_screen(ui);
                     return;
@@ -1554,7 +1562,7 @@ impl eframe::App for App {
                             .with_max_y(sessions.bottom() + 3.0);
                         {
                             let response = ui
-                                .interact(split, ui.id().with("dock-split"), Sense::drag())
+                                .interact(split, ui.scope_id().with("dock-split"), Sense::drag())
                                 .on_hover_cursor(egui::CursorIcon::ResizeVertical);
                             ui.painter().hline(
                                 split.x_range(),
@@ -1628,7 +1636,11 @@ impl eframe::App for App {
                         .with_min_y(bottom.top() - 2.0)
                         .with_max_y(bottom.top() + 2.0);
                     let response = ui
-                        .interact(split, ui.id().with("bottom-shell-resize"), Sense::drag())
+                        .interact(
+                            split,
+                            ui.scope_id().with("bottom-shell-resize"),
+                            Sense::drag(),
+                        )
                         .on_hover_cursor(egui::CursorIcon::ResizeVertical);
                     if response.dragged() {
                         self.bottom_height =
@@ -1653,7 +1665,7 @@ impl eframe::App for App {
             && !self.locked
         {
             let response =
-                egui::Modal::new(egui::Id::new("desktop-shortcut-setup")).show(context, |ui| {
+                egui::Modal::new(egui::Id::unique("desktop-shortcut-setup")).show(context, |ui| {
                     ui.heading("RTerm setup");
                     ui.label(crate::i18n::tr(ui, "Create a desktop shortcut?"));
                     ui.horizontal(|ui| {
@@ -1688,7 +1700,7 @@ fn resize_bar(
     id: &str,
 ) {
     let response = ui
-        .interact(rect, ui.id().with(id), Sense::drag())
+        .interact(rect, ui.scope_id().with(id), Sense::drag())
         .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
     {
         ui.painter().vline(

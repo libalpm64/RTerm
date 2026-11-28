@@ -1,6 +1,6 @@
 use std::ops::RangeInclusive;
 
-use eframe::egui::{self, Align, RichText, Sense, Stroke, pos2, vec2};
+use eframe::egui::{self, RichText, Sense, Stroke, pos2, vec2};
 
 use crate::theme::{self, Theme};
 
@@ -42,7 +42,7 @@ pub(super) fn input(
             .font(font)
             .margin(egui::Margin::symmetric(6, 3))
             .min_size(vec2(0.0, CONTROL_HEIGHT))
-            .vertical_align(Align::Center)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text(RichText::new(crate::i18n::tr(ui, hint)).color(t.muted))
             .desired_width(f32::INFINITY)
             .password(password),
@@ -154,7 +154,7 @@ pub(super) fn dialog_tabs(
             let tab =
                 egui::Rect::from_min_size(pos2(x, rect.top()), vec2(width + 30.0, rect.height()));
             x = tab.right();
-            let response = ui.interact(tab, ui.id().with((id, index)), Sense::click());
+            let response = ui.interact(tab, ui.scope_id().with((id, index)), Sense::click());
             if response.clicked() {
                 active = index;
             }
@@ -174,7 +174,7 @@ pub(super) fn dialog_tabs(
     active
 }
 
-pub(super) fn body_scroll(ui: &mut egui::Ui, id: impl std::hash::Hash) -> egui::ScrollArea {
+pub(super) fn body_scroll(ui: &mut egui::Ui, id: impl egui::AsIdSalt) -> egui::ScrollArea {
     egui::ScrollArea::vertical()
         .id_salt(id)
         .max_height((ui.ctx().content_rect().height() * 0.8 - 156.0).max(120.0))
@@ -188,7 +188,7 @@ pub(super) fn toggle(ui: &mut egui::Ui, label: &str, value: &mut bool, t: Theme)
     }
     let label = crate::i18n::tr(ui, label);
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *value, label)
+        egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *value, label)
     });
     let background = if *value {
         t.accent

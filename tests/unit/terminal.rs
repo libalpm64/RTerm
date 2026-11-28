@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 use std::time::Instant;
 
 #[test]
@@ -24,37 +25,39 @@ fn terminal_keeps_focus_for_tab_and_repeating_arrows() {
     term.endpoint = Some(1);
     let highlighter = Highlighter::new(false, "");
     let render = |term: &mut Terminal, events: Vec<egui::Event>, focus: bool| {
-        let _ = context.run(
+        let _ = context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))),
                 events,
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    let _ = ui.button("Above terminal");
-                    let id = ui.id().with(("terminal", term.tab));
-                    if focus {
-                        ui.memory_mut(|m| m.request_focus(id));
-                    }
-                    let area = Rect::from_min_size(pos2(0.0, 80.0), vec2(600.0, 400.0));
-                    term.show(
-                        ui,
-                        area,
-                        &backend,
-                        &options,
-                        &highlighter,
-                        true,
-                        true,
-                        false,
-                        None,
-                        None,
-                    );
-                    let _ = ui.interact(
-                        Rect::from_min_size(pos2(0.0, 490.0), vec2(100.0, 24.0)),
-                        ui.id().with("below"),
-                        Sense::click(),
-                    );
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        let _ = ui.button("Above terminal");
+                        let id = ui.scope_id().with(("terminal", term.tab));
+                        if focus {
+                            ui.memory_mut(|m| m.request_focus(id));
+                        }
+                        let area = Rect::from_min_size(pos2(0.0, 80.0), vec2(600.0, 400.0));
+                        term.show(
+                            ui,
+                            area,
+                            &backend,
+                            &options,
+                            &highlighter,
+                            true,
+                            true,
+                            false,
+                            None,
+                            None,
+                        );
+                        let _ = ui.interact(
+                            Rect::from_min_size(pos2(0.0, 490.0), vec2(100.0, 24.0)),
+                            ui.scope_id().with("below"),
+                            Sense::click(),
+                        );
+                    })
                 });
             },
         );
@@ -110,28 +113,30 @@ fn input_bursts_are_batched_and_retried_in_order() {
     term.endpoint = Some(1);
     let highlighter = Highlighter::new(false, "");
     let events = (0..500).map(|_| egui::Event::Text("x".into())).collect();
-    let _ = context.run(
+    let _ = context.run_test_pass(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))),
             events,
             ..Default::default()
         },
         |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.memory_mut(|m| m.request_focus(ui.id().with(("terminal", term.tab))));
-                let (_, _, error) = term.show(
-                    ui,
-                    ui.max_rect(),
-                    &backend,
-                    &options,
-                    &highlighter,
-                    true,
-                    true,
-                    false,
-                    None,
-                    None,
-                );
-                assert!(error.is_none());
+            ctx.root_ui(|root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    ui.memory_mut(|m| m.request_focus(ui.scope_id().with(("terminal", term.tab))));
+                    let (_, _, error) = term.show(
+                        ui,
+                        ui.max_rect(),
+                        &backend,
+                        &options,
+                        &highlighter,
+                        true,
+                        true,
+                        false,
+                        None,
+                        None,
+                    );
+                    assert!(error.is_none());
+                })
             });
         },
     );
@@ -152,7 +157,7 @@ fn ascii_runs_match_terminal_cell_pitch() {
     let ascii: String = (b' '..=b'~').map(char::from).collect();
     for scale in [1.0, 1.25, 1.5, 2.0] {
         context.set_pixels_per_point(scale);
-        let _ = context.run(egui::RawInput::default(), |ctx| {
+        let _ = context.run_test_pass(egui::RawInput::default(), |ctx| {
             let pixels_per_point = ctx.pixels_per_point();
             ctx.fonts_mut(|fonts| {
                 for size in [10.0, 13.0, 18.0, 26.0] {
@@ -188,13 +193,15 @@ fn scrollback_frame_profile() {
     let mut terminal = Terminal::new(1, "Profile".into(), Kind::Ssh, &options);
     let render = |terminal: &mut Terminal, highlighter: &Highlighter, scroll: bool| {
         let start = Instant::now();
-        let output = context.run(
+        let output = context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1450.0, 1000.0))),
                 events: if scroll {
                     vec![
                         egui::Event::PointerMoved(pos2(600.0, 400.0)),
                         egui::Event::MouseWheel {
+                            phase: egui::TouchPhase::Move,
+                            source: egui::MouseWheelSource::Wheel,
                             unit: egui::MouseWheelUnit::Point,
                             delta: vec2(0.0, 120.0),
                             modifiers: egui::Modifiers::NONE,
@@ -206,19 +213,21 @@ fn scrollback_frame_profile() {
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    terminal.show(
-                        ui,
-                        ui.max_rect(),
-                        &backend,
-                        &options,
-                        highlighter,
-                        true,
-                        true,
-                        false,
-                        None,
-                        None,
-                    );
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        terminal.show(
+                            ui,
+                            ui.max_rect(),
+                            &backend,
+                            &options,
+                            highlighter,
+                            true,
+                            true,
+                            false,
+                            None,
+                            None,
+                        );
+                    })
                 });
             },
         );
@@ -275,25 +284,27 @@ fn zoom_preview_scales_text_without_resizing_grid() {
     let highlighter = Highlighter::new(false, "");
     let mut terminal = Terminal::new(1, "Preview".into(), Kind::Local, &options);
     let render = |terminal: &mut Terminal, options: &TerminalOptions, preview: Option<f32>| {
-        context.run(
+        context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(760.0, 680.0))),
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    terminal.show(
-                        ui,
-                        ui.max_rect(),
-                        &backend,
-                        options,
-                        &highlighter,
-                        false,
-                        false,
-                        false,
-                        preview,
-                        None,
-                    );
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        terminal.show(
+                            ui,
+                            ui.max_rect(),
+                            &backend,
+                            options,
+                            &highlighter,
+                            false,
+                            false,
+                            false,
+                            preview,
+                            None,
+                        );
+                    })
                 });
             },
         )
@@ -335,25 +346,27 @@ fn resize_round_trip_preserves_shell_lines() {
     let highlighter = Highlighter::new(false, "");
     let mut terminal = Terminal::new(1, "Resize".into(), Kind::Local, &options);
     let render = |terminal: &mut Terminal, options: &TerminalOptions| {
-        let _ = context.run(
+        let _ = context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(760.0, 680.0))),
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    terminal.show(
-                        ui,
-                        ui.max_rect(),
-                        &backend,
-                        options,
-                        &highlighter,
-                        false,
-                        false,
-                        false,
-                        None,
-                        None,
-                    );
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        terminal.show(
+                            ui,
+                            ui.max_rect(),
+                            &backend,
+                            options,
+                            &highlighter,
+                            false,
+                            false,
+                            false,
+                            None,
+                            None,
+                        );
+                    })
                 });
             },
         );
@@ -390,16 +403,18 @@ fn native_pty_connects_shell_input_and_output() {
     let mut terminal = Terminal::new(1, "Test".into(), Kind::Local, &options);
     terminal.queue_local(shell, false);
     assert!(terminal.endpoint.is_none());
-    let _ = context.run(
+    let _ = context.run_test_pass(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(620.0, 300.0))),
             ..Default::default()
         },
         |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                terminal
-                    .prepare_local(ui, ui.max_rect(), &options, &backend)
-                    .unwrap();
+            ctx.root_ui(|root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    terminal
+                        .prepare_local(ui, ui.max_rect(), &options, &backend)
+                        .unwrap();
+                })
             });
         },
     );
@@ -580,29 +595,31 @@ fn terminal_focus_marker_does_not_accumulate_with_tab_churn() {
     for tab in 1..=500 {
         let mut terminal = Terminal::new(tab, "Fixture".into(), Kind::Ssh, &options);
         terminal.closed = true; // No network or local PTY.
-        let _ = context.run(
+        let _ = context.run_test_pass(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 240.0))),
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    let rect = ui.max_rect();
-                    terminal.show(
-                        ui,
-                        rect,
-                        &backend,
-                        &options,
-                        &highlighter,
-                        true,
-                        true,
-                        true,
-                        None,
-                        None,
-                    );
-                    let marker =
-                        ctx.data(|data| data.get_temp::<(egui::Id, u64)>(terminal_focus_id()));
-                    assert_eq!(marker.map(|(_, tab)| tab), Some(tab));
+                ctx.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        let rect = ui.max_rect();
+                        terminal.show(
+                            ui,
+                            rect,
+                            &backend,
+                            &options,
+                            &highlighter,
+                            true,
+                            true,
+                            true,
+                            None,
+                            None,
+                        );
+                        let marker =
+                            ctx.data(|data| data.get_temp::<(egui::Id, u64)>(terminal_focus_id()));
+                        assert_eq!(marker.map(|(_, tab)| tab), Some(tab));
+                    })
                 });
             },
         );

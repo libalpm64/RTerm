@@ -1046,7 +1046,7 @@ impl App {
                 .deadline
                 .saturating_duration_since(Instant::now())
                 .as_secs();
-            let response = egui::Modal::new(egui::Id::new("agent-library-approval"))
+            let response = egui::Modal::new(egui::Id::unique("agent-library-approval"))
                 .frame(frame)
                 .show(context, |ui| {
                     ui.set_width(460.0);
@@ -1090,7 +1090,7 @@ impl App {
                 .deadline
                 .saturating_duration_since(Instant::now())
                 .as_secs();
-            let response = egui::Modal::new(egui::Id::new("agent-open-approval")).frame(frame).show(context, |ui| {
+            let response = egui::Modal::new(egui::Id::unique("agent-open-approval")).frame(frame).show(context, |ui| {
                 ui.set_width(460.0);
                 ui.heading("AI agent requests a new SSH tab");
                 if tunneled { ui.label("Requested through OpenAI Secure MCP Tunnel."); }
@@ -1129,7 +1129,7 @@ impl App {
                 .deadline
                 .saturating_duration_since(Instant::now())
                 .as_secs();
-            let response = egui::Modal::new(egui::Id::new("agent-upload-approval")).frame(frame).show(context, |ui| {
+            let response = egui::Modal::new(egui::Id::unique("agent-upload-approval")).frame(frame).show(context, |ui| {
                 ui.set_width(500.0);
                 ui.heading("AI agent requests a file upload");
                 if tunneled { ui.label("Requested through OpenAI Secure MCP Tunnel."); }
@@ -1198,7 +1198,7 @@ impl App {
         let ready = self
             .agent_terminal(id)
             .is_some_and(|term| Some(term.tab) == self.active && term.agent_prompt_available());
-        let response = egui::Modal::new(egui::Id::new("agent-command-approval")).frame(frame).show(context, |ui| {
+        let response = egui::Modal::new(egui::Id::unique("agent-command-approval")).frame(frame).show(context, |ui| {
             ui.set_width(510.0);
             ui.heading("AI agent requests SSH access");
             if tunneled { ui.label("Requested through OpenAI Secure MCP Tunnel."); }

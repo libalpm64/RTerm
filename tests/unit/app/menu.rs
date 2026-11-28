@@ -1,4 +1,5 @@
 use super::*;
+use crate::egui_test::TestContextExt;
 use egui::{Event, PointerButton, RawInput, Shape};
 
 #[test]
@@ -16,19 +17,22 @@ fn check_terminal_context_menu(locale: &'static str) {
     theme.apply(&context);
     let mut selected = None;
     let mut frame = |events| {
-        context.run(
+        context.run_test_pass(
             RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 480.0))),
                 events,
                 ..Default::default()
             },
             |context| {
-                egui::CentralPanel::default().show(context, |ui| {
-                    let response = ui.allocate_response(vec2(500.0, 400.0), Sense::click());
-                    if let Some(action) = terminal_menu(egui::Popup::context_menu(&response), theme)
-                    {
-                        selected = Some(action);
-                    }
+                context.root_ui(|root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        let response = ui.allocate_response(vec2(500.0, 400.0), Sense::click());
+                        if let Some(action) =
+                            terminal_menu(egui::Popup::context_menu(&response), theme)
+                        {
+                            selected = Some(action);
+                        }
+                    })
                 });
             },
         )
