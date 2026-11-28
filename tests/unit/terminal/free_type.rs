@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(target_os = "linux")]
 use crate::egui_test::TestContextExt;
 
 fn fixture() -> (Terminal, Backend, mpsc::Receiver<Vec<u8>>) {
