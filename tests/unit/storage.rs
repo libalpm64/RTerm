@@ -648,3 +648,114 @@ fn folder_persistence_keeps_credentials_encrypted_and_imports_in_existing_librar
     assert_eq!(config.password.as_deref(), Some("fixture-password"));
     assert_eq!(reopened.session_folders, folders);
 }
+
+#[test]
+fn vault_audit_retains_thousands_of_commands_and_updates_outcomes() {
+    let dir = test_private_tempdir();
+    let path = dir.path().join("vault.dat");
+    let key = VaultKey([17; 32], [17; VAULT_SALT_LEN]);
+    update_vault(&path, &key, true, |_| {}).unwrap();
+    let entry = |i: usize| AgentAuditEntry {
+        id: format!("audit-{i}"),
+        operation: format!("operation-{i}"),
+        session: "fixture".into(),
+        session_name: "Fixture SSH".into(),
+        action: "Background command".into(),
+        command: format!("echo fixture-{i}"),
+        submitted_ms: i as i64,
+        finished_ms: Some(i as i64 + 1),
+        phase: "completed".into(),
+        exit_code: Some(0),
+        duration_ms: Some(1),
+        detail: None,
+    };
+    let history = save_agent_audit_at(&path, &key, (0..10_000).map(entry)).unwrap();
+    assert_eq!(history.len(), 10_000);
+    assert_eq!(history.front().unwrap().id, "audit-9999");
+    assert_eq!(history.back().unwrap().id, "audit-0");
+    let mut updated = entry(0);
+    updated.exit_code = Some(7);
+    let history = save_agent_audit_at(&path, &key, [entry(10_000), updated].into_iter()).unwrap();
+    assert_eq!(history.len(), 10_001);
+    assert_eq!(history.back().unwrap().exit_code, Some(7));
+    update_vault(&path, &key, false, |vault| {
+        vault.profiles.push(Profile {
+            folder: None,
+            name: "Fixture".into(),
+            connection: Connection::Local {
+                shell: "fixture".into(),
+            },
+        });
+    })
+    .unwrap();
+    let bytes = read_private_vault(&path).unwrap();
+    assert!(!bytes.windows(14).any(|window| window == b"echo fixture-0"));
+    let vault = decode_vault(&bytes, &key).unwrap();
+    assert_eq!(vault.agent_audit.len(), 10_001);
+    assert_eq!(vault.agent_audit.back().unwrap().command, "echo fixture-0");
+    assert_eq!(vault.agent_audit.back().unwrap().exit_code, Some(7));
+    assert_eq!(vault.profiles[0].name, "Fixture");
+}
+
+#[test]
+fn audit_deletion_updates_encrypted_vault_without_touching_other_records() {
+    let dir = test_private_tempdir();
+    let path = dir.path().join("vault.dat");
+    let key = VaultKey([19; 32], [19; VAULT_SALT_LEN]);
+    update_vault(&path, &key, true, |vault| {
+        vault.profiles.push(Profile {
+            name: "Keep profile".into(),
+            folder: Some("Keep folder".into()),
+            connection: Connection::Local {
+                shell: "fixture".into(),
+            },
+        });
+        vault.session_folders.insert("Keep folder".into());
+        vault.openai_tunnel = Some(crate::tunnel::Profile {
+            id: "tunnel_fixture".into(),
+            api_key: "fixture-key".into(),
+            client: PathBuf::new(),
+        });
+    })
+    .unwrap();
+    let make = |id: &str| AgentAuditEntry {
+        id: id.into(),
+        operation: id.into(),
+        session: "fixture".into(),
+        session_name: "Fixture SSH".into(),
+        action: "Background command".into(),
+        command: format!("fixture {id}"),
+        submitted_ms: 1,
+        finished_ms: Some(2),
+        phase: "completed".into(),
+        exit_code: Some(0),
+        duration_ms: Some(1),
+        detail: None,
+    };
+    save_agent_audit_at(&path, &key, ["delete", "keep", "new"].into_iter().map(make)).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let ids = BTreeSet::from(["delete".into()]);
+    assert!(delete_agent_audit_at(&path, &VaultKey([20; 32], [19; VAULT_SALT_LEN]), &ids).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let retained = delete_agent_audit_at(&path, &key, &ids).unwrap();
+    assert_eq!(retained.len(), 2);
+    assert!(!retained.iter().any(|entry| entry.id == "delete"));
+    // An unrelated later vault update must not bring the deleted row back.
+    save_agent_audit_at(&path, &key, std::iter::once(make("another"))).unwrap();
+    let vault = decode_vault(&read_private_vault(&path).unwrap(), &key).unwrap();
+    assert_eq!(vault.agent_audit.len(), 3);
+    assert!(!vault.agent_audit.iter().any(|entry| entry.id == "delete"));
+    assert_eq!(vault.profiles[0].name, "Keep profile");
+    assert!(vault.session_folders.contains("Keep folder"));
+    assert_eq!(vault.openai_tunnel.as_ref().unwrap().api_key, "fixture-key");
+    let all = vault
+        .agent_audit
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect();
+    delete_agent_audit_at(&path, &key, &all).unwrap();
+    let vault = decode_vault(&read_private_vault(&path).unwrap(), &key).unwrap();
+    assert!(vault.agent_audit.is_empty());
+    assert_eq!(vault.profiles.len(), 1);
+    assert!(vault.openai_tunnel.is_some());
+}

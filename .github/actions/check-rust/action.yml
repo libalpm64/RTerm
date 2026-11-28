@@ -9,9 +9,14 @@ runs:
       shell: bash
     - run: cargo fmt --package rterm -- --check
       shell: bash
-    - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+    # Use one Cargo profile throughout the job. The release test harness
+    # covers all features, and the subsequent production build can reuse
+    # the optimized dependencies instead of compiling the debug graph too.
+    - run: cargo clippy --release --locked --all-targets --all-features -- -D warnings
       shell: bash
-    - run: cargo test --locked --all-features --bins
-      shell: bash
-    - run: cargo test --release --locked --bins
+    # The runner wraps only the test executable, not compilation/linking.
+    # A timeout is a failing test gate on every native runner.
+    - name: Run optimized tests with a watchdog
+      run: |
+        cargo --config 'target."cfg(all())".runner = ["python", ".github/scripts/run-test-with-timeout.py"]' test --release --locked --all-features --bins
       shell: bash

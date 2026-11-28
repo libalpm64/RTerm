@@ -134,8 +134,19 @@ pub async fn request(
     let path = Path::new(name);
     private_parent(path, false)?;
     check_socket(path)?;
-    let mut stream =
-        tokio::time::timeout(Duration::from_secs(3), UnixStream::connect(path)).await??;
+    let stream = tokio::time::timeout(Duration::from_secs(3), UnixStream::connect(path)).await??;
+    request_connected(stream, expected, body, wait).await
+}
+
+// Own the connected stream so every identity rejection closes it before
+// any request bytes can be transmitted.
+#[allow(dead_code)]
+async fn request_connected(
+    mut stream: UnixStream,
+    expected: &Path,
+    body: &[u8],
+    wait: Duration,
+) -> io::Result<Vec<u8>> {
     let cred = stream.peer_cred()?;
     if cred.uid() != uid() {
         return Err(denied("Unexpected RTerm IPC peer user"));

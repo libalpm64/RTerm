@@ -11,7 +11,6 @@ const VAULT_MAGIC: &[u8; 4] = b"RTVL";
 const LEGACY_VAULT_VERSION: u16 = 2;
 const VAULT_VERSION: u16 = 3;
 const VAULT_SALT_LEN: usize = 16;
-pub(crate) const AGENT_AUDIT_LIMIT: usize = 250;
 
 pub(crate) struct VaultKey([u8; 32], [u8; VAULT_SALT_LEN]);
 
@@ -798,23 +797,49 @@ pub(crate) fn save_agent_audit(
     key: &VaultKey,
     entries: impl Iterator<Item = AgentAuditEntry>,
 ) -> Result<VecDeque<AgentAuditEntry>, String> {
-    update_vault(&get_config_dir().join("vault.dat"), key, false, |vault| {
-        for entry in entries {
-            if let Some(existing) = vault
-                .agent_audit
-                .iter_mut()
-                .find(|item| item.id == entry.id)
-            {
+    save_agent_audit_at(&get_config_dir().join("vault.dat"), key, entries)
+}
+
+fn save_agent_audit_at(
+    path: &Path,
+    key: &VaultKey,
+    entries: impl Iterator<Item = AgentAuditEntry>,
+) -> Result<VecDeque<AgentAuditEntry>, String> {
+    update_vault(path, key, false, |vault| {
+        // Merge by ID in one pass rather than scanning the entire history
+        // for each changed command.
+        let mut updates: std::collections::HashMap<_, _> =
+            entries.map(|entry| (entry.id.clone(), entry)).collect();
+        for existing in &mut vault.agent_audit {
+            if let Some(entry) = updates.remove(&existing.id) {
                 *existing = entry;
-            } else {
-                vault.agent_audit.push_front(entry);
             }
         }
+        vault.agent_audit.extend(updates.into_values());
         vault
             .agent_audit
             .make_contiguous()
             .sort_by_key(|entry| std::cmp::Reverse(entry.submitted_ms));
-        vault.agent_audit.truncate(AGENT_AUDIT_LIMIT);
+    })
+    .map(|vault| vault.agent_audit)
+}
+
+// Delete only the explicitly reviewed audit IDs. Use the same vault lock
+// and atomic replacement as other writers, preserving credentials and keys.
+pub(crate) fn delete_agent_audit(
+    key: &VaultKey,
+    ids: &BTreeSet<String>,
+) -> Result<VecDeque<AgentAuditEntry>, String> {
+    delete_agent_audit_at(&get_config_dir().join("vault.dat"), key, ids)
+}
+
+fn delete_agent_audit_at(
+    path: &Path,
+    key: &VaultKey,
+    ids: &BTreeSet<String>,
+) -> Result<VecDeque<AgentAuditEntry>, String> {
+    update_vault(path, key, false, |vault| {
+        vault.agent_audit.retain(|entry| !ids.contains(&entry.id));
     })
     .map(|vault| vault.agent_audit)
 }
@@ -943,21 +968,36 @@ fn encode_vault(vault: &Vault, key: &VaultKey) -> Result<Vec<u8>, String> {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let container = serde_json::json!({
-        "v": 2,
-        "sessions": legacy,
-        "profiles": vault.profiles,
-        "session_folders": vault.session_folders,
-        "keys": vault.keys,
-        "agent_audit": vault.agent_audit,
-        "openai_tunnel": vault.openai_tunnel,
-    });
-    let json =
-        zeroize::Zeroizing::new(serde_json::to_string(&container).map_err(|e| e.to_string())?);
+    #[derive(serde::Serialize)]
+    struct Container<'a> {
+        v: u8,
+        sessions: &'a [SshConfig],
+        profiles: &'a [Profile],
+        session_folders: &'a BTreeSet<String>,
+        keys: &'a [SshKey],
+        agent_audit: &'a VecDeque<AgentAuditEntry>,
+        openai_tunnel: &'a Option<crate::tunnel::Profile>,
+    }
+    let container = Container {
+        v: 2,
+        sessions: &legacy,
+        profiles: &vault.profiles,
+        session_folders: &vault.session_folders,
+        keys: &vault.keys,
+        agent_audit: &vault.agent_audit,
+        openai_tunnel: &vault.openai_tunnel,
+    };
+    let json = zeroize::Zeroizing::new(serde_json::to_vec(&container).map_err(|e| e.to_string())?);
+    // Header + salt + nonce + authentication tag. Never write a vault
+    // that its own reader or backup importer would refuse to reopen.
+    const OVERHEAD: usize = 6 + VAULT_SALT_LEN + 24 + 16;
+    if json.len() as u64 > MAX_VAULT_BACKUP - OVERHEAD as u64 {
+        return Err("Encrypted vault exceeds 128 MiB; existing vault was not changed".into());
+    }
     let cipher = XChaCha20Poly1305::new_from_slice(&key.0).unwrap();
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ciphertext = cipher
-        .encrypt(&nonce, json.as_bytes())
+        .encrypt(&nonce, json.as_slice())
         .map_err(|e| format!("encrypt error: {:?}", e))?;
     let mut buf = Vec::new();
     buf.extend_from_slice(VAULT_MAGIC);
@@ -1033,7 +1073,6 @@ fn decode_vault(data: &[u8], key: &VaultKey) -> Result<Vault, String> {
                 Some(serde_json::Value::Array(entries)) => entries
                     .into_iter()
                     .filter_map(|entry| serde_json::from_value(entry).ok())
-                    .take(AGENT_AUDIT_LIMIT)
                     .collect(),
                 _ => VecDeque::new(),
             };

@@ -267,3 +267,60 @@ fn failed_metadata_save_rolls_back_folder_name_and_port() {
         serde_json::to_value(&profile).unwrap()
     );
 }
+
+#[test]
+fn folder_drag_to_ungrouped_row_session_or_empty_space() {
+    let ctx = egui::Context::default();
+    let mut app = App::test_fixture(&ctx);
+    app.session_folders
+        .extend(["Production".into(), "Other".into()]);
+    app.profiles = vec![fixture_profile("Grouped"), fixture_profile("Root peer")];
+    for destination in ["Ungrouped", "Root peer", "blank"] {
+        app.profiles[0].folder = Some("Production".into());
+        let output = render(&mut app, &ctx, vec![]);
+        let source = label(&output, "Grouped").unwrap() + vec2(5.0, 6.0);
+        let target = if destination == "blank" {
+            pos2(120.0, 300.0)
+        } else {
+            label(&output, destination).unwrap() + vec2(5.0, 6.0)
+        };
+        let _ = render(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(source),
+                egui::Event::PointerButton {
+                    pos: source,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let _ = render(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(source + vec2(0.0, 8.0))],
+        );
+        assert!(egui::DragAndDrop::has_payload_of_type::<SessionDrag>(&ctx));
+        let _ = render(&mut app, &ctx, vec![egui::Event::PointerMoved(target)]);
+        let _ = render(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.profiles[0].folder.is_none(), "drop on {destination}");
+        assert!(app.profiles[1].folder.is_none());
+        assert!(app.dialog.is_none());
+    }
+    // Root must exist even if there are no other ungrouped sessions.
+    app.profiles.truncate(1);
+    app.profiles[0].folder = Some("Production".into());
+    let output = render(&mut app, &ctx, vec![]);
+    assert!(label(&output, "Ungrouped").is_some());
+}

@@ -218,7 +218,7 @@ pub async fn request(
     // Identification-only QoS prevents a server from using this client as an
     // impersonation/elevation proxy. No automatic retry of dispatched calls.
     let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
-    let mut pipe = loop {
+    let pipe = loop {
         match ClientOptions::new()
             .security_qos_flags(SECURITY_IDENTIFICATION)
             .open(name)
@@ -231,6 +231,17 @@ pub async fn request(
             Err(e) => return Err(e),
         }
     };
+    request_connected(pipe, expected, body, wait).await
+}
+
+// Same verification and transmission path for production and tests.
+#[allow(dead_code)]
+async fn request_connected(
+    mut pipe: tokio::net::windows::named_pipe::NamedPipeClient,
+    expected: &Path,
+    body: &[u8],
+    wait: Duration,
+) -> io::Result<Vec<u8>> {
     verify_server(&pipe, expected)?;
     tokio::time::timeout(
         Duration::from_secs(3),

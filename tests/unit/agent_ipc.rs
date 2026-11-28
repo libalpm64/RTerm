@@ -129,21 +129,42 @@ fn refuses_unexpected_pipe_server_before_transmitting() {
             std::process::id()
         );
         let mut pipe = listen(&name, true).unwrap();
-        let expected = std::env::current_exe().unwrap().with_file_name("rterm.exe");
-        let client =
-            tokio::spawn(
-                async move { request(&name, &expected, b"{}", Duration::from_secs(1)).await },
-            );
-        pipe.connect().await.unwrap();
-        assert!(client.await.unwrap().is_err());
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(500),
-                read_frame(&mut pipe, MAX_REQUEST)
-            )
+        let directory = tempfile::tempdir().unwrap();
+        let expected = directory.path().join("different-executable.exe");
+        std::fs::write(&expected, b"not the server executable").unwrap();
+        // Connect both ends before identity verification can close the client.
+        let client = ClientOptions::new()
+            .security_qos_flags(SECURITY_IDENTIFICATION)
+            .open(&name)
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), pipe.connect())
             .await
-            .unwrap()
-            .is_err()
-        );
+            .expect("fixture named-pipe connect timed out")
+            .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            request_connected(
+                client,
+                &expected,
+                b"must not be sent",
+                Duration::from_secs(2),
+            ),
+        )
+        .await
+        .expect("fixture client rejection timed out")
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "Unexpected RTerm IPC server executable");
+        use tokio::io::AsyncReadExt;
+        let mut byte = [0; 1];
+        match tokio::time::timeout(Duration::from_secs(3), pipe.read(&mut byte))
+            .await
+            .expect("fixture peer read timed out")
+        {
+            Ok(0) => {}
+            // ERROR_BROKEN_PIPE / ERROR_PIPE_NOT_CONNECTED / ERROR_NO_DATA.
+            Err(error) if matches!(error.raw_os_error(), Some(109 | 233 | 232)) => {}
+            result => panic!("request bytes reached unexpected executable: {result:?}"),
+        }
     });
 }

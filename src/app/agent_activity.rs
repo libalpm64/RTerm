@@ -1,10 +1,13 @@
 use super::*;
-use crate::{agent, models::AgentAuditEntry, storage::AGENT_AUDIT_LIMIT};
+use crate::{agent, models::AgentAuditEntry};
+
 use std::{
     cell::OnceCell,
     collections::{BTreeSet, VecDeque},
     sync::{Arc, atomic::AtomicBool},
 };
+
+const LIVE_ACTIVITY_LIMIT: usize = 250;
 
 #[derive(Default)]
 pub(super) struct Activity {
@@ -28,6 +31,18 @@ struct Viewer {
     session: Option<(String, String)>,
     search: String,
     selected: Option<String>,
+    deletion: Option<Deletion>,
+    delete_error: Option<String>,
+}
+
+struct Deletion {
+    title: &'static str,
+    session: Option<String>,
+    ids: BTreeSet<String>,
+}
+
+fn deletable(entry: &AgentAuditEntry) -> bool {
+    entry.finished_ms.is_some() || entry.phase == "interrupted"
 }
 
 impl Activity {
@@ -53,12 +68,76 @@ impl Activity {
     }
 
     pub(super) fn load(&mut self, mut entries: VecDeque<AgentAuditEntry>) {
+        let running: BTreeSet<_> = self
+            .current
+            .iter()
+            .filter(|item| item.running.is_some())
+            .map(|item| item.entry.id.as_str())
+            .collect();
         for entry in &mut entries {
-            if entry.finished_ms.is_none() {
+            if entry.finished_ms.is_none() && !running.contains(entry.id.as_str()) {
                 entry.phase = "interrupted".into();
             }
         }
         self.saved = entries;
+    }
+
+    fn delete_history(
+        &mut self,
+        reviewed: &BTreeSet<String>,
+        persist: impl FnOnce(&BTreeSet<String>) -> Result<VecDeque<AgentAuditEntry>, String>,
+    ) -> Result<(), String> {
+        // Revalidate at commit. In-flight and newly arrived operations must
+        // never be deleted by a stale confirmation.
+        let running: BTreeSet<_> = self
+            .current
+            .iter()
+            .filter(|item| item.running.is_some())
+            .map(|item| item.entry.id.as_str())
+            .collect();
+        let ids: BTreeSet<_> = self
+            .entries()
+            .into_iter()
+            .filter(|entry| {
+                reviewed.contains(&entry.id)
+                    && deletable(entry)
+                    && !running.contains(entry.id.as_str())
+            })
+            .map(|entry| entry.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        if self.saved.iter().any(|entry| ids.contains(&entry.id)) {
+            // Do not alter the visible log unless encrypted storage succeeds.
+            let mut saved = persist(&ids)?;
+            // Preserve unrelated dirty records even if an earlier write
+            // failed (for example, a full vault). Never resurrect deleted IDs.
+            let mut dirty: BTreeMap<_, _> = self
+                .saved
+                .iter()
+                .filter(|entry| self.dirty.contains(&entry.id) && !ids.contains(&entry.id))
+                .map(|entry| (entry.id.clone(), entry.clone()))
+                .collect();
+            for entry in &mut saved {
+                if let Some(update) = dirty.remove(&entry.id) {
+                    *entry = update;
+                }
+            }
+            saved.extend(dirty.into_values());
+            saved
+                .make_contiguous()
+                .sort_by_key(|entry| std::cmp::Reverse(entry.submitted_ms));
+            self.load(saved);
+        }
+        self.current
+            .retain(|item| item.running.is_some() || !ids.contains(&item.entry.id));
+        self.dirty.retain(|id| !ids.contains(id));
+        self.flush_requested = !self.dirty.is_empty();
+        if self.dirty.is_empty() {
+            self.save_error = None;
+        }
+        Ok(())
     }
 
     pub(crate) fn forget_vault(&mut self) {
@@ -81,7 +160,22 @@ impl Activity {
             running: Some((reply, active)),
             save: false,
         });
-        self.current.truncate(AGENT_AUDIT_LIMIT);
+        self.prune_live();
+    }
+
+    fn prune_live(&mut self) {
+        // Never evict an in-flight operation before its outcome is known.
+        // Persisted history lives in saved; only recent completed live rows
+        // need to remain here.
+        let mut completed = 0;
+        self.current.retain(|item| {
+            if item.running.is_some() {
+                true
+            } else {
+                completed += 1;
+                completed <= LIVE_ACTIVITY_LIMIT
+            }
+        });
     }
 
     pub(super) fn retain_command(&mut self, reply: &agent::Reply) {
@@ -90,9 +184,11 @@ impl Activity {
                 .as_ref()
                 .is_some_and(|(current, _)| current.same_operation(reply))
         }) {
+            if item.save {
+                return;
+            }
             item.save = true;
             self.saved.push_front(item.entry.clone());
-            self.saved.truncate(AGENT_AUDIT_LIMIT);
             self.dirty.insert(item.entry.id.clone());
             self.flush_requested = true;
         }
@@ -129,6 +225,7 @@ impl Activity {
                 self.flush_requested = true;
             }
         }
+        self.prune_live();
     }
 }
 
@@ -257,7 +354,7 @@ impl App {
             bottom: 2,
             ..frame.inner_margin
         });
-        egui::Window::new(
+        let confirmed = egui::Window::new(
             egui::RichText::new(crate::i18n::text(context, "AI Activity"))
                 .font(theme::strong(13.0)),
         )
@@ -268,15 +365,38 @@ impl App {
         .min_width(590.0)
         .min_height(355.0)
         .show(context, |ui| {
-            let entries = activity.entries();
-            viewer.show(
-                ui,
-                self.theme,
-                &entries,
-                recording,
-                activity.save_error.as_deref(),
-            );
-        });
+            if viewer.deletion.is_some() {
+                viewer.confirm_delete(ui, self.theme)
+            } else {
+                let entries = activity.entries();
+                viewer.show(
+                    ui,
+                    self.theme,
+                    &entries,
+                    recording,
+                    activity.save_error.as_deref(),
+                );
+                false
+            }
+        })
+        .and_then(|response| response.inner)
+        .unwrap_or(false);
+        if open
+            && confirmed
+            && let Some(deletion) = viewer.deletion.take()
+        {
+            let key = self.vault_key.as_ref();
+            match self.agent.activity.delete_history(&deletion.ids, |ids| {
+                let key = key.ok_or("Unlock the vault to delete saved AI history")?;
+                storage::delete_agent_audit(key, ids)
+            }) {
+                Ok(()) => {
+                    viewer.selected = None;
+                    viewer.delete_error = None;
+                }
+                Err(error) => viewer.delete_error = Some(error),
+            }
+        }
         if open {
             self.agent.activity.viewer = Some(viewer);
         }
@@ -332,6 +452,63 @@ fn outcome(entry: &AgentAuditEntry, theme: Theme) -> (String, Color32) {
 }
 
 impl Viewer {
+    fn review_delete<'a>(
+        &mut self,
+        title: &'static str,
+        session: Option<String>,
+        entries: impl Iterator<Item = &'a AgentAuditEntry>,
+    ) {
+        let ids: BTreeSet<_> = entries
+            .filter(|entry| deletable(entry))
+            .map(|entry| entry.id.clone())
+            .collect();
+        if !ids.is_empty() {
+            self.deletion = Some(Deletion {
+                title,
+                session,
+                ids,
+            });
+            self.delete_error = None;
+        }
+    }
+
+    fn confirm_delete(&mut self, ui: &mut egui::Ui, theme: Theme) -> bool {
+        use crate::i18n::{format, tr};
+        let Some(deletion) = &self.deletion else {
+            return false;
+        };
+        ui.heading(tr(ui, deletion.title));
+        if let Some(session) = &deletion.session {
+            ui.label(session);
+        }
+        ui.label(format(
+            ui,
+            "Delete {count} AI history entries?",
+            &[("count", &deletion.ids.len().to_string())],
+        ));
+        ui.colored_label(
+            theme.yellow,
+            tr(
+                ui,
+                "Deleted entries cannot be restored from the current vault.",
+            ),
+        );
+        ui.label(tr(ui, "Running and pending operations will remain. Existing connections, backups and temporary command output are not affected."));
+        ui.separator();
+        let mut confirm = false;
+        let mut cancel = false;
+        ui.horizontal_wrapped(|ui| {
+            cancel = ui.button(tr(ui, "Cancel")).clicked();
+            confirm = ui
+                .button(egui::RichText::new(tr(ui, "Delete")).color(theme.red))
+                .clicked();
+        });
+        if cancel {
+            self.deletion = None;
+        }
+        confirm
+    }
+
     fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -414,6 +591,70 @@ impl Viewer {
                         || entry.session_name.to_lowercase().contains(&query))
             })
             .collect();
+        if self
+            .selected
+            .as_ref()
+            .is_none_or(|id| !shown.iter().any(|entry| entry.id == *id))
+        {
+            self.selected = shown.first().map(|entry| entry.id.clone());
+        }
+        let selected = shown
+            .iter()
+            .copied()
+            .find(|entry| self.selected.as_deref() == Some(entry.id.as_str()));
+        let session = self.session.clone();
+        let session_has_history = session.as_ref().is_some_and(|(id, _)| {
+            entries
+                .iter()
+                .any(|entry| entry.session == *id && deletable(entry))
+        });
+        let any_history = entries.iter().any(|entry| deletable(entry));
+        ui.horizontal_wrapped(|ui| {
+            use crate::i18n::tr;
+            if ui
+                .add_enabled(
+                    selected.is_some_and(deletable),
+                    egui::Button::new(tr(ui, "Delete Selected")),
+                )
+                .clicked()
+            {
+                self.review_delete(
+                    "Delete Selected",
+                    selected.map(|entry| format!("{} · {}", entry.session_name, entry.operation)),
+                    selected.into_iter(),
+                );
+            }
+            if ui
+                .add_enabled(
+                    session_has_history,
+                    egui::Button::new(tr(ui, "Clear Session History")),
+                )
+                .clicked()
+                && let Some((id, name)) = &session
+            {
+                self.review_delete(
+                    "Clear Session History",
+                    Some(name.clone()),
+                    entries.iter().copied().filter(|entry| entry.session == *id),
+                );
+            }
+            if ui
+                .add_enabled(
+                    any_history,
+                    egui::Button::new(tr(ui, "Clear All AI History")),
+                )
+                .clicked()
+            {
+                self.review_delete("Clear All AI History", None, entries.iter().copied());
+            }
+        });
+        if let Some(error) = &self.delete_error {
+            ui.colored_label(
+                theme.red,
+                crate::i18n::tr(ui, "Could not delete AI history"),
+            )
+            .on_hover_text(error);
+        }
         if shown.is_empty() {
             ui.label(crate::i18n::tr(
                 ui,
@@ -425,14 +666,6 @@ impl Viewer {
             ));
             return;
         }
-        if self
-            .selected
-            .as_ref()
-            .is_none_or(|id| !shown.iter().any(|entry| entry.id == *id))
-        {
-            self.selected = Some(shown[0].id.clone());
-        }
-
         let widths = [
             145.0,
             150.0,

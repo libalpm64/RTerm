@@ -79,6 +79,87 @@ fn paired_file_panes_align_paths_headers_and_rows() {
 }
 
 #[test]
+fn single_sftp_pane_status_stays_compact_and_centered() {
+    let context = egui::Context::default();
+    let mut app = App::test_fixture(&context);
+    app.explorer.accept_initial_listing(
+        42,
+        "/fixture/remote".into(),
+        vec![fixture_entry("remote.txt", false, None)],
+    );
+    app.explorer.remote_active = true;
+    for (connected, loading, caption) in [
+        (true, false, "Connected"),
+        (true, true, "Loading folder..."),
+        (false, false, "Not connected"),
+    ] {
+        app.explorer.remote_id = connected.then_some(42);
+        app.explorer.loading = loading;
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(280.0, 500.0));
+        let output = context.run(
+            egui::RawInput {
+                screen_rect: Some(rect),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| app.explorer_panel(ui, rect));
+            },
+        );
+        let status = output.shapes.iter().find(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == caption)
+        }).expect("status label");
+        assert_eq!(status.clip_rect.height(), 20.0, "{caption}");
+        // The 22-point tab strip and 26-point toolbar remain unchanged.
+        assert_eq!(status.clip_rect.top(), 48.0);
+        let heading = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text)
+                    if text.galley.text() == "SFTP" && shape.clip_rect.top() == 22.0 =>
+                {
+                    Some(text.pos)
+                }
+                _ => None,
+            })
+            .expect("SFTP toolbar heading");
+        let egui::Shape::Text(text) = &status.shape else {
+            unreachable!()
+        };
+        assert_eq!(text.pos.x, heading.x, "{caption} text alignment");
+        let center_y = text.pos.y + text.galley.size().y / 2.0;
+        assert!((center_y - 58.0).abs() <= 1.0, "{caption}");
+        let color = if loading {
+            app.theme.yellow
+        } else if connected {
+            app.theme.green
+        } else {
+            app.theme.dim
+        };
+        assert!(
+            output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Circle(circle)
+                if circle.fill == color && circle.radius == 3.0
+                && circle.center.x == 10.0
+                && (circle.center.y - center_y).abs() <= 1.0)
+            }),
+            "{caption} indicator"
+        );
+        if connected {
+            assert!(
+                output.shapes.iter().any(|shape| {
+                    matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Name")
+                        && shape.clip_rect.top() == 92.0
+                }),
+                "file header follows compact status and 24-point path bar"
+            );
+        }
+    }
+}
+
+#[test]
 fn path_field_keeps_geometry_on_hover_and_focus() {
     let context = egui::Context::default();
     let theme = theme::Theme::dark();
@@ -384,7 +465,8 @@ fn local_file_drag_hovers_open_folder_and_prompts_for_move() {
     render(&mut app, vec![egui::Event::PointerMoved(empty)]);
     render(&mut app, vec![button(empty, false)]);
     assert!(
-        matches!(&app.dialog,Some(Dialog::Files{action:FileAction::Move,entries,input}) if entries.len()==1 && input.ends_with("/destination"))
+        matches!(&app.dialog, Some(Dialog::Files { action: FileAction::Move, entries, input })
+            if entries.len() == 1 && Path::new(input) == app.explorer.local.path)
     );
     assert!(
         temp.path().join("source.txt").is_file(),
@@ -725,9 +807,11 @@ fn inline_folder_validation_keeps_editor_and_navigation_discards_draft() {
 fn folder_and_remote_path_editor_state_stays_bounded_across_churn() {
     let context = egui::Context::default();
     let mut app = App::test_fixture(&context);
-    app.explorer
-        .local
-        .replace(PathBuf::from("/fixture/local"), vec![]);
+    // Use a real native absolute path: "/fixture/local" has no drive
+    // prefix on Windows and cannot pass the local folder creation guard.
+    let directory = tempfile::tempdir().unwrap();
+    app.explorer.load_local(directory.path().to_owned());
+    assert!(app.can_create_local_folder());
     app.explorer.expanded = true;
     let render = |app: &mut App, events| {
         context.run(

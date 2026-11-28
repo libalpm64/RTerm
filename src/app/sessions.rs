@@ -462,6 +462,17 @@ impl App {
                     }
                 }
             }
+            // Give the root a real drop target even if every session belongs
+            // to a folder. The title bar remains a shortcut when scrolled.
+            let show_root = !self.session_folders.is_empty()
+                && (filter.is_empty()
+                    || groups.contains_key(&None)
+                    || egui::DragAndDrop::has_payload_of_type::<SessionDrag>(ui.ctx()));
+            if show_root {
+                let (row, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+                root_drop_target(ui, row, t, enabled, &mut action, true);
+            }
             if let Some(entries) = groups.get(&None) {
                 matches += entries.len();
                 for &index in entries {
@@ -475,6 +486,18 @@ impl App {
                         &self.session_folders,
                         &mut action,
                     );
+                }
+            }
+            // The visible empty area below all rows also belongs to the root,
+            // not the last expanded folder. Never extend the scroll content
+            // beyond the visible viewport just to provide a drop target.
+            if !self.session_folders.is_empty() {
+                let height =
+                    (ui.clip_rect().bottom().min(list.bottom()) - ui.cursor().top()).max(0.0);
+                if height > 0.0 {
+                    let (blank, _) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+                    root_drop_target(ui, blank, t, enabled, &mut action, false);
                 }
             }
             if matches == 0 {
@@ -722,6 +745,33 @@ fn folder_editor(
     }
 }
 
+fn root_drop_target(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    t: Theme,
+    enabled: bool,
+    action: &mut Option<SessionAction>,
+    label: bool,
+) {
+    let response = ui.interact(rect, ui.id().with(("session-root", label)), Sense::hover());
+    if enabled && response.dnd_hover_payload::<SessionDrag>().is_some() {
+        theme::band(ui, rect, t.hover, None);
+        if let Some(drag) = response.dnd_release_payload::<SessionDrag>() {
+            *action = Some(SessionAction::Move((*drag).clone(), None));
+        }
+    }
+    if label {
+        theme::label(
+            ui,
+            rect.with_min_x(rect.left() + 12.0),
+            crate::i18n::tr(ui, "Ungrouped"),
+            t.chrome_font(10.0),
+            t.muted,
+            Align2::LEFT_CENTER,
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn session_row(
     ui: &mut egui::Ui,
@@ -768,6 +818,9 @@ fn session_row(
     );
     if !enabled {
         return;
+    }
+    if !indented && let Some(drag) = response.dnd_release_payload::<SessionDrag>() {
+        *action = Some(SessionAction::Move((*drag).clone(), None));
     }
     if response.double_clicked() {
         *action = Some(SessionAction::Connect(index));

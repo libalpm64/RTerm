@@ -10,7 +10,7 @@ RTerm adds direct SSH and Telnet profiles to the encrypted vault and preserves e
 
 Click the folder-plus icon beside Add Session in the Session sidebar, type a folder name directly in the list, and press Enter. Escape cancels. Click a folder to expand or collapse it; filtering by session, host or folder name reveals matching sessions even in a collapsed folder.
 
-Drag saved sessions onto a folder, or right-click a session and use **Move to Folder**. To ungroup a session, drag it onto the Session header or select **Ungrouped** in the move menu. Right-click a folder to add a session inside it, rename it inline, or remove it. Removing a folder returns its sessions to the ungrouped list and never deletes saved connections. Folders are a single level; expansion state is session-local.
+Drag saved sessions onto a folder, or right-click a session and use **Move to Folder**. To ungroup a session, drag it onto the **Ungrouped** row, an ungrouped session, the empty space below the saved sessions, or the Session header; you can also select **Ungrouped** in the move menu. Right-click a folder to add a session inside it, rename it inline, or remove it. Removing a folder returns its sessions to the ungrouped list and never deletes saved connections. Folders are a single level; expansion state is session-local.
 
 Folder names and memberships (including empty folders) persist across restarts. With the vault enabled, they are stored in the encrypted vault and included in vault backups. Without a vault, RTerm stores folder metadata with the credential-stripped session library. Existing flat libraries are read automatically; earlier RTerm versions do not understand the grouped unencrypted library format, so do not downgrade without a backup.
 

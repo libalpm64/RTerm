@@ -1130,13 +1130,13 @@ impl App {
                 ui.interact(title, ui.id().with("sftp-status"), Sense::hover())
                     .on_hover_text(status);
             } else {
-                let band = top_band(rect.with_min_y(start), 36.0);
+                let band = top_band(rect.with_min_y(start), 20.0);
                 theme::band(ui, band, t.panel, Some(t.border));
                 ui.painter()
-                    .circle_filled(pos2(band.left() + 14.0, band.center().y), 3.0, mark);
+                    .circle_filled(pos2(band.left() + 10.0, band.center().y), 3.0, mark);
                 theme::label(
                     ui,
-                    band.with_min_x(band.left() + 24.0),
+                    band.with_min_x(band.left() + 21.0),
                     status,
                     t.chrome_font(11.0),
                     t.muted,

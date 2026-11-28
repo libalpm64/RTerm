@@ -604,7 +604,7 @@ impl Settings {
                 t,
                 (
                     "Log AI Commands to Vault",
-                    "Keep up to 250 commands and outcomes",
+                    "Keep commands and outcomes in the encrypted vault",
                 ),
                 "ai_audit_vault",
             );

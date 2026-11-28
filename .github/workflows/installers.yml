@@ -127,14 +127,19 @@ jobs:
         with:
           name: tunnel-release
           path: target/tunnel-release
-      - run: rustup target add ${{ matrix.target }}
-      - run: cargo build --release --locked --bins --target ${{ matrix.target }}
-      - run: target/${{ matrix.target }}/release/rterm-agent --version
+      # These are native runners. Verify the host, then use the same
+      # target directory/profile as the shared test action.
+      - name: Verify native macOS target
+        shell: bash
+        run: |
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}"
+      - run: cargo build --release --locked --bins
+      - run: target/release/rterm-agent --version
       - shell: bash
         run: |
           version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -1)
           if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then exit 1; fi
-          sh packaging/macos/package.sh target/${{ matrix.target }}/release "$version" ${{ matrix.arch }} dist
+          sh packaging/macos/package.sh target/release "$version" ${{ matrix.arch }} dist
       - name: Verify macOS package tunnel payload
         shell: bash
         run: |

@@ -41,11 +41,15 @@ async fn local_socket_round_trip_and_exclusive_listener() {
     let listener = listen(name).unwrap();
     assert!(listen(name).is_err());
     let server = tokio::spawn(async move {
-        let mut peer = listener.accept().await.unwrap();
-        assert_eq!(read_frame(&mut peer, MAX_REQUEST).await.unwrap(), b"test");
-        write_frame(&mut peer, b"reply", MAX_RESPONSE)
-            .await
-            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut peer = listener.accept().await.unwrap();
+            assert_eq!(read_frame(&mut peer, MAX_REQUEST).await.unwrap(), b"test");
+            write_frame(&mut peer, b"reply", MAX_RESPONSE)
+                .await
+                .unwrap();
+        })
+        .await
+        .expect("fixture round trip timed out");
     });
     assert_eq!(
         request(
@@ -111,26 +115,40 @@ async fn rejects_unexpected_peer_executable_before_sending() {
     let expected = dir.path().join("different-executable");
     fs::write(&expected, b"not the server executable").unwrap();
     let listener = listen(name.to_str().unwrap()).unwrap();
-    let server = tokio::spawn(async move {
-        let mut peer = listener.accept().await.unwrap();
-        let mut buf = [0; 1];
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(3), peer.read(&mut buf))
-                .await
-                .unwrap()
-                .unwrap(),
-            0,
-            "request bytes must not reach an unexpected executable"
-        );
-    });
-    let error = request(
-        name.to_str().unwrap(),
-        &expected,
-        b"must not be sent",
-        Duration::from_secs(2),
+    // Keep both endpoints alive until accept finishes. On macOS a client
+    // that closes during identity verification can disappear from the
+    // accept queue or fail the listener's peer-credential check.
+    let client = tokio::time::timeout(Duration::from_secs(3), UnixStream::connect(&name))
+        .await
+        .expect("fixture client connect timed out")
+        .unwrap();
+    let mut peer = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+        .await
+        .expect("fixture server accept timed out")
+        .unwrap();
+    // Exercise exactly the same verification and transmission path as
+    // request(), after the connection has been established.
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        request_connected(
+            client,
+            &expected,
+            b"must not be sent",
+            Duration::from_secs(2),
+        ),
     )
     .await
+    .expect("peer identity rejection timed out")
     .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-    server.await.unwrap();
+    assert_eq!(error.to_string(), "Unexpected RTerm IPC server executable");
+    let mut buf = [0; 1];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), peer.read(&mut buf))
+            .await
+            .expect("fixture peer read timed out")
+            .unwrap(),
+        0,
+        "request bytes must not reach an unexpected executable"
+    );
 }
