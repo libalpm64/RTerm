@@ -563,7 +563,10 @@ impl Settings {
         self.choice(
             ui,
             t,
-            ("Agent Access", "Command and upload approvals"),
+            (
+                "Agent Access",
+                "Command, upload and saved-session approvals",
+            ),
             "ai_access",
             &[
                 ("disabled", "Disabled"),
@@ -574,7 +577,7 @@ impl Settings {
         if self.get("ai_access") == "unrestricted" {
             ui.colored_label(
                 t.yellow,
-                crate::i18n::tr(ui, "Unrestricted skips approval for background commands and enabled SFTP uploads; foreground terminal commands still require approval."),
+                crate::i18n::tr(ui, "Unrestricted skips approval for background commands, enabled SFTP uploads and saved-session changes; foreground terminal commands still require approval."),
             );
         }
         self.flag(
@@ -768,7 +771,7 @@ impl App {
             }
             self.save_tunnel_profile(profile)?;
         } else if self.settings.on("vault_enabled") {
-            storage::save_profiles(&self.profiles)?;
+            storage::save_profiles(&self.profiles, &self.session_folders)?;
             self.stop_agent();
             self.forget_unlocked_vault();
         }

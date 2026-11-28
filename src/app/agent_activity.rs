@@ -156,6 +156,19 @@ impl App {
                 local,
                 remote,
             } => (*session_id, "File upload", format!("{local}\n→ {remote}")),
+            agent::Action::ManageLibrary {
+                library_revision,
+                change,
+            } => {
+                let preview = self
+                    .agent_library_preview(library_revision, change)
+                    .unwrap_or_else(|error| format!("Rejected library change: {error}"));
+                (
+                    0,
+                    "Saved-session change",
+                    super::agent_ui::literal_text(preview.as_bytes()),
+                )
+            }
             _ => return,
         };
         let terminal = self.agent_terminal(session_id);
@@ -163,7 +176,11 @@ impl App {
             .agent
             .activity
             .session_key(terminal.map(|term| term.tab), session_id);
-        let session_name = terminal.map_or_else(|| format!("Session {session_id}"), session_label);
+        let session_name = if session_id == 0 {
+            "Saved session library".into()
+        } else {
+            terminal.map_or_else(|| format!("Session {session_id}"), session_label)
+        };
         let entry = AgentAuditEntry {
             id: agent::random_id(),
             operation: request.reply.operation_id().into(),

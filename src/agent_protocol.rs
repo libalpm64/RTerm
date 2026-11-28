@@ -60,6 +60,102 @@ pub async fn write_frame<W: AsyncWriteExt + Unpin>(
     writer.flush().await
 }
 
+pub(crate) fn valid_library_name(name: &str) -> bool {
+    !name.is_empty()
+        && name == name.trim()
+        && name.chars().count() <= 128
+        && !name.chars().any(|ch| ch.is_control() || matches!(ch, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+}
+
+// A move must explicitly specify either a folder name or null (ungrouped).
+fn required_nullable_folder<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<String>, D::Error> {
+    serde::Deserialize::deserialize(d)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum LibraryChange {
+    CreateFolder {
+        name: String,
+    },
+    RenameFolder {
+        folder: String,
+        name: String,
+    },
+    RemoveFolder {
+        folder: String,
+    },
+    MoveSession {
+        profile_id: String,
+        #[serde(deserialize_with = "required_nullable_folder")]
+        folder: Option<String>,
+    },
+    RenameSession {
+        profile_id: String,
+        name: String,
+    },
+    SetPort {
+        profile_id: String,
+        port: u16,
+    },
+}
+
+impl LibraryChange {
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        let name = |value: &str| {
+            if valid_library_name(value) {
+                Ok(())
+            } else {
+                Err(
+                    "Invalid name: use 1–128 characters without surrounding whitespace or control characters",
+                )
+            }
+        };
+        let id = |value: &str| {
+            if valid_id(value) {
+                Ok(())
+            } else {
+                Err("Invalid profile ID")
+            }
+        };
+        match self {
+            Self::CreateFolder { name: value } => name(value),
+            Self::RenameFolder {
+                folder,
+                name: value,
+            } => {
+                name(folder)?;
+                name(value)
+            }
+            Self::RemoveFolder { folder } => name(folder),
+            Self::MoveSession { profile_id, folder } => {
+                id(profile_id)?;
+                if let Some(folder) = folder {
+                    name(folder)?;
+                }
+                Ok(())
+            }
+            Self::RenameSession {
+                profile_id,
+                name: value,
+            } => {
+                id(profile_id)?;
+                name(value)
+            }
+            Self::SetPort { profile_id, port } => {
+                id(profile_id)?;
+                if *port == 0 {
+                    Err("Port must be 1 through 65535")
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "../tests/unit/agent_protocol.rs"]
 mod tests;

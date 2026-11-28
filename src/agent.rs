@@ -26,6 +26,7 @@ const OPERATION_LIFETIME: Duration = Duration::from_secs(MAX_COMMAND_SECS + 60);
 const RESULT_TTL: Duration = Duration::from_secs(3600);
 const MAX_CONNECTIONS: usize = 12;
 const MAX_WAITERS: usize = 4;
+const MAX_DISCOVERY_WAITERS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -43,9 +44,15 @@ impl Mode {
     }
 }
 
+pub(crate) use crate::agent_protocol::LibraryChange;
+
 #[derive(Debug)]
 pub(crate) enum Action {
     ListSessions,
+    ManageLibrary {
+        library_revision: String,
+        change: LibraryChange,
+    },
     OpenSession {
         profile_id: String,
     },
@@ -64,6 +71,12 @@ pub(crate) enum Action {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum WireAction {
     ListSessions,
+    ManageLibrary {
+        library_revision: String,
+        change: LibraryChange,
+        operation_id: String,
+        wait_ms: Option<u64>,
+    },
     OpenSession {
         profile_id: String,
         operation_id: String,
@@ -247,8 +260,19 @@ impl OutputLog {
                 // One bit per byte preserves the raw, arrival-ordered log and
                 // its existing cursor, even if streams alternate every byte.
                 self.stderr_bytes.resize(end.div_ceil(8), 0);
-                for index in start..end {
+                let mut index = start;
+                while index < end && !index.is_multiple_of(8) {
                     self.stderr_bytes[index / 8] |= 1 << (index % 8);
+                    index += 1;
+                }
+                let full_end = end / 8 * 8;
+                if index < full_end {
+                    self.stderr_bytes[index / 8..full_end / 8].fill(0xff);
+                    index = full_end;
+                }
+                while index < end {
+                    self.stderr_bytes[index / 8] |= 1 << (index % 8);
+                    index += 1;
                 }
             }
             self.len += count as u64;
@@ -272,7 +296,9 @@ impl OutputLog {
         }
         let count = (self.len - since).min(POLL_PAGE as u64) as usize;
         let mut bytes = vec![0; count];
-        if let Some(file) = &self.file {
+        if count > 0
+            && let Some(file) = &self.file
+        {
             let mut reader = file.reopen().map_err(|e| e.to_string())?;
             reader
                 .seek(SeekFrom::Start(since))
@@ -280,6 +306,27 @@ impl OutputLog {
             reader.read_exact(&mut bytes).map_err(|e| e.to_string())?;
         }
         let start = since as usize;
+        let end = start + count;
+        let bitmap = &self.stderr_bytes;
+        let first_byte = start / 8;
+        let last_byte = end.div_ceil(8).min(bitmap.len());
+        // Most command output is stdout (or a combined PTY stream).
+        // Conservatively inspect whole bitmap bytes; false positives simply
+        // fall through to the mixed-stream implementation.
+        if first_byte >= last_byte || bitmap[first_byte..last_byte].iter().all(|&b| b == 0) {
+            let end = if finished && since + count as u64 == self.len {
+                count
+            } else {
+                complete_utf8_prefix(&bytes)
+            };
+            let output = String::from_utf8_lossy(&bytes[..end]).into_owned();
+            return Ok(OutputPage {
+                stdout: output.clone(),
+                output,
+                stderr: String::new(),
+                next: since + end as u64,
+            });
+        }
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         for (index, &byte) in bytes.iter().enumerate() {
@@ -554,7 +601,12 @@ impl Reply {
             && Instant::now() < self.0.approval_deadline
         {
             let value = action();
-            self.0.finish_locked(&mut state, "completed", value);
+            let phase = if value["ok"] == true {
+                "completed"
+            } else {
+                "failed"
+            };
+            self.0.finish_locked(&mut state, phase, value);
         }
     }
     pub(crate) fn send(self, value: Value) -> Result<(), ()> {
@@ -592,6 +644,7 @@ impl Reply {
 struct Registry {
     jobs: Mutex<VecDeque<Arc<Job>>>,
     waiters: AtomicUsize,
+    discovery_waiters: AtomicUsize,
     output_budget: Arc<OutputBudget>,
 }
 
@@ -600,6 +653,7 @@ impl Registry {
         Self {
             jobs: Mutex::new(VecDeque::new()),
             waiters: AtomicUsize::new(0),
+            discovery_waiters: AtomicUsize::new(0),
             output_budget,
         }
     }
@@ -663,6 +717,15 @@ impl Registry {
                 hash.update(local.as_bytes());
                 hash.update(remote.as_bytes());
             }
+            Action::ManageLibrary {
+                library_revision,
+                change,
+            } => {
+                hash.update(b"manage_library");
+                hash.update(&(library_revision.len() as u64).to_le_bytes());
+                hash.update(library_revision.as_bytes());
+                hash.update(&serde_json::to_vec(change).map_err(|_| "Invalid library change")?);
+            }
             Action::ListSessions => return Err("Invalid operation"),
         }
         let fingerprint = hash.finalize();
@@ -702,6 +765,7 @@ impl Registry {
             Action::Execute { session_id, .. } => ("execute", Some(*session_id)),
             Action::Upload { session_id, .. } => ("upload", Some(*session_id)),
             Action::OpenSession { .. } => ("open", None),
+            Action::ManageLibrary { .. } => ("manage_library", None),
             Action::ListSessions => unreachable!(),
         };
         let job = Arc::new(job);
@@ -964,6 +1028,8 @@ Use the installed command from any working directory. If it is not found, ask th
 CLI examples (illustrative; substitute user-authorized targets and actual absolute local upload paths):
 rterm-agent sessions
 rterm-agent open 'profile-id-from-list' 'unique-open-operation-id' --wait-ms 0
+rterm-agent manage 'library-revision-from-list' 'unique-change-operation-id' '{{"kind":"rename_session","profile_id":"profile-id-from-list","name":"New name"}}' --wait-ms 0
+rterm-agent manage 'library-revision-from-list' 'unique-change-operation-id' --change-file 'change.json' --wait-ms 0
 rterm-agent execute 42 'unique-operation-id' 'pwd' --wait-ms 0 --timeout-secs 30
 rterm-agent execute 42 'unique-script-id' --command-file 'diagnostic.sh' --wait-ms 0
 rterm-agent upload 42 'unique-upload-id' 'ABSOLUTE_LOCAL_FILE' '/home/user/app.py' --wait-ms 0
@@ -975,7 +1041,7 @@ rterm-agent cancel 'unique-operation-id'
 
 Prefer writing a UTF-8 script locally and using execute --command-file PATH for complex or multiline remote commands, especially in Windows PowerShell 5.1 where native argument quoting can lose double quotes. Alternatively pass - as the command and pipe UTF-8 script bytes to stdin until EOF. The CLI strips a UTF-8 BOM and normalizes CRLF to LF for these input methods; it does not execute the script locally. Up to 64 KiB of script input is supported in background mode. Foreground mode must fit a single encoded terminal line (3500 bytes including its wrapper); use SFTP to upload larger scripts and invoke them by path. For simple commands, pass the complete remote command as one literal argument using your shell's native quoting.
 
-List sessions first. The sessions array contains connected SSH sessions, saved_sessions contains saved SSH profiles, and tabs contains their current states. The active_session_id identifies the current connected SSH tab or null. Use it when the user asks to work in their current SSH session. execution_mode indicates interactive_shell or background_exec. Use a saved profile's opaque profile_id with the open subcommand. Opening requires local approval unless the user enables Auto Open Sessions in AI Settings. It reuses an existing profile tab when available. Poll the open operation for its tab_id, session_id, and connection_state. The numeric session_id stays the same across reconnects while the tab stays open. If a new operation returns error_code session_connecting or session_reconnecting with operation_started:false, wait for that same session to become connected before submitting a new operation ID. Stop and report if the tab closes, disappears, or exceeds the connection readiness deadline. Command permissions still apply. Profile IDs remain stable for unchanged profiles at the same index during this activation and are invalidated by changes, reordering, or revocation.
+List sessions first. The session_folders array lists all folder names (including empty folders); saved_profiles lists all saved profiles with folder (null means ungrouped), kind, and network port where applicable. For a request to update servers in a folder, select saved_sessions with the exact matching folder and open and execute on each authorized SSH session, checking its own results. Do not execute on non-SSH profiles. To organize the saved library, use manage with the current library_revision, a unique operation ID, and a JSON change: create_folder {{name}}, rename_folder {{folder,name}}, remove_folder {{folder}}, move_session {{profile_id,folder}} (null means ungrouped), rename_session {{profile_id,name}}, or set_port {{profile_id,port}}. Each change object includes its kind. Prefer --change-file PATH or - for JSON input in PowerShell. Poll for success, then list again before further edits. Ask mode requires local approval; Unrestricted permits metadata edits without a separate prompt. Removing a folder only ungroups sessions. Ports affect future saved connections, not live sockets or remote SSH configuration. The sessions array contains connected SSH sessions, saved_sessions contains saved SSH profiles, and tabs contains their current states. The active_session_id identifies the current connected SSH tab or null. Use it when the user asks to work in their current SSH session. execution_mode indicates interactive_shell or background_exec. Use a saved profile's opaque profile_id with the open subcommand. Opening requires local approval unless the user enables Auto Open Sessions in AI Settings. It reuses an existing profile tab when available. Poll the open operation for its tab_id, session_id, and connection_state. The numeric session_id stays the same across reconnects while the tab stays open. If a new operation returns error_code session_connecting or session_reconnecting with operation_started:false, wait for that same session to become connected before submitting a new operation ID. Stop and report if the tab closes, disappears, or exceeds the connection readiness deadline. Command permissions still apply. Profile IDs remain stable for unchanged profiles at the same index during this activation and are invalidated by changes, reordering, or revocation.
 
 When you need to deploy local code, scripts or other local project files, prefer the RTerm SFTP upload subcommand instead of rebuilding file contents with remote shell commands or embedding large payloads in command arguments. File uploads require the local user to enable Allow AI File Uploads in AI Settings. Ask permission mode requires separate approval of each inspected source and destination; Unrestricted mode authorizes the inspected transfer without an additional desktop prompt. RTerm inspects the source for the exact file count, directory count and aggregate bytes in both modes. Use upload with the connected session ID, unique operation ID, absolute local source path and absolute remote destination path as literal arguments. A directory source recursively uploads the entire tree, including hidden files and empty directories, into a new destination directory. Existing destinations are not overwritten or merged. The destination parent must already exist. Symbolic links, reparse points and device paths are rejected. Upload only files the user intends to share with that server.
 
@@ -1023,8 +1089,10 @@ impl McpAccess {
         if !self.available() {
             return error("RTerm tunnel access is stopped");
         }
-        let encoded = body.to_string();
-        let action = match parse_request(encoded.as_bytes()) {
+        let action = match serde_json::from_value(body)
+            .map_err(|_| "Invalid request JSON")
+            .and_then(validate_request)
+        {
             Ok(action) => action,
             Err(message) => return error(message),
         };
@@ -1047,7 +1115,11 @@ pub(crate) fn error(message: impl Into<String>) -> Value {
 }
 
 fn parse_request(body: &[u8]) -> Result<WireAction, &'static str> {
-    let action: WireAction = serde_json::from_slice(body).map_err(|_| "Invalid request JSON")?;
+    let action = serde_json::from_slice(body).map_err(|_| "Invalid request JSON")?;
+    validate_request(action)
+}
+
+fn validate_request(action: WireAction) -> Result<WireAction, &'static str> {
     if let WireAction::Execute { command, .. } = &action {
         validate_command(command)?;
     }
@@ -1091,6 +1163,18 @@ fn parse_request(body: &[u8]) -> Result<WireAction, &'static str> {
             }
             (None, None, None)
         }
+        WireAction::ManageLibrary {
+            library_revision,
+            change,
+            operation_id,
+            wait_ms,
+        } => {
+            if !valid_id(library_revision) {
+                return Err("Invalid library revision");
+            }
+            change.validate()?;
+            (Some(operation_id.as_str()), *wait_ms, None)
+        }
         WireAction::ListSessions => (None, None, None),
     };
     if operation.is_some_and(|id| !valid_id(id)) {
@@ -1114,6 +1198,10 @@ fn dispatch(
 ) -> Value {
     match action {
         WireAction::ListSessions if active.load(Ordering::Acquire) => {
+            let Some(_slot) = Slot::acquire(&registry.discovery_waiters, MAX_DISCOVERY_WAITERS)
+            else {
+                return error("Session discovery busy; retry discovery later");
+            };
             let job = Arc::new(Job::new(
                 String::new(),
                 blake3::hash(b"list"),
@@ -1132,7 +1220,7 @@ fn dispatch(
                 error("Agent interface is busy")
             } else {
                 ctx.request_repaint();
-                let result = registry.wait(&job, 3_000, active);
+                let result = job.snapshot(3_000, active);
                 if result.get("poll_after_ms").is_some() {
                     job.cancel();
                     error("Session discovery busy or timed out")
@@ -1195,6 +1283,27 @@ fn dispatch(
             match registry.submit(
                 Some(operation_id),
                 Action::OpenSession { profile_id },
+                None,
+                sender,
+                active,
+                ctx,
+            ) {
+                Ok(job) => registry.wait(&job, wait_ms.unwrap_or(DEFAULT_WAIT_MS), active),
+                Err(message) => error(message),
+            }
+        }
+        WireAction::ManageLibrary {
+            library_revision,
+            change,
+            operation_id,
+            wait_ms,
+        } if active.load(Ordering::Acquire) => {
+            match registry.submit(
+                Some(operation_id),
+                Action::ManageLibrary {
+                    library_revision,
+                    change,
+                },
                 None,
                 sender,
                 active,

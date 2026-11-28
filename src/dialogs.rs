@@ -315,7 +315,9 @@ impl App {
                                         self.settings.set("ai_audit_vault", "0".into());
                                         self.forget_unlocked_vault();
                                         self.lock_form = LockForm::default();
-                                        self.profiles = storage::load_profiles();
+                                        let library = storage::load_profiles();
+                                        self.profiles = library.profiles;
+                                        self.session_folders = library.folders;
                                         self.vault_keys.clear();
                                         self.apply_settings(context);
                                         self.ensure_local();

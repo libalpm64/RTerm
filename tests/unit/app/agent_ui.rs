@@ -500,6 +500,7 @@ fn local_agent_approval_expiry_and_ssh_output() {
     app.dialog = None;
     app.settings.set("ai_access", "ask".into());
     app.profiles.push(Profile {
+        folder: None,
         name: "Test SSH".into(),
         connection: Connection::Ssh {
             terminal: "xterm-256color".into(),
@@ -520,6 +521,7 @@ fn local_agent_approval_expiry_and_ssh_output() {
         },
     });
     app.profiles.push(Profile {
+        folder: None,
         name: "Local fixture".into(),
         connection: Connection::Local {
             shell: String::new(),
@@ -1550,6 +1552,35 @@ fn local_agent_approval_expiry_and_ssh_output() {
                 .all(|(i, line)| line.parse() == Ok(i + 1))
         );
     }
+    let list = post(&app, json!({"action":"list_sessions"}));
+    pump(&mut app, &context, |_| list.is_finished());
+    let saved = list.join().unwrap();
+    let old_live_endpoint = app.agent_endpoint(id).unwrap();
+    let old_live_target = app.agent_terminal(id).unwrap().remote_target.clone();
+    let changed_port = if port == u16::MAX { port - 1 } else { port + 1 };
+    let change = post(
+        &app,
+        json!({"action":"manage_library",
+        "library_revision":saved["library_revision"],
+        "operation_id":"edit-live-profile-port",
+        "change":{"kind":"set_port","profile_id":saved["saved_sessions"][0]["profile_id"],"port":changed_port}}),
+    );
+    pump(&mut app, &context, |_| change.is_finished());
+    assert_eq!(change.join().unwrap()["ok"], true);
+    assert_eq!(app.profiles[0].network_port(), Some(changed_port));
+    assert_eq!(app.agent_endpoint(id), Some(old_live_endpoint));
+    assert_eq!(
+        app.agent_terminal(id).unwrap().remote_target,
+        old_live_target
+    );
+    assert_eq!(app.terminals.len(), 2);
+    assert!(
+        !app.host_trust
+            .store
+            .list()
+            .unwrap()
+            .contains_key(&crate::host_keys::target("127.0.0.1", changed_port))
+    );
     assert!(
         app.backend
             .write(new_endpoint, b"exit-fixture\n".to_vec())
@@ -1602,6 +1633,7 @@ fn agent_discovery_and_approval_work_without_any_painted_frame() {
     app.settings.set("ai_access", "ask".into());
     app.settings.set("ai_interactive", "1".into());
     app.profiles.push(Profile {
+        folder: None,
         name: "Hidden window fixture".into(),
         connection: Connection::Ssh {
             terminal: "xterm-256color".into(),
@@ -2000,6 +2032,7 @@ fn sftp_only_authenticates_without_shell_and_transfers_files() {
         keepalive: 0,
     };
     let profile = Profile {
+        folder: None,
         name: "File-only fixture".into(),
         connection: Connection::Sftp { config },
     };
@@ -2360,4 +2393,364 @@ fn sftp_only_authenticates_without_shell_and_transfers_files() {
     assert_eq!(app.terminals.len(), 1);
     assert!(!app.file_workspace_active());
     assert_eq!(shells.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn agent_library_discovery_management_and_approval() {
+    let context = egui::Context::default();
+    let mut app = App::test_fixture(&context);
+    app.settings.set("ai_access", "ask".into());
+    app.session_folders
+        .extend(["Production".into(), "Empty".into()]);
+    let mut ssh = Profile::from(crate::models::SshConfig {
+        host: "fixture.invalid".into(),
+        port: 22,
+        user: "fixture".into(),
+        password: Some("fixture-password-private".into()),
+        key_path: Some("/fixture/private-key-path".into()),
+        key_name: None,
+        vault_pass: None,
+        name: Some("Web".into()),
+        compression: None,
+        key_passphrase: Some("fixture-passphrase-private".into()),
+        use_agent: false,
+        keepalive: 0,
+    });
+    ssh.folder = Some("Production".into());
+    app.profiles.push(ssh);
+    app.profiles.push(Profile {
+        name: "Web".into(), // duplicate display name, different profile kind
+        folder: Some("Production".into()),
+        connection: Connection::Local {
+            shell: "fixture-private-local-command".into(),
+        },
+    });
+    app.profiles.push(Profile {
+        name: "Telnet fixture".into(),
+        folder: None,
+        connection: Connection::Telnet(crate::models::TelnetConfig {
+            host: "fixture.invalid".into(),
+            port: 23,
+        }),
+    });
+    app.start_agent(&context);
+    let post = |app: &App, value| app.agent.bridge.as_ref().unwrap().test_ipc(value);
+    let pump = |app: &mut App, ready: &dyn Fn(&App) -> bool| {
+        let end = Instant::now() + Duration::from_secs(5);
+        while !ready(app) {
+            app.poll_agent(&context);
+            assert!(Instant::now() < end, "library request timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let call = |app: &mut App, value| {
+        let result = post(app, value);
+        pump(app, &|_| result.is_finished());
+        result.join().unwrap()
+    };
+    let list = |app: &mut App| call(app, json!({"action":"list_sessions"}));
+    let body = |snapshot: &serde_json::Value, op: &str, change| {
+        json!({"action":"manage_library","library_revision":snapshot["library_revision"],
+            "operation_id":op,"change":change})
+    };
+    let original = list(&mut app);
+    assert_eq!(original["session_folders"], json!(["Empty", "Production"]));
+    assert_eq!(original["saved_sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(original["saved_profiles"].as_array().unwrap().len(), 3);
+    assert_eq!(original["saved_sessions"][0]["folder"], "Production");
+    assert_eq!(original["saved_sessions"][0]["port"], 22);
+    assert_eq!(original["saved_profiles"][1]["kind"], "Local");
+    assert_eq!(
+        original["saved_profiles"][1]["target"],
+        serde_json::Value::Null
+    );
+    assert_eq!(original["saved_profiles"][2]["port"], 23);
+    for secret in [
+        "fixture-password-private",
+        "private-key-path",
+        "fixture-passphrase-private",
+        "fixture-private-local-command",
+    ] {
+        assert!(!original.to_string().contains(secret));
+    }
+    let ssh_id = original["saved_profiles"][0]["profile_id"].clone();
+    let local_id = original["saved_profiles"][1]["profile_id"].clone();
+    let telnet_id = original["saved_profiles"][2]["profile_id"].clone();
+    assert_eq!(
+        list(&mut app)["library_revision"],
+        original["library_revision"]
+    );
+    assert_eq!(
+        call(
+            &mut app,
+            json!({"action":"open_session","profile_id":local_id,"operation_id":"no-local-shell"})
+        )["ok"],
+        false
+    );
+
+    // Command grants and auto-open never authorize library changes in Ask mode.
+    app.settings.set("ai_auto_open", "1".into());
+    app.agent
+        .grants
+        .insert(42, Instant::now() + Duration::from_secs(60));
+    let change = body(
+        &original,
+        "rename-denied",
+        json!({"kind":"rename_session","profile_id":ssh_id,"name":"Denied"}),
+    );
+    let request = post(&app, change);
+    pump(&mut app, &|app| app.agent.pending.is_some());
+    assert_eq!(app.profiles[0].name, "Web");
+    app.resolve_agent_permission(false);
+    assert_eq!(request.join().unwrap()["ok"], false);
+
+    let change = body(
+        &original,
+        "create-cancelled",
+        json!({"kind":"create_folder","name":"Cancelled"}),
+    );
+    let request = post(&app, change);
+    pump(&mut app, &|app| app.agent.pending.is_some());
+    assert_eq!(
+        call(
+            &mut app,
+            json!({"action":"cancel","operation_id":"create-cancelled"})
+        )["status"],
+        "cancelled"
+    );
+    app.resolve_agent_permission(true);
+    assert_eq!(request.join().unwrap()["status"], "cancelled");
+    assert!(!app.session_folders.contains("Cancelled"));
+
+    let change = body(
+        &original,
+        "rename-stale",
+        json!({"kind":"rename_folder","folder":"Production","name":"Stale"}),
+    );
+    let request = post(&app, change);
+    pump(&mut app, &|app| app.agent.pending.is_some());
+    app.profiles[1].name = "Human edit".into();
+    app.resolve_agent_permission(true);
+    assert_eq!(request.join().unwrap()["ok"], false);
+    assert!(app.session_folders.contains("Production"));
+    assert!(!app.session_folders.contains("Stale"));
+
+    let snap = list(&mut app);
+    let create = body(
+        &snap,
+        "create-approved",
+        json!({"kind":"create_folder","name":"Staging"}),
+    );
+    let request = post(&app, create.clone());
+    pump(&mut app, &|app| app.agent.pending.is_some());
+    app.resolve_agent_permission(true);
+    assert_eq!(request.join().unwrap()["ok"], true);
+    assert!(app.session_folders.contains("Staging"));
+    // Retrying the same operation returns the retained result, not another edit.
+    assert_eq!(call(&mut app, create)["ok"], true);
+    assert_eq!(
+        call(
+            &mut app,
+            body(
+                &snap,
+                "stale-revision",
+                json!({"kind":"remove_folder","folder":"Staging"})
+            )
+        )["ok"],
+        false
+    );
+
+    app.settings.set("ai_access", "unrestricted".into());
+    let snap = list(&mut app);
+    assert_eq!(snap["saved_profiles"][0]["profile_id"], ssh_id);
+    let rename = body(
+        &snap,
+        "rename-folder",
+        json!({"kind":"rename_folder","folder":"Production","name":"Infrastructure"}),
+    );
+    assert_eq!(call(&mut app, rename)["ok"], true);
+    assert!(app.agent.pending.is_none());
+    assert_eq!(app.profiles[0].folder.as_deref(), Some("Infrastructure"));
+    assert_eq!(app.profiles[1].folder.as_deref(), Some("Infrastructure"));
+    let snap = list(&mut app);
+    assert_ne!(snap["saved_profiles"][0]["profile_id"], ssh_id);
+    assert_eq!(snap["saved_profiles"][2]["profile_id"], telnet_id);
+    let new_id = snap["saved_profiles"][0]["profile_id"].clone();
+    let move_body = body(
+        &snap,
+        "move-ssh",
+        json!({"kind":"move_session","profile_id":new_id,"folder":"Staging"}),
+    );
+    assert_eq!(call(&mut app, move_body)["ok"], true);
+    let snap = list(&mut app);
+    assert_eq!(snap["saved_sessions"][0]["folder"], "Staging");
+    let new_id = snap["saved_profiles"][0]["profile_id"].clone();
+    assert_eq!(
+        call(
+            &mut app,
+            body(
+                &snap,
+                "rename-ssh",
+                json!({"kind":"rename_session","profile_id":new_id,"name":"Web 01"})
+            )
+        )["ok"],
+        true
+    );
+    let snap = list(&mut app);
+    let new_id = snap["saved_profiles"][0]["profile_id"].clone();
+    assert_eq!(
+        call(
+            &mut app,
+            body(
+                &snap,
+                "set-port",
+                json!({"kind":"set_port","profile_id":new_id,"port":2222})
+            )
+        )["ok"],
+        true
+    );
+    let snap = list(&mut app);
+    assert_eq!(snap["saved_sessions"][0]["name"], "Web 01");
+    assert_eq!(snap["saved_sessions"][0]["port"], 2222);
+    assert_eq!(
+        snap["saved_sessions"][0]["target"],
+        "fixture@fixture.invalid:2222"
+    );
+    assert_eq!(app.profiles[0].network_port(), Some(2222));
+    let Connection::Ssh { config, .. } = &app.profiles[0].connection else {
+        panic!()
+    };
+    assert_eq!(config.password.as_deref(), Some("fixture-password-private"));
+    assert_eq!(
+        config.key_passphrase.as_deref(),
+        Some("fixture-passphrase-private")
+    );
+    assert_eq!(
+        call(
+            &mut app,
+            body(
+                &snap,
+                "invalid-local-port",
+                json!({"kind":"set_port","profile_id":snap["saved_profiles"][1]["profile_id"],"port":2222})
+            )
+        )["ok"],
+        false
+    );
+    assert_eq!(
+        call(
+            &mut app,
+            body(
+                &snap,
+                "old-id",
+                json!({"kind":"rename_session","profile_id":ssh_id,"name":"Wrong"})
+            )
+        )["ok"],
+        false
+    );
+    assert_eq!(
+        call(
+            &mut app,
+            body(
+                &snap,
+                "duplicate-folder",
+                json!({"kind":"create_folder","name":"Staging"})
+            )
+        )["ok"],
+        false
+    );
+    assert_eq!(
+        call(
+            &mut app,
+            body(
+                &snap,
+                "missing-folder",
+                json!({"kind":"move_session","profile_id":snap["saved_profiles"][0]["profile_id"],"folder":"Missing"})
+            )
+        )["ok"],
+        false
+    );
+    assert_eq!(
+        call(
+            &mut app,
+            body(
+                &snap,
+                "move-root",
+                json!({"kind":"move_session","profile_id":snap["saved_profiles"][0]["profile_id"],"folder":null})
+            )
+        )["ok"],
+        true
+    );
+    let snap = list(&mut app);
+    assert_eq!(snap["saved_sessions"][0]["folder"], serde_json::Value::Null);
+    assert_eq!(
+        call(
+            &mut app,
+            body(
+                &snap,
+                "remove-folder",
+                json!({"kind":"remove_folder","folder":"Infrastructure"})
+            )
+        )["ok"],
+        true
+    );
+    assert_eq!(app.profiles.len(), 3);
+    assert_eq!(app.profiles[1].folder, None);
+    assert!(!app.session_folders.contains("Infrastructure"));
+
+    // Both bridge transports see the same library; tunnel revocation prevents a pending edit.
+    app.settings.set("ai_access", "ask".into());
+    let snap = list(&mut app);
+    let tunnel = app.agent.bridge.as_ref().unwrap().mcp_access();
+    let remote = tunnel.clone();
+    let mut change = body(
+        &snap,
+        "tunnel-revoked",
+        json!({"kind":"create_folder","name":"Revoked"}),
+    );
+    change["wait_ms"] = json!(0);
+    assert_eq!(tunnel.request(change)["ok"], true);
+    pump(&mut app, &|app| app.agent.pending.is_some());
+    assert!(
+        app.agent
+            .is_tunnel_request(app.agent.pending.as_ref().unwrap())
+    );
+    tunnel.stop();
+    app.resolve_agent_permission(true);
+    assert!(!app.session_folders.contains("Revoked"));
+    assert_eq!(
+        remote.request(json!({"action":"list_sessions"}))["ok"],
+        false
+    );
+
+    let request = post(
+        &app,
+        body(
+            &snap,
+            "locked",
+            json!({"kind":"create_folder","name":"Locked"}),
+        ),
+    );
+    pump(&mut app, &|app| app.agent.pending.is_some());
+    app.locked = true;
+    app.resolve_agent_permission(true);
+    assert_eq!(request.join().unwrap()["ok"], false);
+    assert!(!app.session_folders.contains("Locked"));
+    app.poll_agent(&context);
+    assert!(!app.agent.active());
+    assert!(app.agent.library_revision.is_none());
+    assert!(app.terminals.is_empty());
+    assert!(
+        app.agent
+            .activity
+            .entries()
+            .iter()
+            .any(|entry| entry.action.contains("Saved-session change"))
+    );
+    assert!(
+        app.agent
+            .activity
+            .entries()
+            .iter()
+            .all(|entry| !entry.command.contains("fixture-password-private"))
+    );
 }

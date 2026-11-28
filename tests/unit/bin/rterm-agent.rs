@@ -219,3 +219,68 @@ fn cli_request_round_trips_on_isolated_pipe() {
         server.await.unwrap();
     });
 }
+
+#[test]
+fn manage_subcommand_validates_and_serializes_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("change.json");
+    std::fs::write(
+        &path,
+        r#"{"kind":"set_port","profile_id":"p-1","port":2222}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        request(&[
+            "manage",
+            "rev",
+            "op",
+            "--change-file",
+            path.to_str().unwrap()
+        ])
+        .unwrap()["change"]["port"],
+        2222
+    );
+
+    assert_eq!(
+        request(&[
+            "manage",
+            "rev-1",
+            "op-1",
+            r#"{"kind":"move_session","profile_id":"p-1","folder":null}"#,
+            "--wait-ms",
+            "0"
+        ])
+        .unwrap(),
+        json!({"action":"manage_library","library_revision":"rev-1","operation_id":"op-1",
+            "change":{"kind":"move_session","profile_id":"p-1","folder":null},"wait_ms":0})
+    );
+    assert!(
+        request(&[
+            "manage",
+            "rev",
+            "op",
+            r#"{"kind":"set_port","profile_id":"p","port":0}"#
+        ])
+        .is_err()
+    );
+    assert!(
+        request(&[
+            "manage",
+            "rev",
+            "op",
+            r#"{"kind":"move_session","profile_id":"p"}"#
+        ])
+        .is_err()
+    );
+    assert!(
+        request(&[
+            "manage",
+            "rev",
+            "op",
+            r#"{"kind":"create_folder","name":"A"}"#,
+            "--timeout-secs",
+            "30"
+        ])
+        .is_err()
+    );
+}

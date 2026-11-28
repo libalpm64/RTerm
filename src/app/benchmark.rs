@@ -114,6 +114,7 @@ impl Transport {
             Self::Saved { .. } => return None,
         };
         Some(Profile {
+            folder: None,
             name: "Benchmark".into(),
             connection,
         })

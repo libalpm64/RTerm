@@ -129,7 +129,11 @@ impl Host<'_> {
                 port,
             })
         };
-        Some(Profile { name, connection })
+        Some(Profile {
+            name,
+            folder: None,
+            connection,
+        })
     }
 }
 

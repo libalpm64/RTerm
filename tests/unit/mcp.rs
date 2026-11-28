@@ -38,12 +38,24 @@ fn loopback_mcp_checks_origin_and_authenticates_discovery() {
         assert_eq!(initialized["result"]["protocolVersion"], version);
         let response = decode(post(headers, "tools/list", json!({})).await);
         let tools = response["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
         assert_eq!(tools.iter().find(|tool| tool["name"] == "execute").unwrap()["annotations"]["readOnlyHint"], false);
         let history = decode(post(headers, "tools/call", json!({"name":"history","arguments":{}})).await);
         assert_eq!(history["result"]["structuredContent"]["operations"], json!([]));
 
         let call = |name, arguments| post(headers, "tools/call", json!({"name":name,"arguments":arguments}));
+        let management = tools.iter().find(|tool| tool["name"] == "manage_library").unwrap();
+        assert_eq!(management["inputSchema"]["properties"]["change"]["oneOf"].as_array().unwrap().len(), 6);
+        let change = json!({"library_revision":"rev","operation_id":"manage-fixture","change":{"kind":"set_port","profile_id":"fixture","port":2222},"wait_ms":0});
+        let queued = decode(call("manage_library", change.clone()).await);
+        assert_eq!(queued["result"]["structuredContent"]["status"], "queued");
+        let request = bridge.requests.try_recv().unwrap();
+        assert!(matches!(request.action, crate::agent::Action::ManageLibrary { change: crate::agent::LibraryChange::SetPort { port: 2222, .. }, .. }));
+        request.reply.send(json!({"ok":true,"rediscover":true})).unwrap();
+        assert_eq!(decode(call("manage_library", change).await)["result"]["structuredContent"]["rediscover"], true);
+        let invalid = decode(call("manage_library", json!({"library_revision":"rev","operation_id":"invalid-port","change":{"kind":"set_port","profile_id":"fixture","port":0}})).await);
+        assert_eq!(invalid["result"]["isError"],true);
+        assert!(bridge.requests.try_recv().is_err());
         let submit = |operation_id| call("execute", json!({"session_id":1,"operation_id":operation_id,"command":"fixture","wait_ms":0}));
         let poll = |operation_id| call("poll", json!({"operation_id":operation_id,"since":0,"wait_ms":0}));
         let queued = decode(submit("nonzero-exit").await);

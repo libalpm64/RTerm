@@ -8,7 +8,7 @@
 4. Choose **Apply and Connect** in Advanced AI Settings and wait for **Tunnel ready**. For a previously saved profile, you can also choose **AI → Start Agent**, then **Connect OpenAI Tunnel**. You can opt into connecting automatically when you start the agent. Advanced Settings can copy or export the ChatGPT setup instructions, including the tunnel ID. The export contains no API key.
 5. In [ChatGPT Plugins](https://chatgpt.com/plugins), add a custom MCP server with **Connection → Tunnel** and select the same tunnel. Choose **No authentication** for the app's MCP authentication option. Workspace permissions control access through OpenAI and RTerm continues to enforce its configured desktop approvals. Install the private plugin and call `list_sessions`; to test execution, use a harmless command on the intended SSH session and check its exit code.
 
-The local MCP endpoint uses a per-run token on a loopback-only listener. It exposes sessions, open, execute, upload, poll, history, and cancellation through the same RTerm permission and audit paths. Nonzero exits, cancellations, and timeouts return normal MCP results. Read `status` and, for completed commands, `exit_code` and `command_success` in `structuredContent`. Tunnel operation history and timed grants are separate from local CLI history and grants. The official client reconnects on transient network failures, and RTerm restarts it with backoff if it exits. **Stop OpenAI Tunnel** revokes tunnel access and keeps the local CLI active. Stopping the agent, locking the vault, or closing RTerm also stops the tunnel. For a disposable test, revoke the restricted key on Platform and remove the saved profile in Advanced Settings after testing.
+The local MCP endpoint uses a per-run token on a loopback-only listener. It exposes sessions, saved-library management, open, execute, upload, poll, history, and cancellation through the same RTerm permission and audit paths. Nonzero exits, cancellations, and timeouts return normal MCP results. Read `status` and, for completed commands, `exit_code` and `command_success` in `structuredContent`. Tunnel operation history and timed grants are separate from local CLI history and grants. The official client reconnects on transient network failures, and RTerm restarts it with backoff if it exits. **Stop OpenAI Tunnel** revokes tunnel access and keeps the local CLI active. Stopping the agent, locking the vault, or closing RTerm also stops the tunnel. For a disposable test, revoke the restricted key on Platform and remove the saved profile in Advanced Settings after testing.
 
 See [OpenAI's Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) for account and workspace requirements.
 
@@ -16,7 +16,7 @@ See [OpenAI's Secure MCP Tunnel guide](https://developers.openai.com/api/docs/gu
 
 Build both Rust binaries together with `cargo build --release --locked --bins` (or `cargo build --locked --bins` for development). Install the matching desktop and CLI binaries together (see installation above). The local CLI uses bounded binary-framed JSON over a Windows named pipe or a private Unix-domain socket on Linux and macOS. Local CLI access works independently of the optional OpenAI Secure MCP Tunnel.
 
-Open **Settings → AI** and choose **Agent Access**. Disabled is the default. **Ask permission** requires explicit approval for each foreground command and supports 5-, 15-, or 30-minute grants for background commands on an SSH session. **Unrestricted** skips per-operation approval for background commands and SFTP uploads when Allow AI File Uploads is enabled. User-authorized remote file deletions can be executed as background shell commands; there is no dedicated agent delete operation. Foreground commands in the visible terminal always require local approval because RTerm cannot verify the remote shell prompt. Approval requests expire after 60 seconds. The command timeout defaults to 60 seconds and can be set between 15 seconds and one hour. Optional `--timeout-secs` (1–3600) is capped by the setting and remaining grant lifetime.
+Open **Settings → AI** and choose **Agent Access**. Disabled is the default. **Ask permission** requires explicit approval for each foreground command and supports 5-, 15-, or 30-minute grants for background commands on an SSH session. **Unrestricted** skips per-operation approval for background commands, saved-session management, and SFTP uploads when Allow AI File Uploads is enabled. In Ask permission mode, each saved-library change requires its own approval; a timed SSH command grant and Auto Open Sessions do not authorize library edits. User-authorized remote file deletions can be executed as background shell commands; there is no dedicated agent delete operation. Foreground commands in the visible terminal always require local approval because RTerm cannot verify the remote shell prompt. Approval requests expire after 60 seconds. The command timeout defaults to 60 seconds and can be set between 15 seconds and one hour. Optional `--timeout-secs` (1–3600) is capped by the setting and remaining grant lifetime.
 
 Choose **AI → Start Agent** to activate the local interface for this run. **Copy Agent Instructions** copies installation-independent CLI instructions. Saved SSH profiles can be opened after approval, or automatically on request if the user enables **Auto Open Sessions** (off by default). Paste the instructions into a local AI client with authorized terminal execution, or use the utility yourself. The desktop and utility must run under the same local user account and matching installation. One RTerm instance per account can activate this interface at a time. Client authorization and tool policies continue to apply; do not use an alternate transport to evade a client denial.
 
@@ -26,6 +26,7 @@ After installation, use the same command from any working directory (open a new 
 rterm-agent --help
 rterm-agent sessions
 rterm-agent open 'profile-id-from-list' 'unique-open-operation-id' --wait-ms 0
+rterm-agent manage 'library-revision-from-list' 'unique-change-operation-id' --change-file 'change.json' --wait-ms 0
 rterm-agent execute 42 'unique-operation-id' 'pwd' --wait-ms 0 --timeout-secs 30
 rterm-agent execute 42 'unique-script-id' --command-file 'diagnostic.sh' --wait-ms 0
 rterm-agent upload 42 'unique-upload-id' 'ABSOLUTE_LOCAL_FILE' '/home/user/app.py' --wait-ms 0
@@ -40,8 +41,9 @@ The numeric session ID above is illustrative; use the actual ID returned by `ses
 
 | Subcommand | Arguments |
 |---|---|
-| `sessions` | No arguments; returns connected sessions, saved SSH profile metadata and tab states. |
+| `sessions` | No arguments; returns connected sessions, saved profiles, folders, library revision and tab states. |
 | `open` | Saved profile ID, unique operation ID; optional `--wait-ms`. Requires local approval unless Auto Open Sessions is enabled. |
+| `manage` | Current library revision, unique operation ID, JSON change object (or `--change-file PATH` / `-` for stdin); optional `--wait-ms`. |
 | `execute` | Numeric session ID, operation ID, literal command, `-` for stdin or `--command-file PATH`; optional `--wait-ms` and `--timeout-secs`. |
 | `upload` | Numeric session ID, operation ID, absolute local file or folder, absolute remote destination; optional `--wait-ms` and `--timeout-secs`. Requires Allow AI File Uploads; individual approval in Ask permission mode. |
 | `poll` | Operation ID; optional `--wait-ms` and `--since BYTE_OFFSET`. |
@@ -49,6 +51,29 @@ The numeric session ID above is illustrative; use the actual ID returned by `ses
 | `cancel` | Operation ID. |
 
 To open a saved profile, use its opaque `profile_id` from the list. RTerm asks for approval unless the local user enables Auto Open Sessions. Opening a profile activates its existing SSH tab when available. An open result includes a `tab_id`, `session_id`, and `connection_state`. If it is still connecting, list sessions until that tab reports `connected`. Stop if the tab closes, disappears, or exceeds the connection readiness deadline. Command permissions still apply. Saved profile IDs remain stable for unchanged profiles at the same index during this activation. Profile changes, reordering, or revocation invalidate them.
+
+### Saved-session folders and management
+
+Discovery returns `session_folders` (every folder name, including empty folders), `saved_profiles` (all saved connection types), and `library_revision` (an opaque snapshot identifier). Each saved profile includes its opaque `profile_id`, display name, kind, folder name or null for ungrouped, and numeric network port where applicable. Network profiles include the connection target; local shell commands, serial paths, passwords and SSH keys are not exposed. The existing `saved_sessions` list remains SSH-only and now includes folder and port. For "update all servers in Production", an agent selects saved SSH profiles in that exact folder, opens the intended profiles, waits for each connection, and runs authorized commands on each session. Non-SSH profiles are not command targets.
+
+Use `rterm-agent manage REV OP CHANGE` locally, or `manage_library` via MCP with `library_revision`, `operation_id`, `change` and optional `wait_ms`. Save the following example JSON as a UTF-8 `change.json` for the CLI command above:
+
+```json
+{"kind":"set_port","profile_id":"profile-id-from-list","port":2222}
+```
+
+Other change objects use `kind` and the specified fields:
+
+| Kind | Fields |
+|---|---|
+| `create_folder` | `name` |
+| `rename_folder` | `folder`, `name` |
+| `remove_folder` | `folder` |
+| `move_session` | `profile_id`, `folder` (existing folder or explicit null) |
+| `rename_session` | `profile_id`, `name` |
+| `set_port` | `profile_id`, integer `port` (1–65535; SSH, SFTP or Telnet) |
+
+Each operation is validated against the discovered library snapshot before approval and at commit, saved through the existing encrypted vault or private session library, and recorded in live AI Activity. Removing a folder ungroups its members; it does not delete profiles. Renaming changes the display label, not the hostname or username. A saved port edit does not change the remote daemon, host-key trust, or existing tab/reconnect settings. An already-open tab keeps its original connection; use the edited saved profile for the new connection. Finish pending connection forms or folder editors before making library edits. Poll for completed status and `ok:true`, then list again for a fresh revision and profile IDs before each subsequent change. A stale or cancelled edit is rejected; do not automatically retry uncertain operations. Saved-session management uses the same Ask/Unrestricted permissions for CLI and MCP; it does not grant shell access.
 
 Previously connected SSH tabs retry after a transport disconnect when **Settings → Connection → Reconnect SSH** is enabled. RTerm checks idle connections using the profile's keepalive interval or 15 seconds when the profile has no interval set. The numeric `session_id` stays the same for the life of the tab, including after a reconnect. During reconnection, a new command or upload returns `error_code: "session_reconnecting"` and `operation_started: false`. Wait until the same ID shows as connected, then submit a new operation ID. RTerm also offers **Reconnect** on the tab menu and **Duplicate** on the saved profile menu. A rejected login stops automatic retries. Locking the vault pauses retries until credentials are available again. Reconnection never replays an operation.
 
@@ -75,6 +100,6 @@ To opt into **interactive mode**, turn on **Settings → AI → Run AI Commands 
 
 **Security.** Windows IPC uses a protected DACL granting access to the current Windows user SID only and rejects remote clients. Windows also uses identification-only impersonation QoS. Unix IPC uses a UID-owned mode-0700 directory, a single-instance file lock and kernel peer credentials. On Windows, macOS and Linux the companion verifies the server executable path against its sibling RTerm executable before transmitting commands. The server trusts the OS account rather than authenticating individual client executables: any process running as the same user can submit requests while the interface is enabled, subject to RTerm's settings and approval checks. This is not a sandbox against untrusted same-account processes. On Unix, another local user could pre-create the predictable UID-named directory under `/tmp` before first startup and cause a local startup denial of service; the ownership and peer-credential checks still prevent that user from issuing agent commands. RTerm verifies the SSH server key before authentication. Treat remote output as untrusted data.
 
-**AI → AI Activity…** opens the live audit log. Search by command or operation ID, filter by session, and select a row to see the full command and outcome. Right-click an SSH tab and choose **AI Activity…** to open the log filtered to that session. Recent requests and uploads are kept in memory while RTerm is open. **Settings → AI → Log AI Commands to Vault** is off by default. With the vault unlocked and logging enabled, RTerm keeps the latest 250 dispatched commands and their outcomes in the encrypted vault. Turning logging off stops new entries from being saved. Existing vault history is available after unlocking. The audit log stores command text and metadata, which may include sensitive values. Command output remains governed by the CLI's temporary output log.
+**AI → AI Activity…** opens the live audit log. Search by command or operation ID, filter by session, and select a row to see the full command and outcome. Right-click an SSH tab and choose **AI Activity…** to open the log filtered to that session. Recent requests, uploads and saved-session changes are kept in memory while RTerm is open. **Settings → AI → Log AI Commands to Vault** is off by default. With the vault unlocked and logging enabled, RTerm keeps the latest 250 dispatched commands and their outcomes in the encrypted vault. Turning logging off stops new entries from being saved. Existing vault history is available after unlocking. The audit log stores command text and metadata, which may include sensitive values. Command output remains governed by the CLI's temporary output log.
 
 **AI → Stop Agent** closes the local interface, clears grants, and invalidates operation permits. Closing an SSH tab revokes its grant. Changing settings, locking the vault, or exiting also stops the interface. CLI results expire on stop or restart. Start the agent explicitly to reactivate it. Revoke access in any older HTTP-enabled RTerm build before upgrading.

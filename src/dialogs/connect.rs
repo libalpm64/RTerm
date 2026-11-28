@@ -27,6 +27,7 @@ enum Authentication {
 pub(crate) struct ConnectForm {
     kind: Kind,
     name: String,
+    folder: Option<String>,
     shell: String,
     host: String,
     ssh_port: String,
@@ -53,6 +54,7 @@ impl ConnectForm {
         Self {
             kind: Kind::Local,
             name: String::new(),
+            folder: None,
             shell: String::new(),
             host: String::new(),
             ssh_port: settings.get("ssh_default_port").to_owned(),
@@ -75,10 +77,16 @@ impl ConnectForm {
         }
     }
 
+    pub(crate) fn in_folder(mut self, folder: String) -> Self {
+        self.folder = Some(folder);
+        self
+    }
+
     pub(crate) fn editing(profile: &Profile, index: usize, settings: &Settings) -> Self {
         let mut form = Self::new(settings);
         form.kind = profile.kind();
         form.name.clone_from(&profile.name);
+        form.folder.clone_from(&profile.folder);
         form.index = Some(index);
         match &profile.connection {
             Connection::Local { shell } => form.shell.clone_from(shell),
@@ -193,7 +201,11 @@ impl ConnectForm {
             self.name.trim().into()
         };
         app.connect(
-            Profile { name, connection },
+            Profile {
+                name,
+                folder: self.folder.clone(),
+                connection,
+            },
             self.save.then_some(self.index),
         );
         Ok(())

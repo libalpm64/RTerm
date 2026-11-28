@@ -60,6 +60,8 @@ pub(crate) enum Connection {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Profile {
     pub(crate) name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) folder: Option<String>,
     pub(crate) connection: Connection,
 }
 
@@ -87,6 +89,22 @@ impl Profile {
         }
     }
 
+    pub(crate) fn network_port(&self) -> Option<u16> {
+        match &self.connection {
+            Connection::Ssh { config, .. } | Connection::Sftp { config } => Some(config.port),
+            Connection::Telnet(config) => Some(config.port),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn set_network_port(&mut self, port: u16) {
+        match &mut self.connection {
+            Connection::Ssh { config, .. } | Connection::Sftp { config } => config.port = port,
+            Connection::Telnet(config) => config.port = port,
+            _ => {}
+        }
+    }
+
     pub(crate) fn without_credentials(&self) -> Self {
         let mut profile = self.clone();
         if let Connection::Ssh { config, .. } | Connection::Sftp { config } =
@@ -109,6 +127,7 @@ impl From<SshConfig> for Profile {
         config.vault_pass = None;
         Self {
             name,
+            folder: None,
             connection: Connection::Ssh {
                 config,
                 terminal: "xterm-256color".into(),

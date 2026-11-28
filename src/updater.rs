@@ -572,6 +572,7 @@ fn verify_package(path: &Path, release: &Release) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run(mut command: Command, description: &str) -> Result<(), String> {
     let result = command
         .stdin(Stdio::null())

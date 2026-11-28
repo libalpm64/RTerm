@@ -101,10 +101,8 @@ fn folder_creation_button_works_in_fullscreen_and_docked_sftp() {
     app.explorer.remote_active = true;
     assert!(app.can_create_sftp_folder());
     for (expanded, sftp_only, pos) in [
-        (true, false, pos2(1146.0, 15.0)),
         (true, false, pos2(1166.0, 43.0)),
         (false, false, pos2(166.0, 35.0)),
-        (false, true, pos2(1146.0, 15.0)),
         (false, true, pos2(1166.0, 65.0)),
     ] {
         app.explorer.expanded = expanded;
@@ -160,6 +158,44 @@ fn folder_creation_button_works_in_fullscreen_and_docked_sftp() {
         );
         assert!(draft.name.is_empty());
         assert!(app.dialog.is_none());
+    }
+}
+
+#[test]
+fn file_manager_header_only_contains_workspace_controls() {
+    let context = egui::Context::default();
+    let mut app = App::test_fixture(&context);
+    for (expanded, width) in [(true, 1200.0), (true, 350.0), (false, 1200.0)] {
+        app.explorer.expanded = expanded;
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 600.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| {
+                        let id = ui.id();
+                        let bounds = ui.max_rect();
+                        app.explorer_workspace(ui, bounds);
+                        let header = top_band(bounds, 30.0);
+                        let queue = ctx
+                            .read_response(id.with("Transfer queue"))
+                            .expect("queue control");
+                        let toggle = ctx
+                            .read_response(id.with(if expanded {
+                                "Restore Filer"
+                            } else {
+                                "Expand Filer"
+                            }))
+                            .expect("workspace control");
+                        assert_eq!(queue.rect, icon_slot(header, 1));
+                        assert_eq!(toggle.rect, icon_slot(header, 0));
+                        assert!(ctx.read_response(id.with("Refresh")).is_none());
+                    });
+            },
+        );
     }
 }
 
@@ -298,7 +334,7 @@ fn transfer_card_preserves_file_panes_and_queue_is_opt_in() {
     click(&mut app, pos2(55.0, 787.0));
     assert!(!app.transfer_queue_open);
     assert_eq!(footer_y(&render(&mut app, vec![])), baseline);
-    click(&mut app, pos2(1126.0, 15.0));
+    click(&mut app, pos2(1166.0, 15.0));
     assert!(app.transfer_queue_open);
     assert_eq!(footer_y(&render(&mut app, vec![])), resized_footer);
 
@@ -554,6 +590,7 @@ fn remote_connection_status_does_not_enter_terminal_grid() {
     listener.set_nonblocking(true).unwrap();
     app.connect(
         Profile {
+            folder: None,
             name: "Test remote".into(),
             connection: Connection::Telnet(crate::models::TelnetConfig {
                 host: "127.0.0.1".into(),

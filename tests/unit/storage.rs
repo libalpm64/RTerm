@@ -269,6 +269,7 @@ fn imported_ssh_credentials_are_written_only_to_an_existing_vault() {
     assert!(!path.exists());
     update_vault(&path, &key, true, |vault| {
         vault.profiles.push(Profile {
+            folder: None,
             name: "Existing profile".into(),
             connection: Connection::Local {
                 shell: String::new(),
@@ -331,6 +332,7 @@ fn vault_backup_roundtrip_preserves_encrypted_contents_and_previous_vault() {
     let previous_key = VaultKey([9; 32], [9; VAULT_SALT_LEN]);
     update_vault(&source, &key, true, |vault| {
         vault.profiles.push(Profile {
+            folder: None,
             name: "Backup session".into(),
             connection: Connection::Local {
                 shell: "bash".into(),
@@ -498,6 +500,7 @@ fn audit_commands_survive_encrypted_vault_updates() {
     };
     let empty = update_vault(&path, &key, true, |vault| {
         vault.profiles.push(Profile {
+            folder: None,
             name: "Existing profile".into(),
             connection: Connection::Local {
                 shell: "bash".into(),
@@ -564,4 +567,84 @@ pub(crate) fn test_private_tempdir() -> tempfile::TempDir {
     {
         tempfile::tempdir().unwrap()
     }
+}
+
+#[test]
+fn saved_session_folders_round_trip_legacy_plain_and_encrypted() {
+    let old = br#"[{"name":"Legacy","connection":{"type":"local","shell":"bash"}}]"#;
+    let legacy = decode_saved_sessions(old).unwrap();
+    assert_eq!(legacy.profiles.len(), 1);
+    assert!(legacy.profiles[0].folder.is_none());
+    assert!(legacy.folders.is_empty());
+    let mut profiles = legacy.profiles;
+    profiles[0].folder = Some("Production".into());
+    let folders = BTreeSet::from(["Production".into(), "Empty".into()]);
+    let plain = encode_saved_sessions(&profiles, &folders).unwrap();
+    let loaded = decode_saved_sessions(&plain).unwrap();
+    assert_eq!(loaded.folders, folders);
+    assert_eq!(loaded.profiles[0].folder, profiles[0].folder);
+
+    let key = VaultKey([42; 32], [42; VAULT_SALT_LEN]);
+    let vault = Vault {
+        profiles,
+        session_folders: folders.clone(),
+        ..Default::default()
+    };
+    let encrypted = encode_vault(&vault, &key).unwrap();
+    let loaded = decode_vault(&encrypted, &key).unwrap();
+    assert_eq!(loaded.session_folders, folders);
+    assert_eq!(loaded.profiles[0].folder.as_deref(), Some("Production"));
+    assert!(
+        !encrypted
+            .windows(b"Production".len())
+            .any(|w| w == b"Production")
+    );
+}
+
+#[test]
+fn folder_persistence_keeps_credentials_encrypted_and_imports_in_existing_library() {
+    let dir = test_private_tempdir();
+    let path = dir.path().join("vault.dat");
+    let key = VaultKey([43; 32], [43; VAULT_SALT_LEN]);
+    let mut profile: Profile = serde_json::from_value(serde_json::json!({
+        "name": "Fixture SSH",
+        "folder": "Private",
+        "connection": {"type":"ssh","terminal":"xterm-256color","config":{
+            "host":"fixture.invalid","port":22,"user":"fixture","password":"fixture-password"
+        }}
+    }))
+    .unwrap();
+    let folders = BTreeSet::from(["Private".into(), "Empty".into()]);
+    let plain = encode_saved_sessions(&[profile.clone()], &folders).unwrap();
+    let loaded = decode_saved_sessions(&plain).unwrap();
+    assert_eq!(loaded.folders, folders);
+    assert_eq!(loaded.profiles[0].folder.as_deref(), Some("Private"));
+    let Connection::Ssh { config, .. } = &loaded.profiles[0].connection else {
+        panic!("SSH profile");
+    };
+    assert!(config.password.is_none());
+    assert!(
+        !plain
+            .windows(b"fixture-password".len())
+            .any(|w| w == b"fixture-password")
+    );
+    update_vault(&path, &key, true, |vault| {
+        vault.profiles.push(profile.clone());
+        vault.session_folders = folders.clone();
+    })
+    .unwrap();
+    profile.name = "Imported".into();
+    profile.folder = None;
+    let (imported, added) = import_vault_profiles_at(&path, &key, vec![profile]).unwrap();
+    assert_eq!(added, 1);
+    assert_eq!(imported.folders, folders);
+    assert_eq!(imported.profiles[0].folder.as_deref(), Some("Private"));
+    assert!(imported.profiles[1].folder.is_none());
+    let encrypted = std::fs::read(&path).unwrap();
+    let reopened = decode_vault(&encrypted, &key).unwrap();
+    let Connection::Ssh { config, .. } = &reopened.profiles[0].connection else {
+        panic!("SSH profile");
+    };
+    assert_eq!(config.password.as_deref(), Some("fixture-password"));
+    assert_eq!(reopened.session_folders, folders);
 }

@@ -641,6 +641,7 @@ exec /bin/bash --noprofile --norc -i
         app.settings.set("line_numbers", "1".into());
         let mut frame = eframe::Frame::_new_kittest();
         let profile = |name: &str| Profile {
+            folder: None,
             name: name.into(),
             connection: Connection::Local {
                 shell: wrapper.to_str().unwrap().into(),

@@ -1,5 +1,5 @@
 use crate::models::{AgentAuditEntry, Connection, Profile, SshConfig, SshKey};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -54,6 +54,7 @@ impl VaultKey {
 #[derive(Default)]
 pub(crate) struct Vault {
     pub(crate) profiles: Vec<Profile>,
+    pub(crate) session_folders: BTreeSet<String>,
     pub(crate) keys: Vec<SshKey>,
     pub(crate) agent_audit: VecDeque<AgentAuditEntry>,
     pub(crate) openai_tunnel: Option<crate::tunnel::Profile>,
@@ -780,12 +781,14 @@ fn import_vault_at(
 
 pub(crate) fn save_vault(
     sessions_data: &[Profile],
+    session_folders: &BTreeSet<String>,
     keys_data: &[SshKey],
     key: &VaultKey,
     create: bool,
 ) -> Result<(), String> {
     update_vault(&get_config_dir().join("vault.dat"), key, create, |vault| {
         vault.profiles = sessions_data.to_vec();
+        vault.session_folders.clone_from(session_folders);
         vault.keys = keys_data.to_vec();
     })?;
     Ok(())
@@ -944,6 +947,7 @@ fn encode_vault(vault: &Vault, key: &VaultKey) -> Result<Vec<u8>, String> {
         "v": 2,
         "sessions": legacy,
         "profiles": vault.profiles,
+        "session_folders": vault.session_folders,
         "keys": vault.keys,
         "agent_audit": vault.agent_audit,
         "openai_tunnel": vault.openai_tunnel,
@@ -999,7 +1003,7 @@ fn decode_vault(data: &[u8], key: &VaultKey) -> Result<Vault, String> {
             let plaintext = zeroize::Zeroizing::new(plaintext);
             let mut container: serde_json::Value =
                 serde_json::from_slice(&plaintext).map_err(|_| "invalid json".to_string())?;
-            let sessions = match container
+            let mut sessions: Vec<Profile> = match container
                 .as_object_mut()
                 .and_then(|map| map.remove("profiles").or_else(|| map.remove("sessions")))
             {
@@ -1040,8 +1044,15 @@ fn decode_vault(data: &[u8], key: &VaultKey) -> Result<Vault, String> {
                 .transpose()
                 .map_err(|_| "Invalid OpenAI tunnel profile")?
                 .flatten();
+            let mut session_folders: BTreeSet<String> = container
+                .as_object_mut()
+                .and_then(|map| map.remove("session_folders"))
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_default();
+            normalize_session_folders(&mut sessions, &mut session_folders);
             Ok(Vault {
                 profiles: sessions,
+                session_folders,
                 keys,
                 agent_audit,
                 openai_tunnel,
@@ -1149,27 +1160,86 @@ pub(crate) fn create_private_temp_file(
     private_temp_file_in(&directory, prefix, suffix)
 }
 
-pub(crate) fn load_profiles() -> Vec<Profile> {
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SavedSessions {
+    pub(crate) profiles: Vec<Profile>,
+    #[serde(default)]
+    pub(crate) folders: BTreeSet<String>,
+}
+
+pub(crate) fn valid_session_folder(name: &str) -> bool {
+    crate::agent_protocol::valid_library_name(name)
+}
+
+fn normalize_session_folders(profiles: &mut [Profile], folders: &mut BTreeSet<String>) {
+    folders.retain(|name| valid_session_folder(name));
+    for profile in profiles {
+        if let Some(folder) = &profile.folder {
+            if valid_session_folder(folder) {
+                folders.insert(folder.clone());
+            } else {
+                profile.folder = None;
+            }
+        }
+    }
+}
+
+fn decode_saved_sessions(bytes: &[u8]) -> Result<SavedSessions, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Format {
+        Library(SavedSessions),
+        Legacy(Vec<Profile>),
+    }
+    let mut library = match serde_json::from_slice(bytes).map_err(|error| error.to_string())? {
+        Format::Library(library) => library,
+        Format::Legacy(profiles) => SavedSessions {
+            profiles,
+            folders: Default::default(),
+        },
+    };
+    normalize_session_folders(&mut library.profiles, &mut library.folders);
+    Ok(library)
+}
+
+pub(crate) fn load_profiles() -> SavedSessions {
     read_private_config_file(&get_config_dir().join("sessions.json"), MAX_CONFIG_FILE)
         .ok()
         .flatten()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .and_then(|bytes| decode_saved_sessions(&bytes).ok())
         .unwrap_or_default()
 }
 
-pub(crate) fn save_profiles(profiles: &[Profile]) -> Result<(), String> {
-    let profiles = profiles
-        .iter()
-        .map(Profile::without_credentials)
-        .collect::<Vec<_>>();
-    let bytes = serde_json::to_vec(&profiles).map_err(|error| error.to_string())?;
+fn encode_saved_sessions(
+    profiles: &[Profile],
+    folders: &BTreeSet<String>,
+) -> Result<Vec<u8>, String> {
+    let mut library = SavedSessions {
+        profiles: profiles.iter().map(Profile::without_credentials).collect(),
+        folders: folders.clone(),
+    };
+    normalize_session_folders(&mut library.profiles, &mut library.folders);
+    // Preserve the legacy array format until folder metadata is actually used.
+    if library.folders.is_empty() {
+        serde_json::to_vec(&library.profiles)
+    } else {
+        serde_json::to_vec(&library)
+    }
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) fn save_profiles(
+    profiles: &[Profile],
+    folders: &BTreeSet<String>,
+) -> Result<(), String> {
+    let bytes = encode_saved_sessions(profiles, folders)?;
     write_atomic(&get_config_dir().join("sessions.json"), &bytes)
 }
 
 pub(crate) fn import_vault_profiles(
     key: &VaultKey,
     incoming: Vec<Profile>,
-) -> Result<(Vec<Profile>, usize), String> {
+) -> Result<(SavedSessions, usize), String> {
     import_vault_profiles_at(&get_config_dir().join("vault.dat"), key, incoming)
 }
 
@@ -1177,12 +1247,18 @@ fn import_vault_profiles_at(
     path: &Path,
     key: &VaultKey,
     incoming: Vec<Profile>,
-) -> Result<(Vec<Profile>, usize), String> {
+) -> Result<(SavedSessions, usize), String> {
     let mut added = 0;
     let vault = update_vault(path, key, false, |vault| {
         added = crate::session_import::append_unique(&mut vault.profiles, incoming);
     })?;
-    Ok((vault.profiles, added))
+    Ok((
+        SavedSessions {
+            profiles: vault.profiles,
+            folders: vault.session_folders,
+        },
+        added,
+    ))
 }
 
 pub(crate) fn delete_vault() -> Result<(), String> {

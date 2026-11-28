@@ -613,8 +613,6 @@ impl App {
         }
         if let Some(id) = self.explorer.remote_id {
             self.begin_folder_draft(Destination::Remote(id, self.explorer.remote.path.clone()));
-            // The main File Manager button must also reveal the editor in
-            // compact mode when the Local tab was selected.
             self.explorer.remote_active = true;
         }
     }
@@ -913,7 +911,7 @@ impl App {
         theme::band(ui, header, t.bar, Some(t.border));
         header_label(
             ui,
-            header.with_max_x((icon_slot(header, 3).left() - 4.0).max(header.left() + 21.0)),
+            header.with_max_x((icon_slot(header, 1).left() - 4.0).max(header.left() + 21.0)),
             "File Manager",
             t,
         );
@@ -930,19 +928,11 @@ impl App {
         if theme::icon_button(ui, icon_slot(header, 0), caption, icon, t).clicked() {
             self.toggle_file_workspace();
         }
-        if theme::icon_button(ui, icon_slot(header, 1), "Refresh", Icon::Refresh, t).clicked() {
-            self.explorer.refresh_local();
-            if let Some(id) = self.active_ssh() {
-                self.refresh_remote_if(id);
-            }
-        }
-        if theme::icon_button(ui, icon_slot(header, 3), "Transfer queue", Icon::Menu, t).clicked() {
+        // Directory-specific actions belong to their respective pane toolbars.
+        if theme::icon_button(ui, icon_slot(header, 1), "Transfer queue", Icon::Menu, t).clicked() {
             self.transfer_queue_open = !self.transfer_queue_open;
             ui.ctx().request_repaint();
         }
-        ui.push_id("main-new-folder", |ui| {
-            self.new_folder_button(ui, icon_slot(header, 2), "New SFTP Folder", true)
-        });
         let body = bounds.with_min_y(header.bottom());
         if !self.explorer.expanded || body.width() < 400.0 {
             ui.push_id("workspace-single", |ui| self.explorer_panel(ui, body));

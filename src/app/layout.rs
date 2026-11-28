@@ -1477,6 +1477,12 @@ impl eframe::App for App {
         {
             self.explorer.folder_draft = None;
         }
+        if !self.file_interaction_allowed()
+            || self.sessions_sidebar.is_none()
+            || self.file_workspace_active()
+        {
+            self.session_folder_ui.cancel(context);
+        }
         if context.input(|input| input.viewport().close_requested()) && !self.exit_confirmed {
             context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.request_exit(context);

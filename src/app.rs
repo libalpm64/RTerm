@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -117,6 +117,8 @@ pub(crate) struct App {
     pub(crate) dialog: Option<Dialog>,
     pub(crate) message: Option<String>,
     pub(crate) profiles: Vec<Profile>,
+    pub(crate) session_folders: BTreeSet<String>,
+    session_folder_ui: sessions::FolderUi,
     pub(crate) vault_keys: Vec<SshKey>,
     pub(crate) vault_password: Option<String>,
     vault_key: Option<storage::VaultKey>,
@@ -191,8 +193,11 @@ impl App {
         theme.apply(context);
         let (backend, events) = Backend::new(context);
         let locked = restore_sessions && settings.on("vault_enabled") && storage::vault_exists();
-        let mut profiles = if locked || !restore_sessions {
-            Vec::new()
+        let storage::SavedSessions {
+            mut profiles,
+            mut folders,
+        } = if locked || !restore_sessions {
+            storage::SavedSessions::default()
         } else {
             storage::load_profiles()
         };
@@ -201,8 +206,9 @@ impl App {
             && !locked
             && let Ok((vault, _)) = storage::load_vault("")
         {
-            if profiles.is_empty() {
+            if profiles.is_empty() && folders.is_empty() {
                 profiles = vault.profiles;
+                folders = vault.session_folders;
             }
             vault_keys = vault.keys;
         }
@@ -253,6 +259,8 @@ impl App {
             dialog: None,
             message: background_error,
             profiles,
+            session_folders: folders,
+            session_folder_ui: Default::default(),
             vault_keys,
             vault_password: None,
             vault_key: None,
@@ -525,9 +533,15 @@ impl App {
 
     pub(crate) fn save_profiles(&mut self) -> Result<(), String> {
         if let Some(key) = &self.vault_key {
-            storage::save_vault(&self.profiles, &self.vault_keys, key, false)
+            storage::save_vault(
+                &self.profiles,
+                &self.session_folders,
+                &self.vault_keys,
+                key,
+                false,
+            )
         } else {
-            storage::save_profiles(&self.profiles)
+            storage::save_profiles(&self.profiles, &self.session_folders)
         }
     }
 
@@ -568,7 +582,13 @@ impl App {
 
     pub(crate) fn create_vault(&mut self, password: &str) -> Result<(), String> {
         let key = storage::VaultKey::derive(password);
-        storage::save_vault(&self.profiles, &self.vault_keys, &key, true)?;
+        storage::save_vault(
+            &self.profiles,
+            &self.session_folders,
+            &self.vault_keys,
+            &key,
+            true,
+        )?;
         self.vault_key = Some(key);
         self.vault_password = Some(password.into());
         Ok(())
@@ -585,6 +605,8 @@ impl App {
     pub(crate) fn unlock(&mut self, password: String) -> Result<(), String> {
         let (vault, key) = storage::load_vault(&password)?;
         self.profiles = vault.profiles;
+        self.session_folders = vault.session_folders;
+        self.session_folder_ui = Default::default();
         self.vault_keys = vault.keys;
         self.agent.activity.load(vault.agent_audit);
         self.tunnel_profile = vault.openai_tunnel;
@@ -613,6 +635,8 @@ impl App {
         self.forget_unlocked_vault();
         self.agent.activity.clear();
         self.profiles.clear();
+        self.session_folders.clear();
+        self.session_folder_ui = Default::default();
         self.vault_keys.clear();
         self.local_profiles.clear();
         self.forget_ssh_credentials();
@@ -682,6 +706,7 @@ impl App {
     fn new_local(&mut self) {
         self.connect(
             Profile {
+                folder: None,
                 name: format!("Terminal {}", self.next_tab),
                 connection: Connection::Local {
                     shell: String::new(),
@@ -906,13 +931,26 @@ impl App {
         }
     }
 
-    fn remember_profile(&mut self, profile: Profile, save: Option<Option<usize>>) {
+    fn remember_profile(&mut self, mut profile: Profile, save: Option<Option<usize>>) {
         if self.locked {
             return;
         }
         match save {
-            Some(Some(index)) if index < self.profiles.len() => self.profiles[index] = profile,
-            Some(_) => self.profiles.push(profile),
+            Some(Some(index)) if index < self.profiles.len() => {
+                // A delayed connection callback must not undo a folder move.
+                profile.folder.clone_from(&self.profiles[index].folder);
+                self.profiles[index] = profile;
+            }
+            Some(_) => {
+                if profile
+                    .folder
+                    .as_ref()
+                    .is_some_and(|name| !self.session_folders.contains(name))
+                {
+                    profile.folder = None;
+                }
+                self.profiles.push(profile);
+            }
             None => return,
         }
         if let Err(error) = self.save_profiles() {
@@ -1112,8 +1150,10 @@ impl App {
         let import = crate::session_import::read(&path)?;
         let total = import.profiles.len();
         let added = if total > 0 {
-            let (profiles, added) = storage::import_vault_profiles(key, import.profiles)?;
-            self.profiles = profiles;
+            let (library, added) = storage::import_vault_profiles(key, import.profiles)?;
+            self.profiles = library.profiles;
+            self.session_folders = library.folders;
+            self.session_folder_ui = Default::default();
             if added > 0 {
                 self.sessions_sidebar.get_or_insert(220.0);
                 self.filter.clear();
@@ -1497,7 +1537,7 @@ impl App {
     }
 
     fn shortcuts(&mut self, context: &egui::Context) {
-        if self.explorer.folder_editing(context) {
+        if self.explorer.folder_editing(context) || self.session_folder_ui.editing(context) {
             return;
         }
         if self.file_workspace_active() {

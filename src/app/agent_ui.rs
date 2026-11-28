@@ -1,6 +1,6 @@
 use super::agent_activity::Activity;
 use super::*;
-use crate::agent::{self, Action as AgentAction, Bridge, Mode, Permit, Request};
+use crate::agent::{self, Action as AgentAction, Bridge, LibraryChange, Mode, Permit, Request};
 use crate::backend::{AgentDisplay, AgentTranscript};
 use serde_json::json;
 use std::collections::VecDeque;
@@ -16,6 +16,7 @@ pub(super) struct State {
     attention_pending: bool,
     approvals: VecDeque<Request>,
     saved: BTreeMap<String, (usize, blake3::Hash)>,
+    library_revision: Option<(String, blake3::Hash)>,
     grants: BTreeMap<u32, Instant>,
     tunnel_grants: BTreeMap<u32, Instant>,
     running: BTreeMap<u32, Arc<AtomicBool>>,
@@ -97,6 +98,7 @@ impl State {
         self.grants.clear();
         self.tunnel_grants.clear();
         self.saved.clear();
+        self.library_revision = None;
         self.upload_summaries.clear();
         for request in self
             .pending
@@ -304,36 +306,186 @@ impl App {
 
     // Reuse IDs for unchanged profiles across discoveries within one activation.
     // Only public metadata leaves RTerm; credentials remain in the app.
+    fn agent_library_hash(&self) -> Option<blake3::Hash> {
+        let bytes = zeroize::Zeroizing::new(
+            serde_json::to_vec(&(&self.session_folders, &self.profiles)).ok()?,
+        );
+        Some(blake3::hash(&bytes))
+    }
+
+    fn agent_library_revision(&mut self) -> Option<String> {
+        let hash = self.agent_library_hash()?;
+        if let Some((id, old)) = &self.agent.library_revision
+            && *old == hash
+        {
+            return Some(id.clone());
+        }
+        let id = agent::random_id();
+        self.agent.library_revision = Some((id.clone(), hash));
+        Some(id)
+    }
+
     fn agent_saved_sessions(&mut self) -> Vec<serde_json::Value> {
-        let previous = std::mem::take(&mut self.agent.saved);
+        let previous: BTreeMap<_, _> = std::mem::take(&mut self.agent.saved)
+            .into_iter()
+            .map(|(id, (index, hash))| ((index, *hash.as_bytes()), id))
+            .collect();
         let mut entries = Vec::new();
         for (index, profile) in self.profiles.iter().enumerate() {
-            if profile.kind() != Kind::Ssh {
-                continue;
-            }
             let Ok(bytes) = serde_json::to_vec(profile) else {
                 continue;
             };
+            let bytes = zeroize::Zeroizing::new(bytes);
             let fingerprint = blake3::hash(&bytes);
             let id = previous
-                .iter()
-                .find(|(_, (old_index, old_hash))| *old_index == index && *old_hash == fingerprint)
-                .map(|(id, _)| id.clone())
+                .get(&(index, *fingerprint.as_bytes()))
+                .cloned()
                 .unwrap_or_else(agent::random_id);
             self.agent.saved.insert(id.clone(), (index, fingerprint));
-            entries.push(json!({"profile_id":id,"name":profile.name,"target":profile.subtitle()}));
+            // Do not expose local shell commands, serial device paths, or credentials.
+            let target = profile.network_port().map(|_| profile.subtitle());
+            entries.push(json!({"profile_id":id,"name":profile.name,"target":target,
+                "folder":profile.folder,"kind":profile.kind().title(),"port":profile.network_port()}));
         }
         entries
     }
 
-    fn agent_saved_profile(&self, id: &str) -> Option<&Profile> {
+    fn agent_profile_index(&self, id: &str) -> Option<usize> {
         let (index, fingerprint) = self.agent.saved.get(id)?;
         let profile = self.profiles.get(*index)?;
-        if profile.kind() != Kind::Ssh {
-            return None;
+        let bytes = zeroize::Zeroizing::new(serde_json::to_vec(profile).ok()?);
+        (blake3::hash(&bytes) == *fingerprint).then_some(*index)
+    }
+
+    fn agent_saved_profile(&self, id: &str) -> Option<&Profile> {
+        let profile = self.profiles.get(self.agent_profile_index(id)?)?;
+        (profile.kind() == Kind::Ssh).then_some(profile)
+    }
+
+    // Validate the exact discovered library before showing an approval and
+    // again at commit. A folder name may have been deleted and reused.
+    pub(super) fn agent_library_preview(
+        &self,
+        revision: &str,
+        change: &LibraryChange,
+    ) -> Result<String, String> {
+        change.validate().map_err(str::to_owned)?;
+        if self.locked
+            || !self
+                .agent
+                .library_revision
+                .as_ref()
+                .is_some_and(|(id, hash)| {
+                    id == revision && self.agent_library_hash() == Some(*hash)
+                })
+        {
+            return Err("Saved library changed; list sessions again".into());
         }
-        let bytes = serde_json::to_vec(profile).ok()?;
-        (blake3::hash(&bytes) == *fingerprint).then_some(profile)
+        // A pending human connection form can save a snapshot asynchronously.
+        // Avoid racing it, even if the connection is not yet authenticated.
+        if self.dialog.is_some()
+            || self.session_folder_ui.has_draft()
+            || !self.local_profiles.is_empty()
+            || self.terminals.iter().any(|term| term.starting())
+        {
+            return Err(
+                "Finish the pending dialog, folder editor, or connection before editing saved sessions".into(),
+            );
+        }
+        let profile = |id: &str| {
+            self.agent_profile_index(id)
+                .map(|i| &self.profiles[i])
+                .ok_or("Unknown or changed profile; list sessions again".to_owned())
+        };
+        let folder = |name: &str| {
+            if self.session_folders.contains(name) {
+                Ok(())
+            } else {
+                Err("Folder no longer exists".to_owned())
+            }
+        };
+        let available = |name: &str| {
+            if self.session_folders.contains(name) {
+                Err("Folder already exists".to_owned())
+            } else {
+                Ok(())
+            }
+        };
+        let label = |p: &Profile| {
+            if p.network_port().is_some() {
+                format!("{:?} ({} {})", p.name, p.kind().title(), p.subtitle())
+            } else {
+                format!("{:?} ({})", p.name, p.kind().title())
+            }
+        };
+        Ok(match change {
+            LibraryChange::CreateFolder { name } => {
+                available(name)?;
+                format!("Create folder {name:?}")
+            }
+            LibraryChange::RenameFolder { folder: old, name } => {
+                folder(old)?;
+                if old != name {
+                    available(name)?;
+                }
+                format!("Rename folder {old:?} to {name:?} (all members stay in the folder)")
+            }
+            LibraryChange::RemoveFolder { folder: old } => {
+                folder(old)?;
+                format!("Remove folder {old:?} and ungroup its sessions (no sessions deleted)")
+            }
+            LibraryChange::MoveSession {
+                profile_id,
+                folder: destination,
+            } => {
+                let p = profile(profile_id)?;
+                if let Some(name) = destination {
+                    folder(name)?;
+                }
+                format!("Move {} from {:?} to {:?}", label(p), p.folder, destination)
+            }
+            LibraryChange::RenameSession { profile_id, name } => {
+                format!("Rename {} to {name:?}", label(profile(profile_id)?))
+            }
+            LibraryChange::SetPort { profile_id, port } => {
+                let p = profile(profile_id)?;
+                let old = p.network_port().ok_or("Profile has no network port")?;
+                format!(
+                    "Change saved connection {} port from {old} to {port}. Existing tabs retain their connection settings.",
+                    label(p)
+                )
+            }
+        })
+    }
+
+    fn apply_agent_library_change(
+        &mut self,
+        revision: &str,
+        change: &LibraryChange,
+    ) -> Result<(), String> {
+        self.agent_library_preview(revision, change)?;
+        let index = |id: &str| {
+            self.agent_profile_index(id)
+                .ok_or("Profile changed".to_owned())
+        };
+        match change {
+            LibraryChange::CreateFolder { name } => self.save_session_folder(None, name.clone())?,
+            LibraryChange::RenameFolder { folder, name } => {
+                self.save_session_folder(Some(folder.clone()), name.clone())?
+            }
+            LibraryChange::RemoveFolder { folder } => self.remove_session_folder(folder)?,
+            LibraryChange::MoveSession { profile_id, folder } => {
+                self.move_saved_session_index(index(profile_id)?, folder.clone())?
+            }
+            LibraryChange::RenameSession { profile_id, name } => {
+                self.rename_saved_session(index(profile_id)?, name.clone())?
+            }
+            LibraryChange::SetPort { profile_id, port } => {
+                self.set_saved_session_port(index(profile_id)?, *port)?
+            }
+        }
+        self.agent.library_revision = None;
+        Ok(())
     }
 
     pub(super) fn poll_agent(&mut self, context: &egui::Context) {
@@ -411,6 +563,10 @@ impl App {
                     AgentAction::OpenSession { profile_id } => {
                         self.agent_saved_profile(profile_id).is_some()
                     }
+                    AgentAction::ManageLibrary {
+                        library_revision,
+                        change,
+                    } => self.agent_library_preview(library_revision, change).is_ok(),
                     AgentAction::ListSessions => false,
                 };
             if valid {
@@ -428,9 +584,9 @@ impl App {
             if let Some(id) = request.action.session_id() {
                 self.agent.upload_summaries.remove(&id);
             }
-            let _ = request.reply.send(agent::error(
-                "Permission request expired or SSH session closed",
-            ));
+            let _ = request
+                .reply
+                .send(agent::error("Permission request expired or target changed"));
         }
         for index in 0..16 {
             let next = self
@@ -467,7 +623,12 @@ impl App {
                                 .iter()
                                 .map(|(id, name)| json!({"session_id": id, "name": name}))
                                 .collect();
-                            let saved = self.agent_saved_sessions();
+                            let saved_profiles = self.agent_saved_sessions();
+                            let saved: Vec<_> = saved_profiles
+                                .iter()
+                                .filter(|p| p["kind"] == "SSH")
+                                .collect();
+                            let library_revision = self.agent_library_revision();
                             let background = !self.settings.on("ai_interactive");
                             let tabs: Vec<_> = self.terminals.iter().filter(|term| term.kind == Kind::Ssh).map(|term| {
                                 let state = self.ssh_connection_state(term);
@@ -486,8 +647,23 @@ impl App {
                             } else {
                                 "interactive_shell"
                             };
-                            let _ = request.reply.send(json!({"ok": true, "sessions": entries, "saved_sessions":saved,"tabs":tabs,"active_session_id":active,"execution_mode":execution_mode}));
+                            let _ = request.reply.send(json!({"ok": true, "sessions": entries, "saved_sessions":saved,"saved_profiles":saved_profiles,"session_folders":self.session_folders,"library_revision":library_revision,"tabs":tabs,"active_session_id":active,"execution_mode":execution_mode}));
                         }
+                        AgentAction::ManageLibrary {
+                            library_revision,
+                            change,
+                        } => match self.agent_library_preview(library_revision, change) {
+                            Err(error) => {
+                                let _ = request.reply.send(agent::error(error));
+                            }
+                            Ok(_) => {
+                                if mode == Mode::Unrestricted {
+                                    self.complete_agent_permission(request, true);
+                                } else {
+                                    self.agent.queue_approval(request, context);
+                                }
+                            }
+                        },
                         AgentAction::OpenSession { profile_id } => {
                             if self.agent_saved_profile(profile_id).is_none() {
                                 let _ = request.reply.send(agent::error(
@@ -860,6 +1036,51 @@ impl App {
             return;
         };
         let tunneled = self.agent.is_tunnel_request(request);
+        if let AgentAction::ManageLibrary {
+            library_revision,
+            change,
+        } = &request.action
+        {
+            let preview = self.agent_library_preview(library_revision, change);
+            let remaining = request
+                .deadline
+                .saturating_duration_since(Instant::now())
+                .as_secs();
+            let response = egui::Modal::new(egui::Id::new("agent-library-approval"))
+                .frame(frame)
+                .show(context, |ui| {
+                    ui.set_width(460.0);
+                    ui.heading("AI agent requests a saved-session change");
+                    if tunneled {
+                        ui.label("Requested through OpenAI Secure MCP Tunnel.");
+                    }
+                    let valid = preview.is_ok();
+                    let message = preview.unwrap_or_else(|error| error);
+                    ui.label(literal_text(message.as_bytes()));
+                    ui.label(format!("Request expires in {remaining}s"));
+                    ui.horizontal(|ui| {
+                        if ui.button("Deny").clicked() {
+                            return Some(false);
+                        }
+                        if ui
+                            .add_enabled(valid, egui::Button::new("Apply change"))
+                            .clicked()
+                        {
+                            return Some(true);
+                        }
+                        None
+                    })
+                    .inner
+                });
+            if let Some(allow) = response
+                .inner
+                .or_else(|| response.should_close().then_some(false))
+            {
+                self.resolve_agent_permission(allow);
+                self.focus_terminal_after_dialog();
+            }
+            return;
+        }
         if let AgentAction::OpenSession { profile_id } = &request.action {
             let name = self
                 .agent_saved_profile(profile_id)
@@ -1023,6 +1244,32 @@ impl App {
     }
 
     fn complete_agent_permission(&mut self, request: Request, allow: bool) {
+        if let AgentAction::ManageLibrary {
+            library_revision,
+            change,
+        } = &request.action
+        {
+            if allow
+                && !self.locked
+                && self.agent.active()
+                && self.agent_mode() != Mode::Disabled
+                && request.authorized()
+                && request.deadline > Instant::now()
+            {
+                request.reply.commit(&request.active, || {
+                    match self.apply_agent_library_change(library_revision, change) {
+                        Ok(()) => json!({"ok":true,"rediscover":true}),
+                        Err(error) => agent::error(error),
+                    }
+                });
+            } else {
+                let _ = request
+                    .reply
+                    .send(agent::error("User denied library change or access expired"));
+            }
+            return;
+        }
+
         if matches!(&request.action, AgentAction::Upload { .. }) {
             if allow {
                 self.dispatch_agent_upload(request);
