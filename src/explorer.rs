@@ -27,6 +27,7 @@ pub(crate) struct Explorer {
     split_fraction: f32,
     pub(crate) folder_draft: Option<FolderDraft>,
     folder_serial: u64,
+    path_editor_peer: Option<u32>,
 }
 
 struct Listing<T> {
@@ -155,6 +156,7 @@ impl Explorer {
             split_fraction: 0.5,
             folder_draft: None,
             folder_serial: 0,
+            path_editor_peer: None,
         };
         explorer.load_local(storage::home_dir());
         explorer
@@ -185,6 +187,16 @@ impl Explorer {
             .is_some_and(|draft| draft.remote() == remote)
         {
             self.folder_draft = None;
+        }
+    }
+
+    pub(crate) fn prune_editor_state(&mut self, context: &egui::Context) {
+        if self.folder_draft.is_none() {
+            reset_editor(context, folder_editor_id());
+        }
+        if self.path_editor_peer != self.remote_id {
+            reset_editor(context, path_editor_id(true));
+            self.path_editor_peer = self.remote_id;
         }
     }
 
@@ -249,6 +261,7 @@ pub(crate) struct FolderDraft {
     pub(crate) name: String,
     serial: u64,
     focus: bool,
+    reset_editor: bool,
     pub(crate) pending: bool,
     pub(crate) error: Option<String>,
 }
@@ -259,8 +272,23 @@ impl FolderDraft {
     }
 
     fn editor_id(&self) -> egui::Id {
-        egui::Id::new(("inline-folder-name", self.serial))
+        // Serial identifies the backend operation, not the widget. Unique
+        // widget IDs otherwise leave persistent TextEditState and undo buffers.
+        folder_editor_id()
     }
+}
+
+fn folder_editor_id() -> egui::Id {
+    egui::Id::new("inline-folder-name")
+}
+
+fn path_editor_id(remote: bool) -> egui::Id {
+    egui::Id::new(("explorer-path", remote))
+}
+
+fn reset_editor(context: &egui::Context, id: egui::Id) {
+    context.memory_mut(|memory| memory.surrender_focus(id));
+    context.data_mut(|data| data.remove::<egui::text_edit::TextEditState>(id));
 }
 
 enum FolderEdit {
@@ -497,6 +525,7 @@ impl App {
             name: String::new(),
             serial: self.explorer.folder_serial,
             focus: true,
+            reset_editor: true,
             pending: false,
             error: None,
         });
@@ -1278,13 +1307,10 @@ impl App {
         let body = rect
             .with_min_x(rect.left() + 8.0)
             .with_max_x((rect.right() - 25.0).max(rect.left() + 9.0));
-        // Each listing has a stable editor identity. Switching connections
-        // cannot leave a draft from the previous remote host in the field.
-        let id = ui.make_persistent_id((
-            "explorer-path",
-            remote,
-            remote.then_some(self.explorer.remote_id),
-        ));
+        // One editor per side, independent of session and layout. Reset the
+        // remote state (including undo) when switching hosts.
+        self.explorer.prune_editor_state(ui.ctx());
+        let id = path_editor_id(remote);
         let input = if remote {
             &mut self.explorer.remote.path_input
         } else {
@@ -2109,6 +2135,9 @@ fn inline_folder_row(
         return FolderEdit::None;
     }
     let id = draft.editor_id();
+    if std::mem::take(&mut draft.reset_editor) {
+        reset_editor(ui.ctx(), id);
+    }
     let initial = std::mem::take(&mut draft.focus);
     if initial {
         ui.memory_mut(|memory| memory.request_focus(id));

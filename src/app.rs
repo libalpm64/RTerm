@@ -317,6 +317,7 @@ impl App {
 
     fn poll(&mut self, context: &egui::Context) {
         self.updater.poll();
+        self.explorer.prune_editor_state(context);
         let mut completed = Vec::new();
         let mut startup_error = None;
         for terminal in self

@@ -621,7 +621,10 @@ fn remote_connection_status_does_not_enter_terminal_grid() {
     // EventFilter. Exercise the actual eframe raw hook, not just a steady
     // terminal widget, and check bytes at the other end of the socket.
     let focus = context.memory(|m| m.focused()).expect("terminal focused");
-    assert_eq!(context.data(|data| data.get_temp::<u64>(focus)), app.active);
+    assert_eq!(
+        context.data(|data| data.get_temp::<(egui::Id, u64)>(crate::terminal::terminal_focus_id())),
+        app.active.map(|tab| (focus, tab))
+    );
     let key = |key, repeat| egui::Event::Key {
         key,
         physical_key: Some(key),
@@ -1093,3 +1096,7 @@ fn bottom_shell_keeps_its_session_and_restores_focus() {
     assert!(!app.bottom_focus && !app.bottom_request_focus);
     assert_eq!(app.selected().unwrap().tab, 1);
 }
+
+#[cfg(target_os = "linux")]
+#[path = "native_idle.rs"]
+mod native_idle;

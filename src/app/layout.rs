@@ -1353,9 +1353,12 @@ impl App {
         {
             return;
         }
-        let tab = context
-            .memory(|memory| memory.focused())
-            .and_then(|id| context.data(|data| data.get_temp::<u64>(id)));
+        let tab = context.memory(|memory| memory.focused()).and_then(|id| {
+            context
+                .data(|data| data.get_temp::<(egui::Id, u64)>(crate::terminal::terminal_focus_id()))
+                .filter(|(owner, _)| *owner == id)
+                .map(|(_, tab)| tab)
+        });
         let valid = tab.is_some_and(|tab| {
             (!self.show_keys && !self.bottom_focus && self.active == Some(tab))
                 || (self.bottom_open

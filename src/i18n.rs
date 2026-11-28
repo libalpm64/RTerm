@@ -201,9 +201,72 @@ pub(crate) fn choice_label<'a>(ui: &mut egui::Ui, code: &str, native: &'a str) -
     }
 }
 
-/// Load an installed script font; do not redistribute OS fonts or fetch fonts
-/// from the network. The bundled Latin fonts retain first priority.
+/// Installed collections have process lifetime, but each file is owned only
+/// once. Each regional face borrows the same immutable bytes with its own
+/// face index. egui can parse borrowed bytes directly instead of cloning a
+/// whole collection into an owned FontVec for every face.
+#[derive(Default)]
+struct SystemFonts {
+    collections: BTreeMap<std::path::PathBuf, Box<[u8]>>,
+    faces: BTreeMap<&'static str, (std::path::PathBuf, u32)>,
+}
+
+impl SystemFonts {
+    fn load() -> Self {
+        let mut fonts = Self::default();
+        for &code in SCRIPT_LOCALES {
+            for (path, index) in system_font_candidates(code).unwrap_or_default() {
+                let Some(path) = fonts.load_collection(&path) else {
+                    continue;
+                };
+                let bytes = &fonts.collections[&path];
+                // egui panics on malformed fonts. Validate before registering.
+                let Ok(face) = ab_glyph::FontRef::try_from_slice_and_index(bytes, index) else {
+                    continue;
+                };
+                #[cfg(target_os = "linux")]
+                if !linux_font_has_script(&face, code) {
+                    continue;
+                }
+                #[cfg(not(target_os = "linux"))]
+                let _ = face;
+                fonts.faces.insert(code, (path, index));
+                break;
+            }
+        }
+        // Discard rejected candidate files; only accepted faces need backing.
+        fonts
+            .collections
+            .retain(|path, _| fonts.faces.values().any(|(used, _)| used == path));
+        fonts
+    }
+
+    fn load_collection(&mut self, path: &std::path::Path) -> Option<std::path::PathBuf> {
+        let path = path.canonicalize().ok()?;
+        if !self.collections.contains_key(&path) {
+            let bytes = std::fs::read(&path).ok()?.into_boxed_slice();
+            self.collections.insert(path.clone(), bytes);
+        }
+        Some(path)
+    }
+
+    fn font(&'static self, code: &str) -> Option<egui::FontData> {
+        let (path, index) = self.faces.get(code)?;
+        let mut font = egui::FontData::from_static(self.collections.get(path)?.as_ref());
+        font.index = *index;
+        Some(font)
+    }
+}
+
+static SYSTEM_FONTS: LazyLock<SystemFonts> = LazyLock::new(SystemFonts::load);
+
+/// Borrow an installed script font. No network, font redistribution, unsafe
+/// lifetime extension, or per-context allocation of the collection bytes.
 pub(crate) fn system_font(code: &str) -> Option<egui::FontData> {
+    SYSTEM_FONTS.font(code)
+}
+
+fn system_font_candidates(code: &str) -> Option<Vec<(std::path::PathBuf, u32)>> {
     use std::path::PathBuf;
     let mut candidates: Vec<(PathBuf, u32)> = Vec::new();
     #[cfg(windows)]
@@ -257,20 +320,7 @@ pub(crate) fn system_font(code: &str) -> Option<egui::FontData> {
             ));
         }
     }
-    candidates.into_iter().find_map(|(path, index)| {
-        let bytes = std::fs::read(path).ok()?;
-        // egui panics on malformed fonts. Validate with its own parser first.
-        let face = ab_glyph::FontRef::try_from_slice_and_index(&bytes, index).ok()?;
-        #[cfg(target_os = "linux")]
-        if !linux_font_has_script(&face, code) {
-            return None;
-        }
-        #[cfg(not(target_os = "linux"))]
-        let _ = face;
-        let mut font = egui::FontData::from_owned(bytes);
-        font.index = index;
-        Some(font)
-    })
+    Some(candidates)
 }
 
 #[cfg(target_os = "linux")]

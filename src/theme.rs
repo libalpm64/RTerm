@@ -159,7 +159,8 @@ pub(crate) fn install_fonts(context: &egui::Context) {
     let locale = crate::i18n::current(context);
     // Load every installed CJK script, irrespective of the UI language:
     // the language picker and terminal input/output both need those glyphs.
-    // Prefer the selected locale's glyph forms when fonts overlap.
+    // Prefer the selected locale's glyph forms when fonts overlap. All faces
+    // borrow the deduplicated process-lifetime font collections from i18n.
     static SCRIPT_FONTS: std::sync::LazyLock<Vec<(&'static str, std::sync::Arc<egui::FontData>)>> =
         std::sync::LazyLock::new(|| {
             crate::i18n::SCRIPT_LOCALES

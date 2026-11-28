@@ -183,3 +183,91 @@ fn script_fonts_or_readable_english_fallback() {
         println!("{code}: active language {active}");
     }
 }
+
+#[test]
+fn script_font_collections_are_borrowed_and_shared_across_faces() {
+    use std::borrow::Cow;
+    let mut distinct = BTreeMap::new();
+    for (&code, (path, index)) in &SYSTEM_FONTS.faces {
+        let font = system_font(code).expect("accepted face");
+        assert_eq!(font.index, *index);
+        let Cow::Borrowed(bytes) = font.font else {
+            panic!("system fonts must not make egui clone their backing data");
+        };
+        assert!(ab_glyph::FontRef::try_from_slice_and_index(bytes, *index).is_ok());
+        let again = system_font(code).unwrap();
+        assert_eq!(bytes.as_ptr(), again.font.as_ptr());
+        assert_eq!(bytes.as_ptr(), SYSTEM_FONTS.collections[path].as_ptr());
+        if let Some(previous) = distinct.insert(path, bytes.as_ptr()) {
+            assert_eq!(
+                previous,
+                bytes.as_ptr(),
+                "faces in the same file must share bytes"
+            );
+        }
+    }
+    assert_eq!(distinct.len(), SYSTEM_FONTS.collections.len());
+    assert!(distinct.len() <= SCRIPT_LOCALES.len());
+    assert!(system_font("unknown-script").is_none());
+}
+
+#[test]
+fn collection_loader_reuses_canonical_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("fixture.ttf");
+    std::fs::write(&file, include_bytes!("../../assets/inter.ttf")).unwrap();
+    let mut fonts = SystemFonts::default();
+    let first = fonts.load_collection(&file).unwrap();
+    let pointer = fonts.collections[&first].as_ptr();
+    let alias = directory.path().join(".").join("fixture.ttf");
+    let second = fonts.load_collection(&alias).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(fonts.collections.len(), 1);
+    assert_eq!(fonts.collections[&second].as_ptr(), pointer);
+    assert!(
+        fonts
+            .load_collection(&directory.path().join("missing.ttf"))
+            .is_none()
+    );
+    #[cfg(unix)]
+    {
+        let link = directory.path().join("alias.ttf");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert_eq!(fonts.load_collection(&link).unwrap(), first);
+        assert_eq!(fonts.collections.len(), 1);
+    }
+}
+
+#[test]
+fn repeated_locale_switches_keep_shared_font_backing_and_glyph_coverage() {
+    let ctx = egui::Context::default();
+    for code in ["en", "ja", "ko", "zh-TW", "zh-CN", "en"]
+        .into_iter()
+        .cycle()
+        .take(24)
+    {
+        set(&ctx, code);
+        crate::theme::install_fonts(&ctx);
+        let _ = ctx.run(Default::default(), |ctx| {
+            ctx.fonts_mut(|fonts| {
+                let definitions = fonts.definitions();
+                let family = &definitions.families[&egui::FontFamily::Monospace];
+                if let Some(expected) = system_font(code) {
+                    let first = family
+                        .iter()
+                        .find(|name| name.starts_with("System script "))
+                        .unwrap();
+                    assert_eq!(first, &format!("System script {code}"));
+                    let face = &definitions.font_data[first];
+                    assert_eq!(face.index, expected.index);
+                    assert_eq!(face.font.as_ptr(), expected.font.as_ptr());
+                }
+                for &(lang, label) in CHOICES {
+                    if SCRIPT_LOCALES.contains(&lang) && system_font(lang).is_some() {
+                        assert!(fonts.has_glyphs(&egui::FontId::monospace(12.0), label));
+                    }
+                }
+            });
+        });
+    }
+}

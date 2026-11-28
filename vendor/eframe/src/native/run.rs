@@ -185,8 +185,6 @@ impl<T: WinitApp> WinitAppWrapper<T> {
                     return true; // not yet ready
                 }
 
-                event_loop.set_control_flow(ControlFlow::Poll);
-
                 if let Some(window) = self.winit_app.window(*window_id) {
                     log::trace!("request_redraw for {window_id:?}");
                     window.request_redraw();
@@ -292,27 +290,21 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop_context::with_event_loop_context(event_loop, || {
-            let previous = self.background_wake;
             self.background_wake = self.winit_app.native_background_update();
-            if let Some(background) = self.background_wake {
-                // A native timer is independent of the compositor's frame
-                // callback. Do not spin waiting for a suppressed redraw.
-                let next = self
-                    .windows_next_repaint_times
-                    .values()
-                    .copied()
-                    .min()
-                    .map_or(background, |paint| paint.min(background));
-                event_loop.set_control_flow(ControlFlow::WaitUntil(next));
-            } else if matches!(event_loop.control_flow(), ControlFlow::WaitUntil(at)
-                if Some(at) == previous)
-            {
-                if let Some(next) = self.windows_next_repaint_times.values().min() {
-                    event_loop.set_control_flow(ControlFlow::WaitUntil(*next));
-                } else {
-                    event_loop.set_control_flow(ControlFlow::Wait);
-                }
-            }
+            // request_redraw queues a native event and wakes winit. On Wayland,
+            // a compositor may withhold the pending frame callback indefinitely.
+            // Polling until it arrives burns a CPU core without rendering.
+            // Wait for native events or the earliest real timer instead.
+            self.check_redraw_requests(event_loop);
+            let next = self
+                .windows_next_repaint_times
+                .values()
+                .copied()
+                .min()
+                .into_iter()
+                .chain(self.background_wake)
+                .min();
+            event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
         });
     }
 

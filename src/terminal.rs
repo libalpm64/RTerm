@@ -207,6 +207,10 @@ impl EventListener for TerminalEvents {
     }
 }
 
+pub(crate) fn terminal_focus_id() -> egui::Id {
+    egui::Id::new("rterm-terminal-keyboard-owner")
+}
+
 pub(crate) struct Terminal {
     pub(crate) tab: u64,
     pub(crate) name: String,
@@ -892,7 +896,8 @@ impl Terminal {
         if focused {
             // The eframe raw-input hook uses this marker to keep terminal
             // navigation out of egui's begin-pass focus traversal.
-            ui.ctx().data_mut(|data| data.insert_temp(id, self.tab));
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(terminal_focus_id(), (id, self.tab)));
             if response.gained_focus() {
                 ui.ctx().request_repaint();
             }

@@ -10,6 +10,8 @@ use std::{
 };
 
 const MAX_DIRECTORY_ENTRIES: usize = 100_000;
+const MAX_ACTIVE_TRANSFERS: usize = 8;
+const MAX_OUTSTANDING_TRANSFERS: usize = 256;
 const MAX_ENTRY_NAME_BYTES: usize = 4096;
 
 use russh::client::Handle;
@@ -80,6 +82,7 @@ pub(crate) struct DownloadOptions {
 pub(super) struct Service {
     sessions: HashMap<u32, SessionWorker>,
     transfer_slots: Arc<Semaphore>,
+    outstanding_transfers: Arc<Semaphore>,
 }
 
 struct SessionWorker {
@@ -96,13 +99,15 @@ impl Drop for SessionWorker {
 struct SessionService {
     session: Option<Arc<SftpSession>>,
     transfer_slots: Arc<Semaphore>,
+    outstanding_transfers: Arc<Semaphore>,
 }
 
 impl Default for Service {
     fn default() -> Self {
         Self {
             sessions: HashMap::new(),
-            transfer_slots: Arc::new(Semaphore::new(8)),
+            transfer_slots: Arc::new(Semaphore::new(MAX_ACTIVE_TRANSFERS)),
+            outstanding_transfers: Arc::new(Semaphore::new(MAX_OUTSTANDING_TRANSFERS)),
         }
     }
 }
@@ -131,6 +136,7 @@ impl Service {
             let mut service = SessionService {
                 session: None,
                 transfer_slots: self.transfer_slots.clone(),
+                outstanding_transfers: self.outstanding_transfers.clone(),
             };
             let task = tokio::spawn(async move {
                 while let Some((action, reply)) = receiver.recv().await {
@@ -256,7 +262,7 @@ impl SessionService {
                     } else {
                         TransferOutcome::Skipped
                     })
-                });
+                })?;
                 Ok(Reply::Done)
             }
             RemoteAction::UploadTree {
@@ -274,7 +280,7 @@ impl SessionService {
                     } else {
                         TransferOutcome::Skipped
                     })
-                });
+                })?;
                 Ok(Reply::Done)
             }
             RemoteAction::Download {
@@ -297,7 +303,7 @@ impl SessionService {
                     } else {
                         TransferOutcome::Skipped
                     })
-                });
+                })?;
                 Ok(Reply::Done)
             }
         }
@@ -309,10 +315,13 @@ impl SessionService {
         id: String,
         name: String,
         task: impl Future<Output = Result<TransferOutcome, String>> + Send + 'static,
-    ) {
+    ) -> Result<(), String> {
+        let admission = self.outstanding_transfers.clone().try_acquire_owned()
+            .map_err(|_| format!("SFTP transfer queue is full ({MAX_OUTSTANDING_TRANSFERS} active or queued). Try again after transfers finish."))?;
         let slots = self.transfer_slots.clone();
         let events = events.clone();
         tokio::spawn(async move {
+            let _admission = admission;
             progress(&events, &id, format!("Queued {name}"), 0.0, false, false).await;
             let Ok(_slot) = slots.acquire_owned().await else {
                 return;
@@ -351,6 +360,7 @@ impl SessionService {
                 }
             }
         });
+        Ok(())
     }
 }
 
@@ -1390,3 +1400,7 @@ mod listing_tests;
 #[cfg(test)]
 #[path = "../../tests/unit/backend/sftp_agent_upload_source_tests.rs"]
 mod agent_upload_source_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/backend/sftp_transfer_queue.rs"]
+mod transfer_queue_tests;

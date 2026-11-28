@@ -720,3 +720,50 @@ fn inline_folder_validation_keeps_editor_and_navigation_discards_draft() {
     assert!(app.explorer.folder_draft.is_none());
     assert_eq!(std::fs::read_dir(dir.join("existing")).unwrap().count(), 0);
 }
+
+#[test]
+fn folder_and_remote_path_editor_state_stays_bounded_across_churn() {
+    let context = egui::Context::default();
+    let mut app = App::test_fixture(&context);
+    app.explorer
+        .local
+        .replace(PathBuf::from("/fixture/local"), vec![]);
+    app.explorer.expanded = true;
+    let render = |app: &mut App, events| {
+        context.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 600.0))),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| app.explorer_workspace(ui, ui.max_rect()));
+            },
+        )
+    };
+    for i in 1..=1000 {
+        app.explorer
+            .accept_initial_listing(i, format!("/fixture/remote-{i}"), vec![]);
+        app.new_local_folder();
+        let _ = render(&mut app, vec![]);
+        let _ = render(&mut app, vec![egui::Event::Text(format!("Folder {i}"))]);
+        assert_eq!(
+            app.explorer.folder_draft.as_ref().unwrap().name,
+            format!("Folder {i}")
+        );
+        app.explorer.folder_draft = None;
+        app.explorer.prune_editor_state(&context);
+        assert!(egui::text_edit::TextEditState::load(&context, folder_editor_id()).is_none());
+        assert!(context.data(|data| data.count::<egui::text_edit::TextEditState>()) <= 2);
+    }
+    // Switching hosts must clear a focused path editor, including its undo history.
+    context.memory_mut(|memory| memory.request_focus(path_editor_id(true)));
+    app.explorer.remote.path_input = "/stale/path".into();
+    app.explorer
+        .accept_initial_listing(1001, "/fixture/new-host".into(), vec![]);
+    let _ = render(&mut app, vec![]);
+    assert_eq!(app.explorer.remote.path_input, "/fixture/new-host");
+    assert!(!context.memory(|memory| memory.has_focus(path_editor_id(true))));
+}

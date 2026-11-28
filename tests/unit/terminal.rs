@@ -563,3 +563,50 @@ fn prompt_cursor_survives_resolution_round_trip() {
         }
     }
 }
+
+#[test]
+fn terminal_focus_marker_does_not_accumulate_with_tab_churn() {
+    let context = egui::Context::default();
+    let (backend, _) = Backend::new(&context);
+    let options = TerminalOptions {
+        font: 13.0,
+        cursor: CursorStyle::default(),
+        scrollback: 100,
+        copy_on_select: false,
+        line_numbers: false,
+        free_type: false,
+    };
+    let highlighter = Highlighter::new(false, "");
+    for tab in 1..=500 {
+        let mut terminal = Terminal::new(tab, "Fixture".into(), Kind::Ssh, &options);
+        terminal.closed = true; // No network or local PTY.
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 240.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let rect = ui.max_rect();
+                    terminal.show(
+                        ui,
+                        rect,
+                        &backend,
+                        &options,
+                        &highlighter,
+                        true,
+                        true,
+                        true,
+                        None,
+                        None,
+                    );
+                    let marker =
+                        ctx.data(|data| data.get_temp::<(egui::Id, u64)>(terminal_focus_id()));
+                    assert_eq!(marker.map(|(_, tab)| tab), Some(tab));
+                });
+            },
+        );
+        assert_eq!(context.data(|data| data.count::<(egui::Id, u64)>()), 1);
+        assert_eq!(context.data(|data| data.count::<u64>()), 0);
+    }
+}
